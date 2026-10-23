@@ -1,0 +1,545 @@
+// The command server: the full control surface mapped onto a real engine,
+// media library and display set. This is the integration test for the
+// protocol layer - it exercises every one of the 20 commands.
+
+#include <atomic>
+#include <chrono>
+#include <filesystem>
+#include <fstream>
+#include <string>
+
+#include <doctest/doctest.h>
+
+#include "mediamax/protocol/CommandServer.h"
+#include "mediamax/protocol/Protocol.h"
+#include "mediamax/util/File.h"
+
+#include "TestFixtures.h"
+
+using namespace mediamax;
+using namespace mediamax::protocol;
+using mediamax::test::kMediaA;
+using mediamax::test::kMediaB;
+
+namespace
+{
+
+// One complete system: media library (patterns loaded as ids 1 and 2),
+// two displays, a playback engine running the fixture show.
+struct Fixture
+{
+    MediaLibrary media = mediamax::test::makeMediaLibrary();
+    DisplayManager displays;
+    PlaybackEngine engine;
+    CommandServer server;
+    Id displayA = kInvalidId;
+    Id displayB = kInvalidId;
+
+    Fixture()
+        : engine(media)
+        , server(engine, media, displays, "test-system")
+    {
+        displayA = displays.addDisplay("main", 0, 0, 1920, 1080).id;
+        displayB = displays.addDisplay("side", 1920, 0, 1920, 1080).id;
+        engine.loadShow(mediamax::test::makeTestShow());
+        mediamax::test::loadShowMedia(media, mediamax::test::makeTestShow());
+        server.setMediaLoadFunction([this](const std::string& path, std::string& error) {
+            return media.load(path, error);
+        });
+    }
+
+    Response run(const std::string& method, nlohmann::json params = nlohmann::json::object())
+    {
+        Command cmd;
+        cmd.id = 1;
+        cmd.method = method;
+        cmd.params = std::move(params);
+        return server.handle(cmd);
+    }
+};
+
+// Writes `contents` to a unique temp file and returns its path.
+std::filesystem::path tempFile(const std::string& stem, const std::string& contents)
+{
+    static std::atomic<std::uint64_t> counter{0};
+    const auto ns =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count();
+    const auto dir = std::filesystem::temp_directory_path() / "mediamax-tests";
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    const auto path = dir / (stem + "-" + std::to_string(ns) + "-" +
+                             std::to_string(counter.fetch_add(1)) + ".json");
+    writeFile(path, contents);
+    return path;
+}
+
+std::string readTempFile(const std::filesystem::path& path)
+{
+    std::ifstream in(path);
+    std::string contents((std::istreambuf_iterator<char>(in)),
+                         std::istreambuf_iterator<char>());
+    return contents;
+}
+
+} // namespace
+
+TEST_SUITE("CommandServer")
+{
+
+TEST_CASE("ping reports the system")
+{
+    Fixture f;
+    const Response resp = f.run("ping");
+    REQUIRE(resp.ok);
+    CHECK(resp.result.at("server").get<std::string>() == "mediamax");
+    CHECK(resp.result.at("system").get<std::string>() == "test-system");
+    CHECK(resp.result.at("protocolVersion").get<int>() == kProtocolVersion);
+}
+
+TEST_CASE("status reflects the full system state")
+{
+    Fixture f;
+    const Response resp = f.run("status");
+    REQUIRE(resp.ok);
+
+    CHECK(resp.result.at("system").get<std::string>() == "test-system");
+    CHECK(resp.result.at("state").get<std::string>() == "stopped");
+    CHECK(resp.result.at("time").get<double>() == doctest::Approx(0.0));
+    CHECK(resp.result.at("timecode").get<std::string>() == "00:00:00:00");
+    CHECK(resp.result.at("duration").get<double>() == doctest::Approx(7.0));
+    CHECK(resp.result.at("frameRate").get<std::string>() == "30");
+    CHECK(resp.result.at("scene").get<std::uint64_t>() == 1);
+
+    CHECK(resp.result.at("scenes").size() == 2);
+    CHECK(resp.result.at("media").size() == 2);
+    CHECK(resp.result.at("displays").size() == 2);
+    // Scene 1 has two visible layers at t=0 (bg + videoA).
+    CHECK(resp.result.at("layers").get<std::uint64_t>() == 2);
+
+    const auto& d0 = resp.result.at("displays")[0];
+    CHECK(d0.at("name").get<std::string>() == "main");
+    CHECK(d0.at("width").get<std::uint32_t>() == 1920);
+}
+
+TEST_CASE("unknown method fails with a descriptive error")
+{
+    Fixture f;
+    const Response resp = f.run("bogus.command");
+    CHECK_FALSE(resp.ok);
+    CHECK(resp.error.find("unknown method") != std::string::npos);
+    CHECK(resp.id == 1);
+}
+
+TEST_CASE("missing parameters fail with the parameter name")
+{
+    Fixture f;
+    CHECK_FALSE(f.run("playback.seek").ok);
+    CHECK(f.run("playback.seek").error.find("time") != std::string::npos);
+    CHECK_FALSE(f.run("media.load").ok);
+    CHECK(f.run("media.load").error.find("path") != std::string::npos);
+    CHECK_FALSE(f.run("scene.set").ok);
+    CHECK(f.run("scene.set").error.find("index") != std::string::npos);
+}
+
+TEST_CASE("system.set renames the system")
+{
+    Fixture f;
+    const Response resp = f.run("system.set", {{"name", "lobby"}});
+    REQUIRE(resp.ok);
+    CHECK(resp.result.at("system").get<std::string>() == "lobby");
+
+    CHECK(f.run("status").result.at("system").get<std::string>() == "lobby");
+    CHECK(f.run("ping").result.at("system").get<std::string>() == "lobby");
+}
+
+TEST_CASE("playback transport commands")
+{
+    Fixture f;
+    CHECK(f.run("playback.play").result.at("state").get<std::string>() == "playing");
+    CHECK(f.run("playback.pause").result.at("state").get<std::string>() == "paused");
+
+    // Resume + seek from a string time.
+    const Response play = f.run("playback.play", {{"at", "3.5"}});
+    REQUIRE(play.ok);
+    CHECK(play.result.at("state").get<std::string>() == "playing");
+    CHECK(f.run("status").result.at("time").get<double>() == doctest::Approx(3.5));
+
+    CHECK_FALSE(f.run("playback.play", {{"at", "not-a-time"}}).ok);
+
+    CHECK(f.run("playback.stop").result.at("state").get<std::string>() == "stopped");
+    CHECK(f.run("status").result.at("time").get<double>() == doctest::Approx(0.0));
+}
+
+TEST_CASE("playback.seek clamps to the show duration")
+{
+    Fixture f;
+    CHECK(f.run("playback.seek", {{"time", 100.0}})
+              .result.at("time").get<double>() == doctest::Approx(7.0));
+    CHECK(f.run("playback.seek", {{"time", -5.0}})
+              .result.at("time").get<double>() == doctest::Approx(0.0));
+    CHECK(f.run("playback.seek", {{"time", 2.5}})
+              .result.at("time").get<double>() == doctest::Approx(2.5));
+}
+
+TEST_CASE("scene.set switches the live scene")
+{
+    Fixture f;
+    const Response resp = f.run("scene.set", {{"index", 1}});
+    REQUIRE(resp.ok);
+    CHECK(resp.result.at("scene").get<std::uint64_t>() == 2);
+    CHECK(resp.result.at("name").get<std::string>() == "B");
+
+    // The override wins over the timeline: scene 2 even at t=0.
+    CHECK(f.run("status").result.at("scene").get<std::uint64_t>() == 2);
+    CHECK(f.run("status").result.at("layers").get<std::uint64_t>() == 1);
+
+    // Out of range.
+    CHECK_FALSE(f.run("scene.set", {{"index", 5}}).ok);
+    CHECK(f.run("scene.set", {{"index", 5}}).error.find("out of range") != std::string::npos);
+    CHECK_FALSE(f.run("scene.set", {{"index", -1}}).ok);
+}
+
+TEST_CASE("scene.list marks the active scene")
+{
+    Fixture f;
+    const Response resp = f.run("scene.list");
+    REQUIRE(resp.ok);
+    const auto& scenes = resp.result.at("scenes");
+    CHECK(scenes.size() == 2);
+    CHECK(scenes[0].at("active").get<bool>());   // cue at t=0 plays scene 1
+    CHECK_FALSE(scenes[1].at("active").get<bool>());
+
+    f.run("playback.seek", {{"time", 2.5}});
+    const Response resp2 = f.run("scene.list");
+    REQUIRE(resp2.ok);
+    const auto& scenes2 = resp2.result.at("scenes");
+    CHECK_FALSE(scenes2[0].at("active").get<bool>());
+    CHECK(scenes2[1].at("active").get<bool>());
+}
+
+TEST_CASE("layer.set applies manual overrides")
+{
+    Fixture f;
+    REQUIRE(f.run("layer.set", {{"layer", 11}, {"opacity", 0.25}}).ok);
+    FrameState state = f.engine.frameState();
+    REQUIRE(state.layers.size() == 2);
+    const LayerFrame* layer = nullptr;
+    for (const auto& lf : state.layers)
+    {
+        if (lf.layerId == 11)
+        {
+            layer = &lf;
+        }
+    }
+    REQUIRE(layer);
+    CHECK(layer->opacity == doctest::Approx(0.25f));
+
+    REQUIRE(f.run("layer.set", {{"layer", 11}, {"blend", "add"}}).ok);
+    CHECK(f.engine.frameState().layers[0].blend == BlendMode::Add);
+
+    REQUIRE(f.run("layer.set", {{"layer", 11}, {"x", 0.25}, {"y", -0.5}}).ok);
+    for (const auto& lf : f.engine.frameState().layers)
+    {
+        if (lf.layerId == 11)
+        {
+            CHECK(lf.x == doctest::Approx(0.25f));
+            CHECK(lf.y == doctest::Approx(-0.5f));
+        }
+    }
+
+    // Hiding a layer removes it from the resolved frame.
+    REQUIRE(f.run("layer.set", {{"layer", 11}, {"visible", false}}).ok);
+    CHECK(f.engine.frameState().layers.size() == 1);
+}
+
+TEST_CASE("layer.clear removes manual overrides")
+{
+    Fixture f;
+    // Set two overrides, on a visible layer and on layer 10.
+    REQUIRE(f.run("layer.set", {{"layer", 11}, {"opacity", 0.25}}).ok);
+    REQUIRE(f.run("layer.set", {{"layer", 10}, {"visible", false}}).ok);
+    CHECK(f.engine.frameState().layers.size() == 1); // layer 10 hidden
+
+    // Clearing one layer restores just that layer.
+    const Response one = f.run("layer.clear", {{"layer", 10}});
+    REQUIRE(one.ok);
+    CHECK(one.result.at("layer").get<std::uint64_t>() == 10);
+    CHECK(f.engine.frameState().layers.size() == 2); // layer 10 back
+    // The other override is still in place.
+    CHECK(f.engine.frameState().layers[0].opacity == doctest::Approx(0.25f));
+
+    // Clearing a layer with no override is a clean error.
+    CHECK_FALSE(f.run("layer.clear", {{"layer", 20}}).ok);
+    CHECK(f.run("layer.clear", {{"layer", 20}}).error.find("no override") != std::string::npos);
+
+    // Clearing with no params wipes everything.
+    const Response all = f.run("layer.clear");
+    REQUIRE(all.ok);
+    CHECK(all.result.at("cleared").get<int>() == 1); // only layer 11's remains
+    CHECK(f.engine.frameState().layers[0].opacity == doctest::Approx(1.0f));
+}
+
+TEST_CASE("layer.set rejects layer ids that are not in the show")
+{
+    Fixture f;
+    // Layer 99 is not in any scene of the fixture show.
+    const Response bad = f.run("layer.set", {{"layer", 99}, {"opacity", 0.5}});
+    CHECK_FALSE(bad.ok);
+    CHECK(bad.error.find("no layer with id 99") != std::string::npos);
+    // And nothing was stored: clearing it finds no override.
+    CHECK_FALSE(f.run("layer.clear", {{"layer", 99}}).ok);
+
+    // Layers of inactive scenes are valid ids.
+    CHECK(f.run("layer.set", {{"layer", 20}, {"opacity", 0.5}}).ok);
+    f.run("layer.clear"); // leave the fixture clean
+}
+
+TEST_CASE("media.load registers an asset with its metadata")
+{
+    Fixture f;
+    const Response resp = f.run("media.load", {{"path", "media/video-a.mp4"}});
+    REQUIRE(resp.ok);
+    const auto id = resp.result.at("id").get<std::uint64_t>();
+    CHECK(id > 2); // a new asset, not one of the fixture loads
+    CHECK(resp.result.at("type").get<std::string>() == "video");
+    CHECK(resp.result.at("width").get<std::uint32_t>() == 640);
+    CHECK(resp.result.at("height").get<std::uint32_t>() == 360);
+    CHECK(resp.result.at("duration").get<double>() == doctest::Approx(4.0));
+    CHECK(resp.result.at("frameRate").get<std::string>() == "30");
+
+    // Unknown file fails cleanly.
+    const Response bad = f.run("media.load", {{"path", "nope.mp4"}});
+    CHECK_FALSE(bad.ok);
+    CHECK(bad.error.find("failed to load media") != std::string::npos);
+}
+
+TEST_CASE("media.list and media.unload")
+{
+    Fixture f;
+    CHECK(f.run("media.list").result.at("media").size() == 2);
+
+    const Response unload = f.run("media.unload", {{"id", kMediaB}});
+    REQUIRE(unload.ok);
+    CHECK(f.run("media.list").result.at("media").size() == 1);
+
+    const Response again = f.run("media.unload", {{"id", kMediaB}});
+    CHECK_FALSE(again.ok);
+    CHECK(again.error.find("no media") != std::string::npos);
+}
+
+TEST_CASE("display.list reports all displays")
+{
+    Fixture f;
+    const Response resp = f.run("display.list");
+    INFO("response: " << resp.result.dump());
+    const auto& displays = resp.result.at("displays");
+    REQUIRE(displays.size() == 2);
+    CHECK(displays[0].at("name").get<std::string>() == "main");
+    CHECK(displays[0].at("x").get<std::int32_t>() == 0);
+    CHECK(displays[1].at("name").get<std::string>() == "side");
+    CHECK(displays[1].at("x").get<std::int32_t>() == 1920);
+}
+
+TEST_CASE("display.set updates geometry, brightness and enabled state")
+{
+    Fixture f;
+    const Response resp = f.run("display.set", {{"display", f.displayA},
+                                                {"x", 10},
+                                                {"width", 2048},
+                                                {"brightness", 0.75},
+                                                {"enabled", false}});
+    REQUIRE(resp.ok);
+    CHECK(resp.result.at("x").get<std::int32_t>() == 10);
+    CHECK(resp.result.at("width").get<std::int32_t>() == 2048);
+    CHECK(resp.result.at("brightness").get<double>() == doctest::Approx(0.75));
+    CHECK(resp.result.at("enabled").get<bool>() == false);
+
+    const auto updated = f.displays.find(f.displayA);
+    REQUIRE(updated.has_value());
+    CHECK((*updated)->x == 10);
+    CHECK((*updated)->enabled == false);
+
+    CHECK_FALSE(f.run("display.set", {{"display", 999}, {"brightness", 1.0}}).ok);
+}
+
+TEST_CASE("display.warp.set installs a warp grid")
+{
+    Fixture f;
+    // 2x2 grid: all corners identity.
+    nlohmann::json points = nlohmann::json::array();
+    for (const auto& uv : {std::array<float, 2>{0, 0},
+                           std::array<float, 2>{1, 0},
+                           std::array<float, 2>{0, 1},
+                           std::array<float, 2>{1, 1}})
+    {
+        points.push_back(nlohmann::json::array({uv[0], uv[1]}));
+    }
+    const Response resp = f.run("display.warp.set", {{"display", f.displayA}, {"points", points}});
+    REQUIRE(resp.ok);
+    CHECK(resp.result.at("rows").get<int>() == 2);
+    CHECK(resp.result.at("cols").get<int>() == 2);
+    const auto display = f.displays.find(f.displayA);
+    REQUIRE(display.has_value());
+    CHECK((*display)->warp.rows() == 2);
+    CHECK((*display)->warp.isIdentity());
+
+    // Shear the top-right corner and verify the warp samples accordingly.
+    nlohmann::json shear = nlohmann::json::array();
+    for (const auto& uv : {std::array<float, 2>{0, 0},
+                           std::array<float, 2>{0.85f, 0.1f},
+                           std::array<float, 2>{0, 1},
+                           std::array<float, 2>{1, 1}})
+    {
+        shear.push_back(nlohmann::json::array({uv[0], uv[1]}));
+    }
+    REQUIRE(f.run("display.warp.set", {{"display", f.displayA}, {"points", shear}}).ok);
+    CHECK_FALSE((*display)->warp.isIdentity());
+
+    // Invalid grids.
+    nlohmann::json bad = nlohmann::json::array();
+    for (int i = 0; i < 6; ++i)
+    {
+        bad.push_back(nlohmann::json::array({0.0, 0.0}));
+    }
+    CHECK_FALSE(f.run("display.warp.set", {{"display", f.displayA}, {"points", bad}}).ok);
+    CHECK_FALSE(f.run("display.warp.set", {{"display", f.displayA}}).ok);
+    CHECK_FALSE(f.run("display.warp.set", {{"display", 999}, {"points", points}}).ok);
+}
+
+TEST_CASE("show.save then show.load round trips the show")
+{
+    Fixture f;
+    const auto path = tempFile("roundtrip", "placeholder");
+
+    const Response save = f.run("show.save", {{"path", path.string()}});
+    REQUIRE(save.ok);
+    REQUIRE(std::filesystem::exists(path));
+
+    const auto parsed = nlohmann::json::parse(readTempFile(path));
+    CHECK(parsed.at("app").get<std::string>() == "mediamax-show");
+    CHECK(parsed.at("version").get<int>() == 1);
+    CHECK(parsed.at("name").get<std::string>() == "Test Show");
+
+    const Response load = f.run("show.load", {{"path", path.string()}});
+    REQUIRE(load.ok);
+    CHECK(load.result.at("name").get<std::string>() == "Test Show");
+    CHECK(load.result.at("scenes").get<std::uint64_t>() == 2);
+    CHECK(load.result.at("media").get<std::uint64_t>() == 2);
+
+    // Show-file media ids were remapped to fresh library assets.
+    const Show& show = f.engine.show();
+    CHECK(show.media.size() == 2);
+    for (const auto& ref : show.media)
+    {
+        CHECK(ref.id != kInvalidId);
+        CHECK(f.media.find(ref.id).has_value());
+    }
+    // The video layer now points at the remapped asset.
+    const Scene* sceneA = show.findScene(1);
+    REQUIRE(sceneA);
+    const Layer* videoLayer = nullptr;
+    for (const auto& layer : sceneA->layers)
+    {
+        if (layer.mediaId != kInvalidId)
+        {
+            videoLayer = &layer;
+        }
+    }
+    REQUIRE(videoLayer);
+    CHECK(videoLayer->mediaId != kMediaA); // remapped to a new id
+    CHECK(f.media.find(videoLayer->mediaId).has_value());
+
+    // The engine was reset by the load.
+    CHECK(f.engine.state() == PlayState::Stopped);
+    CHECK(f.engine.time().isZero());
+
+    std::filesystem::remove(path);
+}
+
+TEST_CASE("show.load rejects missing and invalid files")
+{
+    Fixture f;
+    const Response missing = f.run("show.load", {{"path", "definitely/missing/show.json"}});
+    CHECK_FALSE(missing.ok);
+    CHECK(missing.error.find("cannot read show file") != std::string::npos);
+
+    const auto garbage = tempFile("garbage", "this is not json");
+    const Response bad = f.run("show.load", {{"path", garbage.string()}});
+    CHECK_FALSE(bad.ok);
+    CHECK(bad.error.find("invalid JSON") != std::string::npos);
+    std::filesystem::remove(garbage);
+
+    const auto wrongApp = tempFile("wrongapp", R"({"app":"other-app","version":1})");
+    const Response wrong = f.run("show.load", {{"path", wrongApp.string()}});
+    CHECK_FALSE(wrong.ok);
+    CHECK(wrong.error.find("invalid show file") != std::string::npos);
+    std::filesystem::remove(wrongApp);
+}
+
+TEST_CASE("show.load tolerates missing media files")
+{
+    Fixture f;
+    nlohmann::json show = R"({
+        "app": "mediamax-show",
+        "version": 1,
+        "name": "Partial",
+        "frameRate": {"num": 30, "den": 1},
+        "media": [{"id": 1, "path": "missing-file.mp4"}],
+        "scenes": [
+            {"id": 1, "name": "S", "layers": [
+                {"id": 10, "name": "vid", "mediaId": 1}
+            ]}
+        ]
+    })"_json;
+    const auto path = tempFile("partial", show.dump());
+
+    const Response resp = f.run("show.load", {{"path", path.string()}});
+    REQUIRE(resp.ok); // missing media is a warning, not a failure
+    CHECK(resp.result.at("name").get<std::string>() == "Partial");
+    // The layer keeps its (unresolved) show-local media id.
+    const Scene* scene = f.engine.show().findScene(1);
+    REQUIRE(scene);
+    CHECK(scene->layers[0].mediaId == 1);
+
+    std::filesystem::remove(path);
+}
+
+TEST_CASE("show.info summarizes the loaded show")
+{
+    Fixture f;
+    const Response resp = f.run("show.info");
+    REQUIRE(resp.ok);
+    CHECK(resp.result.at("name").get<std::string>() == "Test Show");
+    CHECK(resp.result.at("frameRate").get<std::string>() == "30");
+    CHECK(resp.result.at("duration").get<double>() == doctest::Approx(7.0));
+    CHECK(resp.result.at("scenes").size() == 2);
+    CHECK(resp.result.at("cues").get<std::uint64_t>() == 5);
+}
+
+TEST_CASE("every supported method is dispatched")
+{
+    // Guard against a handler falling through to "unknown method" for a
+    // method that is documented as supported.
+    Fixture f;
+    for (const auto& method : CommandServer::supportedMethods())
+    {
+        if (method == "ping" || method == "status" || method == "scene.list" ||
+            method == "media.list" || method == "display.list" || method == "show.info" ||
+            method == "layer.clear")
+        {
+            // These succeed with no parameters at all.
+            CHECK(f.run(method).ok);
+        }
+        else
+        {
+            // With parameters absent these may fail validation, but never
+            // with "unknown method".
+            const Response resp = f.run(method);
+            CHECK(resp.error.find("unknown method") == std::string::npos);
+        }
+    }
+}
+
+} // TEST_SUITE("CommandServer")

@@ -1,0 +1,33 @@
+# Build directories
+build/
+out/
+cmake-build-*/
+
+# Visual Studio
+.vs/
+*.user
+*.sdf
+*.vcxproj.filters
+
+# Compiled objects / binaries
+*.o
+*.obj
+*.lib
+*.a
+*.so
+*.dll
+*.exe
+*.pdb
+*.ilk
+
+# Dependencies downloaded at configure time
+_deps/
+
+# Editor
+.idea/
+*.swp
+.cache/
+
+# Local-only configuration
+systems.local.json
+CMakeUserPresets.json

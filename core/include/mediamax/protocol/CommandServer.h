@@ -1,0 +1,99 @@
+#pragma once
+
+// The command server: maps control-protocol commands onto the playback
+// engine, media library and display manager.
+//
+// It is engine-agnostic in the same sense as PlaybackEngine: no GPU, no
+// network - given a command it produces a response. This makes the entire
+// control surface unit-testable (see core/tests/test_CommandServer.cpp), and
+// lets the control interface validate commands before sending.
+
+#include <exception>
+#include <functional>
+#include <string>
+#include <vector>
+
+#include "mediamax/display/DisplayManager.h"
+#include "mediamax/media/MediaLibrary.h"
+#include "mediamax/playback/PlaybackEngine.h"
+#include "mediamax/protocol/Protocol.h"
+
+namespace mediamax::protocol
+{
+
+// Host callback for commands that need to load files into the media library
+// (the app owns the source factory). Implemented by the playback engine.
+using MediaLoadFunction = std::function<Id(const std::string& path, std::string& error)>;
+
+class CommandServer
+{
+public:
+    CommandServer(PlaybackEngine& engine, MediaLibrary& media, DisplayManager& displays,
+                  std::string systemName)
+        : m_Engine(engine)
+        , m_Media(media)
+        , m_Displays(displays)
+        , m_SystemName(std::move(systemName))
+    {
+    }
+
+    // Sets the media-loading callback (see MediaLoadFunction).
+    void setMediaLoadFunction(MediaLoadFunction fn) { m_LoadMedia = std::move(fn); }
+
+    // Handles a decoded command. Never throws; all failures become responses
+    // with ok=false.
+    Response handle(const Command& cmd) const;
+
+    // Static helpers used by both the command implementations and tests.
+    static std::vector<std::string> supportedMethods();
+
+private:
+    // --- Individual command handlers (all return a result JSON) -------------
+
+    nlohmann::json handlePing() const;
+    nlohmann::json handleStatus() const;
+    nlohmann::json handleSystemSet(const nlohmann::json& params) const;
+    nlohmann::json handleShowLoad(const nlohmann::json& params) const;
+    nlohmann::json handleShowSave(const nlohmann::json& params) const;
+    nlohmann::json handleShowInfo() const;
+    nlohmann::json handleMediaLoad(const nlohmann::json& params) const;
+    nlohmann::json handleMediaList() const;
+    nlohmann::json handleMediaUnload(const nlohmann::json& params) const;
+    nlohmann::json handlePlaybackPlay(const nlohmann::json& params) const;
+    nlohmann::json handlePlaybackPause() const;
+    nlohmann::json handlePlaybackStop() const;
+    nlohmann::json handlePlaybackSeek(const nlohmann::json& params) const;
+    nlohmann::json handleSceneSet(const nlohmann::json& params) const;
+    nlohmann::json handleSceneList() const;
+    nlohmann::json handleLayerSet(const nlohmann::json& params) const;
+    nlohmann::json handleLayerClear(const nlohmann::json& params) const;
+    nlohmann::json handleDisplayList() const;
+    nlohmann::json handleDisplaySet(const nlohmann::json& params) const;
+    nlohmann::json handleDisplayWarpSet(const nlohmann::json& params) const;
+
+    // Parameter extraction helpers (throw protocol::ParameterError).
+    static std::string requireString(const nlohmann::json& params, const char* key);
+    static double requireNumber(const nlohmann::json& params, const char* key);
+    static int requireInt(const nlohmann::json& params, const char* key);
+    static std::optional<std::string> optionalString(const nlohmann::json& params, const char* key);
+
+    PlaybackEngine& m_Engine;
+    MediaLibrary& m_Media;
+    DisplayManager& m_Displays;
+    mutable std::string m_SystemName; // mutable: system.set mutates it under lock
+    MediaLoadFunction m_LoadMedia;
+};
+
+// Thrown by parameter helpers; caught by handle() and turned into a failure
+// response with a descriptive message.
+class ParameterError : public std::exception
+{
+public:
+    explicit ParameterError(std::string message) : m_Message(std::move(message)) {}
+    const char* what() const noexcept override { return m_Message.c_str(); }
+
+private:
+    std::string m_Message;
+};
+
+} // namespace mediamax::protocol
