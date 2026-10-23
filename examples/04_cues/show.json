@@ -1,0 +1,89 @@
+{
+  "app": "mediamax-show",
+  "version": 1,
+  "name": "Cue timeline (opacity, visibility, position, seek, pause)",
+  "frameRate": { "num": 30, "den": 1 },
+  "duration": 24.0,
+  "media": [
+    { "id": 1, "path": "media/colorbars.mp4" },
+    { "id": 2, "path": "media/logo.png" }
+  ],
+  "scenes": [
+    {
+      "id": 1,
+      "name": "Main",
+      "layers": [
+        {
+          "id": 11,
+          "name": "BG",
+          "mediaId": 0,
+          "color": { "r": 0.02, "g": 0.1, "b": 0.1, "a": 1.0 },
+          "transform": { "x": 960.0, "y": 540.0, "scaleX": 1920.0, "scaleY": 1080.0 },
+          "zIndex": 0
+        },
+        {
+          "id": 12,
+          "name": "Video (faded at 2-4s, jumped at 8.5s)",
+          "mediaId": 1,
+          "loop": true,
+          "transform": { "x": 960.0, "y": 540.0 },
+          "zIndex": 1
+        },
+        {
+          "id": 13,
+          "name": "Logo (hidden 5.5-7s)",
+          "mediaId": 2,
+          "transform": { "x": 1500.0, "y": 250.0 },
+          "zIndex": 2
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "name": "Skipped (never seen: the seek cue jumps over it)",
+      "layers": [
+        {
+          "id": 21,
+          "name": "BG (red - you only see it if you seek into 10-16s manually)",
+          "mediaId": 0,
+          "color": { "r": 0.5, "g": 0.05, "b": 0.05, "a": 1.0 },
+          "transform": { "x": 960.0, "y": 540.0, "scaleX": 1920.0, "scaleY": 1080.0 },
+          "zIndex": 0
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "name": "Final",
+      "layers": [
+        {
+          "id": 31,
+          "name": "BG",
+          "mediaId": 0,
+          "color": { "r": 0.03, "g": 0.25, "b": 0.08, "a": 1.0 },
+          "transform": { "x": 960.0, "y": 540.0, "scaleX": 1920.0, "scaleY": 1080.0 },
+          "zIndex": 0
+        },
+        {
+          "id": 32,
+          "name": "Logo (scaled 2x, centered)",
+          "mediaId": 2,
+          "transform": { "x": 960.0, "y": 540.0, "scaleX": 2.0, "scaleY": 2.0 },
+          "zIndex": 1
+        }
+      ]
+    }
+  ],
+  "cues": [
+    { "time": 0.0,  "name": "main",       "action": { "type": "playScene", "scene": 1 } },
+    { "time": 2.0,  "name": "fade down",  "action": { "type": "setLayerOpacity", "layer": 12, "value": 0.25 } },
+    { "time": 4.0,  "name": "fade up",    "action": { "type": "setLayerOpacity", "layer": 12, "value": 1.0 } },
+    { "time": 5.5,  "name": "hide logo",  "action": { "type": "setLayerVisible", "layer": 13, "value": false } },
+    { "time": 7.0,  "name": "show logo",  "action": { "type": "setLayerVisible", "layer": 13, "value": true } },
+    { "time": 8.5,  "name": "jump video", "action": { "type": "setLayerPosition", "layer": 12, "x": 400.0, "y": 300.0 } },
+    { "time": 9.0,  "name": "skip red",   "action": { "type": "seek", "time": 16.5 } },
+    { "time": 10.0, "name": "into red",   "action": { "type": "playScene", "scene": 2 } },
+    { "time": 16.0, "name": "final",      "action": { "type": "playScene", "scene": 3 } },
+    { "time": 22.0, "name": "hold",       "action": { "type": "pause" } }
+  ]
+}

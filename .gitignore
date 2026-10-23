@@ -31,3 +31,6 @@ _deps/
 # Local-only configuration
 systems.local.json
 CMakeUserPresets.json
+
+# Self-test output (written to the CWD by --self-test)
+selftest*.ppm

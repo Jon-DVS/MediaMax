@@ -28,6 +28,7 @@ core/      headless engine (static lib `mediamax`) + tests
 render/    Vulkan/NVRHI renderer (static lib `mediamax_render`) + GPU tests
 playback/  `mediamax_playback` executable
 control/   `mediamax_control` executable
+examples/  self-contained example shows + generated media (see examples/README.md)
 cmake/     build helpers; docs/ for the reference docs; skills/ for playbooks
 ```
 

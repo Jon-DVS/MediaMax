@@ -1,0 +1,47 @@
+{
+  "app": "mediamax-show",
+  "version": 1,
+  "name": "Video + audio (A/V sync, in/out points, loop, opacity = gain)",
+  "frameRate": { "num": 30, "den": 1 },
+  "duration": 10.0,
+  "media": [
+    { "id": 1, "path": "media/tone.mp4" }
+  ],
+  "scenes": [
+    {
+      "id": 1,
+      "name": "A/V",
+      "layers": [
+        {
+          "id": 11,
+          "name": "BG",
+          "mediaId": 0,
+          "color": { "r": 0.02, "g": 0.02, "b": 0.04, "a": 1.0 },
+          "transform": { "x": 960.0, "y": 540.0, "scaleX": 1920.0, "scaleY": 1080.0 },
+          "zIndex": 0
+        },
+        {
+          "id": 12,
+          "name": "Tone (plays 1-6s of the clip, looping; fades with opacity)",
+          "mediaId": 1,
+          "inPoint": 1.0,
+          "outPoint": 6.0,
+          "loop": true,
+          "transform": { "x": 960.0, "y": 540.0 },
+          "tracks": {
+            "opacity": [
+              { "time": 0.0, "value": 1.0, "interpolation": "linear" },
+              { "time": 5.0, "value": 0.4, "interpolation": "linear" },
+              { "time": 10.0, "value": 1.0, "interpolation": "linear" }
+            ]
+          },
+          "zIndex": 1
+        }
+      ]
+    }
+  ],
+  "cues": [
+    { "time": 0.0,  "name": "start", "action": { "type": "playScene", "scene": 1 } },
+    { "time": 10.0, "name": "end",   "action": { "type": "stop" } }
+  ]
+}

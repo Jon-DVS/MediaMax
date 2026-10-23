@@ -1,0 +1,102 @@
+{
+  "app": "mediamax-show",
+  "version": 1,
+  "name": "Keyframe animation tracks",
+  "frameRate": { "num": 30, "den": 1 },
+  "duration": 12.0,
+  "media": [
+    { "id": 1, "path": "media/colorbars.mp4" },
+    { "id": 2, "path": "media/plasma.mp4" },
+    { "id": 3, "path": "media/logo.png" }
+  ],
+  "scenes": [
+    {
+      "id": 1,
+      "name": "Animation",
+      "layers": [
+        {
+          "id": 11,
+          "name": "BG",
+          "mediaId": 0,
+          "color": { "r": 0.03, "g": 0.04, "b": 0.08, "a": 1.0 },
+          "transform": { "x": 960.0, "y": 540.0, "scaleX": 1920.0, "scaleY": 1080.0 },
+          "zIndex": 0
+        },
+        {
+          "id": 12,
+          "name": "Orbit (x/y linear tracks = diamond path)",
+          "mediaId": 3,
+          "transform": { "x": 960.0, "y": 300.0 },
+          "tracks": {
+            "x": [
+              { "time": 0.0,  "value": 960.0,  "interpolation": "linear" },
+              { "time": 3.0,  "value": 1500.0, "interpolation": "linear" },
+              { "time": 6.0,  "value": 960.0,  "interpolation": "linear" },
+              { "time": 9.0,  "value": 420.0,  "interpolation": "linear" },
+              { "time": 12.0, "value": 960.0,  "interpolation": "linear" }
+            ],
+            "y": [
+              { "time": 0.0,  "value": 300.0,  "interpolation": "linear" },
+              { "time": 3.0,  "value": 540.0,  "interpolation": "linear" },
+              { "time": 6.0,  "value": 780.0,  "interpolation": "linear" },
+              { "time": 9.0,  "value": 540.0,  "interpolation": "linear" },
+              { "time": 12.0, "value": 300.0,  "interpolation": "linear" }
+            ]
+          },
+          "zIndex": 1
+        },
+        {
+          "id": 13,
+          "name": "Spinner (rotation track, one turn per 12s)",
+          "mediaId": 0,
+          "color": { "r": 0.9, "g": 0.3, "b": 0.1, "a": 0.85 },
+          "transform": { "x": 960.0, "y": 540.0, "scaleX": 260.0, "scaleY": 180.0 },
+          "tracks": {
+            "rotation": [
+              { "time": 0.0,  "value": 0.0,      "interpolation": "linear" },
+              { "time": 12.0, "value": 6.283185, "interpolation": "linear" }
+            ]
+          },
+          "blend": "screen",
+          "zIndex": 2
+        },
+        {
+          "id": 14,
+          "name": "Pulse (scale track + step opacity track)",
+          "mediaId": 2,
+          "transform": { "x": 960.0, "y": 540.0 },
+          "tracks": {
+            "scale": [
+              { "time": 0.0, "value": 1.0, "interpolation": "linear" },
+              { "time": 6.0, "value": 1.6, "interpolation": "linear" },
+              { "time": 12.0, "value": 1.0, "interpolation": "linear" }
+            ],
+            "opacity": [
+              { "time": 0.0, "value": 1.0, "interpolation": "step" },
+              { "time": 4.0, "value": 0.4, "interpolation": "step" },
+              { "time": 8.0, "value": 1.0, "interpolation": "step" }
+            ]
+          },
+          "zIndex": 1
+        },
+        {
+          "id": 15,
+          "name": "Fade in (opacity track 0 -> 1 over 3s)",
+          "mediaId": 1,
+          "transform": { "x": 300.0, "y": 800.0, "scaleX": 0.5, "scaleY": 0.5 },
+          "tracks": {
+            "opacity": [
+              { "time": 0.0, "value": 0.0, "interpolation": "linear" },
+              { "time": 3.0, "value": 1.0, "interpolation": "linear" }
+            ]
+          },
+          "zIndex": 3
+        }
+      ]
+    }
+  ],
+  "cues": [
+    { "time": 0.0,  "name": "start", "action": { "type": "playScene", "scene": 1 } },
+    { "time": 12.0, "name": "end",   "action": { "type": "stop" } }
+  ]
+}

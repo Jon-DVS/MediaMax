@@ -1,0 +1,50 @@
+{
+  "app": "mediamax-show",
+  "version": 1,
+  "name": "Blend modes (add, screen, multiply, subtract)",
+  "frameRate": { "num": 30, "den": 1 },
+  "duration": 8.0,
+  "media": [
+    { "id": 1, "path": "media/bars.mp4" },
+    { "id": 2, "path": "media/plasma.mp4" }
+  ],
+  "scenes": [
+    {
+      "id": 1,
+      "name": "Blends",
+      "layers": [
+        {
+          "id": 11,
+          "name": "BG",
+          "mediaId": 0,
+          "color": { "r": 0.0, "g": 0.0, "b": 0.0, "a": 1.0 },
+          "transform": { "x": 960.0, "y": 540.0, "scaleX": 1920.0, "scaleY": 1080.0 },
+          "zIndex": 0
+        },
+        {
+          "id": 12,
+          "name": "SMPTE bars (static, the blend target)",
+          "mediaId": 1,
+          "transform": { "x": 960.0, "y": 540.0, "scaleX": 2.0, "scaleY": 2.0 },
+          "zIndex": 1
+        },
+        {
+          "id": 13,
+          "name": "Moving gradient (blend cycled by cues)",
+          "mediaId": 2,
+          "blend": "add",
+          "opacity": 0.9,
+          "transform": { "x": 960.0, "y": 540.0, "scaleX": 2.0, "scaleY": 2.0 },
+          "zIndex": 2
+        }
+      ]
+    }
+  ],
+  "cues": [
+    { "time": 0.0, "name": "add",       "action": { "type": "playScene", "scene": 1 } },
+    { "time": 2.0, "name": "screen",    "action": { "type": "setLayerBlend", "layer": 13, "mode": "screen" } },
+    { "time": 4.0, "name": "multiply",  "action": { "type": "setLayerBlend", "layer": 13, "mode": "multiply" } },
+    { "time": 6.0, "name": "subtract",  "action": { "type": "setLayerBlend", "layer": 13, "mode": "subtract" } },
+    { "time": 8.0, "name": "end",       "action": { "type": "stop" } }
+  ]
+}

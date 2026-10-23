@@ -152,6 +152,23 @@ mediamax_playback --display 1920x1080@0+0 --display 1920x1080@1920+0 \
                   --system-name "Main Wall" --show show.json
 ```
 
+## Example shows
+
+`examples/` contains six self-contained example shows (each with its own
+`media/`) that demonstrate the feature set: scenes and cuts, keyframe
+animation tracks, blend modes, the cue timeline (opacity/visibility/position
+overrides, a seek cue that skips a scene, pause), A/V-synced looping media,
+and a two-display wall with per-display content and a spanning layer:
+
+```bat
+cd examples\01_basics
+..\..\build\playback\Release\mediamax_playback.exe --show show.json
+```
+
+See [examples/README.md](examples/README.md) for the full list, the
+per-example control-console tricks (including a projection-warp demo) and a
+script to regenerate the example media.
+
 ## Using the control interface
 
 Systems are configured in a JSON file (default `./systems.json`):
@@ -214,6 +231,7 @@ playback/
                           self-test, window surface)
 control/
   src/                    Control interface executable
+examples/                 Self-contained example shows + generated media
 docs/                     Architecture, protocol and show format reference
 skills/                   Development playbooks (see AGENTS.md)
 ```

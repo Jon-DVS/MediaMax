@@ -1,0 +1,93 @@
+{
+  "app": "mediamax-show",
+  "version": 1,
+  "name": "Basics: scenes, cuts, color layers",
+  "frameRate": { "num": 30, "den": 1 },
+  "duration": 12.0,
+  "media": [
+    { "id": 1, "path": "media/colorbars.mp4" },
+    { "id": 2, "path": "media/plasma.mp4" },
+    { "id": 3, "path": "media/logo.png" }
+  ],
+  "scenes": [
+    {
+      "id": 1,
+      "name": "Open",
+      "layers": [
+        {
+          "id": 11,
+          "name": "BG",
+          "mediaId": 0,
+          "color": { "r": 0.05, "g": 0.07, "b": 0.15, "a": 1.0 },
+          "transform": { "x": 960.0, "y": 540.0, "scaleX": 1920.0, "scaleY": 1080.0 },
+          "zIndex": 0
+        },
+        {
+          "id": 12,
+          "name": "Bars (loops: 4s clip in a 6s scene)",
+          "mediaId": 1,
+          "loop": true,
+          "transform": { "x": 960.0, "y": 540.0 },
+          "zIndex": 1
+        },
+        {
+          "id": 13,
+          "name": "Still logo (png, zIndex 2 = on top)",
+          "mediaId": 3,
+          "transform": { "x": 300.0, "y": 200.0 },
+          "zIndex": 2
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "name": "Plasma (inPoint + slow motion)",
+      "layers": [
+        {
+          "id": 21,
+          "name": "BG",
+          "mediaId": 0,
+          "color": { "r": 0.0, "g": 0.0, "b": 0.0, "a": 1.0 },
+          "transform": { "x": 960.0, "y": 540.0, "scaleX": 1920.0, "scaleY": 1080.0 },
+          "zIndex": 0
+        },
+        {
+          "id": 22,
+          "name": "Plasma (inPoint 0.5, rate 0.75 = slow motion)",
+          "mediaId": 2,
+          "inPoint": 0.5,
+          "rate": 0.75,
+          "transform": { "x": 960.0, "y": 540.0, "scaleX": 2.0, "scaleY": 2.0 },
+          "zIndex": 1
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "name": "Title",
+      "layers": [
+        {
+          "id": 31,
+          "name": "BG",
+          "mediaId": 0,
+          "color": { "r": 0.25, "g": 0.05, "b": 0.3, "a": 1.0 },
+          "transform": { "x": 960.0, "y": 540.0, "scaleX": 1920.0, "scaleY": 1080.0 },
+          "zIndex": 0
+        },
+        {
+          "id": 32,
+          "name": "Logo (scaled 2x)",
+          "mediaId": 3,
+          "transform": { "x": 960.0, "y": 540.0, "scaleX": 2.0, "scaleY": 2.0 },
+          "zIndex": 1
+        }
+      ]
+    }
+  ],
+  "cues": [
+    { "time": 0.0,  "name": "open",    "action": { "type": "playScene", "scene": 1 } },
+    { "time": 6.0,  "name": "plasma",  "action": { "type": "playScene", "scene": 2 } },
+    { "time": 9.0,  "name": "title",   "action": { "type": "playScene", "scene": 3 } },
+    { "time": 12.0, "name": "end",     "action": { "type": "stop" } }
+  ]
+}
