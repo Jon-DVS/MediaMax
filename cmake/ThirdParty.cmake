@@ -6,10 +6,11 @@
 #
 # Dependency matrix:
 #   glm          header-only math               (core, render)
-#   glfw         windowing + Vulkan surface     (playback)
+#   glfw         windowing + Vulkan surface     (playback, control GUI)
 #   nvrhi        graphics abstraction (Vulkan)  (render)
 #   miniaudio    audio device output            (playback)
 #   nlohmann/json  JSON (protocol + show files) (core, control)
+#   imgui        immediate-mode GUI             (control GUI)
 #   doctest      unit test framework            (tests, build-time only)
 #
 # FFmpeg is handled separately in cmake/FFmpeg.cmake because its distribution
@@ -103,6 +104,49 @@ FetchContent_Declare(nlohmann_json
     GIT_TAG v3.11.3
     GIT_SHALLOW TRUE)
 FetchContent_MakeAvailable(nlohmann_json)
+
+# ---------------------------------------------------------------------------
+# Dear ImGui - immediate-mode GUI for the control interface
+#
+# ImGui ships no CMake project, so it is populated and compiled by hand into
+# a static library: the core sources plus the GLFW and Vulkan back ends.
+# The -docking release tag carries the docking branch (merged window
+# layout); the plain release tag does not include it.
+# ---------------------------------------------------------------------------
+
+FetchContent_Declare(imgui
+    GIT_REPOSITORY https://github.com/ocornut/imgui.git
+    GIT_TAG v1.93.0-docking
+    GIT_SHALLOW TRUE)
+FetchContent_GetProperties(imgui)
+if(NOT imgui_POPULATED)
+    FetchContent_Populate(imgui)
+endif()
+
+add_library(imgui STATIC
+    "${imgui_SOURCE_DIR}/imgui.cpp"
+    "${imgui_SOURCE_DIR}/imgui_draw.cpp"
+    "${imgui_SOURCE_DIR}/imgui_tables.cpp"
+    "${imgui_SOURCE_DIR}/imgui_widgets.cpp"
+    "${imgui_SOURCE_DIR}/imgui_demo.cpp"
+    "${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp"
+    "${imgui_SOURCE_DIR}/backends/imgui_impl_vulkan.cpp"
+    # std::string binding helpers for InputText & co.
+    "${imgui_SOURCE_DIR}/misc/cpp/imgui_stdlib.cpp")
+add_library(mediamax::imgui ALIAS imgui)
+
+# PUBLIC (not INTERFACE): the back ends' own translation units also compile
+# against these include dirs, so they must apply to the target itself, not
+# just to its consumers.
+target_include_directories(imgui PUBLIC
+    "${imgui_SOURCE_DIR}"
+    "${imgui_SOURCE_DIR}/backends"
+    "${imgui_SOURCE_DIR}/misc/cpp")
+# The back ends include the platform headers directly, and so does the
+# control app (GuiVulkan.h), so these propagate as well.
+target_link_libraries(imgui PUBLIC
+    glfw
+    Vulkan::Headers)
 
 # ---------------------------------------------------------------------------
 # doctest - unit test framework (build/test time only)

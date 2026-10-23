@@ -80,6 +80,7 @@ std::vector<std::string> CommandServer::supportedMethods()
             "status",
             "system.set",
             "show.load",
+            "show.loadJson",
             "show.save",
             "show.info",
             "media.load",
@@ -91,6 +92,7 @@ std::vector<std::string> CommandServer::supportedMethods()
             "playback.seek",
             "scene.set",
             "scene.list",
+            "scene.clear",
             "layer.set",
             "layer.clear",
             "display.list",
@@ -118,6 +120,10 @@ Response CommandServer::handle(const Command& cmd) const
         else if (cmd.method == "show.load")
         {
             result = handleShowLoad(cmd.params);
+        }
+        else if (cmd.method == "show.loadJson")
+        {
+            result = handleShowLoadJson(cmd.params);
         }
         else if (cmd.method == "show.save")
         {
@@ -162,6 +168,10 @@ Response CommandServer::handle(const Command& cmd) const
         else if (cmd.method == "scene.list")
         {
             result = handleSceneList();
+        }
+        else if (cmd.method == "scene.clear")
+        {
+            result = handleSceneClear();
         }
         else if (cmd.method == "layer.set")
         {
@@ -279,11 +289,19 @@ nlohmann::json CommandServer::handleShowLoad(const nlohmann::json& params) const
     {
         throw ParameterError("invalid JSON in show file: " + std::string(e.what()));
     }
+    return applyShowDocument(parsed, "show file");
+}
+
+// Parses a show document (a parsed JSON object), loads and remaps the media it
+// references, and makes the show active. Shared by show.load and show.loadJson.
+nlohmann::json CommandServer::applyShowDocument(const nlohmann::json& parsed,
+                                                const char* context) const
+{
     std::string error;
     auto show = Show::fromJson(parsed, error);
     if (!show)
     {
-        throw ParameterError("invalid show file: " + error);
+        throw ParameterError(std::string("invalid ") + context + ": " + error);
     }
 
     // Load the media the show references. Show-file media ids are local to
@@ -333,6 +351,15 @@ nlohmann::json CommandServer::handleShowLoad(const nlohmann::json& params) const
         {"scenes", show->scenes.size()},
         {"media", show->media.size()},
     };
+}
+
+nlohmann::json CommandServer::handleShowLoadJson(const nlohmann::json& params) const
+{
+    if (!params.contains("show") || !params.at("show").is_object())
+    {
+        throw ParameterError("show.loadJson requires a 'show' object parameter");
+    }
+    return applyShowDocument(params.at("show"), "show JSON");
 }
 
 nlohmann::json CommandServer::handleShowSave(const nlohmann::json& params) const
@@ -479,6 +506,23 @@ nlohmann::json CommandServer::handleSceneList() const
         });
     }
     return {{"scenes", arr}};
+}
+
+nlohmann::json CommandServer::handleSceneClear() const
+{
+    // Releases the operator's scene override (scene.set); scene selection
+    // returns to the timeline. The response reports the now-active scene so
+    // the caller does not need a follow-up status call.
+    bool cleared = false;
+    if (m_Engine.hasSceneOverride())
+    {
+        m_Engine.clearSceneNow();
+        cleared = true;
+    }
+    return {
+        {"cleared", cleared ? 1 : 0},
+        {"scene", m_Engine.activeSceneAt(m_Engine.time())},
+    };
 }
 
 nlohmann::json CommandServer::handleLayerSet(const nlohmann::json& params) const

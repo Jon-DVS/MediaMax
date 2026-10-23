@@ -94,6 +94,19 @@ skipped, not fatal.
 - Params: `path` (string, required) — path readable by the engine process.
 - Result: `{"name","scenes":<n>,"media":<n>}`
 
+#### `show.loadJson`
+
+Like `show.load`, but the show document is given inline as a JSON object
+instead of a file path. This lets an authoring tool (e.g. the control GUI's
+show editor) push an edited show to a system without a shared filesystem.
+
+- Params: `show` (object, required) — the complete show document (see
+  [SHOW_FORMAT.md](SHOW_FORMAT.md)), as `Show::toJson` produces it.
+- Result: `{"name","scenes":<n>,"media":<n>}` (same as `show.load`).
+- Errors: missing/non-object `show` parameter, an invalid document, or a
+  malformed file are reported the same way as for `show.load`. Media
+  loading (and skipping of missing media files) is identical.
+
 #### `show.save`
 
 Write the current show back to a file in the canonical show format. Runtime
@@ -169,6 +182,15 @@ timeline until the timeline's next `playScene` cue or another `scene.set`).
 
 - Params: `index` (int, required) — 0-based scene index in the show.
 - Result: `{"scene":<id>,"name":"<name>"}`
+
+#### `scene.clear`
+
+Release the operator's scene override (from `scene.set`): scene selection
+returns to the timeline. Idempotent — clearing when there is no override
+succeeds and reports `cleared: 0`.
+
+- Params: none.
+- Result: `{"cleared":<0|1>,"scene":<active scene id after the clear>}`
 
 #### `scene.list`
 

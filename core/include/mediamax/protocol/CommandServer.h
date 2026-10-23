@@ -54,6 +54,7 @@ private:
     nlohmann::json handleStatus() const;
     nlohmann::json handleSystemSet(const nlohmann::json& params) const;
     nlohmann::json handleShowLoad(const nlohmann::json& params) const;
+    nlohmann::json handleShowLoadJson(const nlohmann::json& params) const;
     nlohmann::json handleShowSave(const nlohmann::json& params) const;
     nlohmann::json handleShowInfo() const;
     nlohmann::json handleMediaLoad(const nlohmann::json& params) const;
@@ -65,11 +66,17 @@ private:
     nlohmann::json handlePlaybackSeek(const nlohmann::json& params) const;
     nlohmann::json handleSceneSet(const nlohmann::json& params) const;
     nlohmann::json handleSceneList() const;
+    nlohmann::json handleSceneClear() const;
     nlohmann::json handleLayerSet(const nlohmann::json& params) const;
     nlohmann::json handleLayerClear(const nlohmann::json& params) const;
     nlohmann::json handleDisplayList() const;
     nlohmann::json handleDisplaySet(const nlohmann::json& params) const;
     nlohmann::json handleDisplayWarpSet(const nlohmann::json& params) const;
+
+    // Parses a show document, loads and remaps its media, and makes it active.
+    // Shared by show.load (after the file read) and show.loadJson. `context`
+    // is only used in error messages ("show file" / "show JSON").
+    nlohmann::json applyShowDocument(const nlohmann::json& parsed, const char* context) const;
 
     // Parameter extraction helpers (throw protocol::ParameterError).
     static std::string requireString(const nlohmann::json& params, const char* key);

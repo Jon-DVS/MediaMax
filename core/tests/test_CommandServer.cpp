@@ -1,6 +1,6 @@
 // The command server: the full control surface mapped onto a real engine,
 // media library and display set. This is the integration test for the
-// protocol layer - it exercises every one of the 20 commands.
+// protocol layer - it exercises every one of the 22 commands.
 
 #include <atomic>
 #include <chrono>
@@ -506,6 +506,100 @@ TEST_CASE("show.load tolerates missing media files")
     std::filesystem::remove(path);
 }
 
+TEST_CASE("show.loadJson loads an inline show document")
+{
+    Fixture f;
+    // Round-trip the currently loaded show through the JSON path: it is the
+    // same contract as show.load (engine reset, media ids remapped).
+    const nlohmann::json doc = f.engine.show().toJson();
+    const Response resp = f.run("show.loadJson", {{"show", doc}});
+    REQUIRE(resp.ok);
+    CHECK(resp.result.at("name").get<std::string>() == "Test Show");
+    CHECK(resp.result.at("scenes").get<std::uint64_t>() == 2);
+    CHECK(resp.result.at("media").get<std::uint64_t>() == 2);
+
+    CHECK(f.engine.state() == PlayState::Stopped);
+    CHECK(f.engine.time().isZero());
+    for (const auto& ref : f.engine.show().media)
+    {
+        CHECK(ref.id != kInvalidId);
+        CHECK(f.media.find(ref.id).has_value());
+    }
+    // The video layer points at a remapped asset, not the show-local id.
+    const Scene* sceneA = f.engine.show().findScene(1);
+    REQUIRE(sceneA);
+    const Layer* videoLayer = nullptr;
+    for (const auto& layer : sceneA->layers)
+    {
+        if (layer.mediaId != kInvalidId)
+        {
+            videoLayer = &layer;
+        }
+    }
+    REQUIRE(videoLayer);
+    CHECK(videoLayer->mediaId != kMediaA);
+}
+
+TEST_CASE("show.loadJson validates its parameter")
+{
+    Fixture f;
+    const Response missing = f.run("show.loadJson");
+    CHECK_FALSE(missing.ok);
+    CHECK(missing.error.find("'show' object") != std::string::npos);
+
+    const Response wrongType = f.run("show.loadJson", {{"show", "not an object"}});
+    CHECK_FALSE(wrongType.ok);
+    CHECK(wrongType.error.find("'show' object") != std::string::npos);
+
+    const Response invalid = f.run("show.loadJson",
+                                   {{"show", {{"app", "other-app"}, {"version", 1}}}});
+    CHECK_FALSE(invalid.ok);
+    CHECK(invalid.error.find("invalid show JSON") != std::string::npos);
+}
+
+TEST_CASE("show.loadJson tolerates missing media like show.load")
+{
+    Fixture f;
+    const nlohmann::json doc = R"({
+        "app": "mediamax-show",
+        "version": 1,
+        "name": "PartialJson",
+        "frameRate": {"num": 30, "den": 1},
+        "media": [{"id": 1, "path": "missing-file.mp4"}],
+        "scenes": [
+            {"id": 1, "name": "S", "layers": [
+                {"id": 10, "name": "vid", "mediaId": 1}
+            ]}
+        ]
+    })"_json;
+    const Response resp = f.run("show.loadJson", {{"show", doc}});
+    REQUIRE(resp.ok); // missing media is a warning, not a failure
+    CHECK(resp.result.at("name").get<std::string>() == "PartialJson");
+    const Scene* scene = f.engine.show().findScene(1);
+    REQUIRE(scene);
+    CHECK(scene->layers[0].mediaId == 1);
+}
+
+TEST_CASE("scene.clear releases the operator scene override")
+{
+    Fixture f;
+    // No override yet: cleared=0, the timeline's scene (1 at t=0) is active.
+    const Response none = f.run("scene.clear");
+    REQUIRE(none.ok);
+    CHECK(none.result.at("cleared").get<int>() == 0);
+    CHECK(none.result.at("scene").get<std::uint64_t>() == 1);
+
+    const Response set = f.run("scene.set", {{"index", 1}});
+    REQUIRE(set.ok);
+    CHECK(set.result.at("scene").get<std::uint64_t>() == 2);
+
+    const Response cleared = f.run("scene.clear");
+    REQUIRE(cleared.ok);
+    CHECK(cleared.result.at("cleared").get<int>() == 1);
+    // Back on the timeline: at t=0 the playScene cue selects scene 1.
+    CHECK(cleared.result.at("scene").get<std::uint64_t>() == 1);
+}
+
 TEST_CASE("show.info summarizes the loaded show")
 {
     Fixture f;
@@ -526,8 +620,8 @@ TEST_CASE("every supported method is dispatched")
     for (const auto& method : CommandServer::supportedMethods())
     {
         if (method == "ping" || method == "status" || method == "scene.list" ||
-            method == "media.list" || method == "display.list" || method == "show.info" ||
-            method == "layer.clear")
+            method == "scene.clear" || method == "media.list" || method == "display.list" ||
+            method == "show.info" || method == "layer.clear")
         {
             // These succeed with no parameters at all.
             CHECK(f.run(method).ok);

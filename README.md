@@ -35,7 +35,7 @@ Feature inspiration: [Resolume](https://resolume.com/),
 | `mediamax` | static library | Headless core: time math, shows/cues, blend reference, media library, playback engine, network protocol. No GPU, no windows — fully unit-testable. |
 | `mediamax_render` | static library | Vulkan/NVRHI rendering: context bootstrap, swapchains, the ping-pong scene compositor and the per-display output pass. |
 | `mediamax_playback` | executable | The playback engine: renders the show to one or more displays, decodes media, plays audio, and hosts the control server. |
-| `mediamax_control` | executable | The control interface: manages one or many playback systems (one-shot commands or interactive REPL). |
+| `mediamax_control` | executable | The control interface: manages one or many playback systems — windowed GUI (Dear ImGui), one-shot commands, or interactive REPL. |
 
 The dependency flow is strictly one-directional:
 
@@ -49,8 +49,9 @@ The dependency flow is strictly one-directional:
         | mediamax_playback     |    | (playback also links the core
         | (links both)          |    |  for protocol + media)         |
         +-----------------------+    +-------------------------------+
-        | mediamax_control (links the core only) |
-        +----------------------------------------+
+        | mediamax_control (links the core only; the |
+        | GUI adds ImGui/GLFW/Vulkan, never render)  |
+        +--------------------------------------------+
 ```
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the module-by-module
@@ -65,6 +66,8 @@ walkthrough, threading model and design invariants.
 - [miniaudio](https://github.com/mackron/miniaudio) for audio output
 - [FFmpeg](https://ffmpeg.org/) for media decoding (optionally disabled;
   test-pattern sources still work without it)
+- [Dear ImGui](https://github.com/ocornut/imgui) (docking branch) for the
+  control interface GUI, on GLFW + a minimal raw-Vulkan surface
 - [doctest](https://github.com/doctest/doctest) for unit tests
 - [nlohmann/json](https://github.com/nlohmann/json) for the protocol and show
   files
@@ -207,6 +210,50 @@ mediamax_control --system 1
   > quit
 ```
 
+### The control GUI
+
+```
+mediamax_control --gui
+```
+
+Opens a windowed multi-system control interface (Dear ImGui, docking layout).
+The same `systems.json` drives it: configured systems connect automatically
+and a poll thread keeps their status/scene snapshots fresh.
+
+- **Systems** (left) — the system list with live connection state, connect/
+  disconnect and removal, plus a form to add new systems (saved back to the
+  config with *System > Save Systems List*).
+- **Playback** (center) — for the selected system: transport
+  (play/pause/stop), a seek slider that follows the live time, scene
+  selection and *scene.clear* (return to the timeline), live layer
+  overrides (opacity/visible/blend/position via `layer.set`/`layer.clear`),
+  display geometry + brightness (`display.set`) with a 2x2–4x4 warp-grid
+  editor (`display.warp.set`), and media load/unload against the engine's
+  library.
+- **Show Editor** (right) — author show.json documents: show settings,
+  media references (with a *Probe* that loads them on a system), scenes with
+  full layer editing (media, color, in/out, transform, opacity/blend, and
+  keyframe tracks for opacity/x/y/rotation/scale) and the cue timeline
+  (all eight cue actions). *Save* writes the file, *Push to system* sends
+  the document live via `show.loadJson`, *Pull from system* runs `show.save`
+  on the system.
+- **Console** (bottom) — any raw protocol method with JSON params, with the
+  exchange logged.
+
+Everything the CLI does is reachable in the GUI, and vice versa — the two
+share the same protocol. The GUI's own smoke test:
+
+```
+mediamax_control --gui-self-test [frames]
+mediamax_control --gui-self-test [frames] --gui-self-test-system <host:port>
+```
+
+The self-test renders full UI frames into a hidden window (no systems, so it
+is side-effect free) and, with `--gui-self-test-system`, drives a running
+playback engine through the same command path the UI uses (it replaces the
+engine's loaded show with a deterministic one). The frame count defaults to
+90.
+
 The full command reference lives in [docs/PROTOCOL.md](docs/PROTOCOL.md), and
 the show file format in [docs/SHOW_FORMAT.md](docs/SHOW_FORMAT.md).
 
@@ -230,7 +277,8 @@ playback/
   src/                    Playback engine executable (app, media pump, audio,
                           self-test, window surface)
 control/
-  src/                    Control interface executable
+  src/                    Control interface executable (CLI/REPL + gui/: the
+                           Dear ImGui app, systems, show editor, console)
 examples/                 Self-contained example shows + generated media
 docs/                     Architecture, protocol and show format reference
 skills/                   Development playbooks (see AGENTS.md)

@@ -27,7 +27,7 @@ hard-won gotchas.
 core/      headless engine (static lib `mediamax`) + tests
 render/    Vulkan/NVRHI renderer (static lib `mediamax_render`) + GPU tests
 playback/  `mediamax_playback` executable
-control/   `mediamax_control` executable
+control/   `mediamax_control` executable (CLI/REPL + gui/ Dear ImGui app)
 examples/  self-contained example shows + generated media (see examples/README.md)
 cmake/     build helpers; docs/ for the reference docs; skills/ for playbooks
 ```
@@ -76,6 +76,10 @@ Smoke-test the app:
 build/playback/Release/mediamax_playback.exe --self-test --self-test-seconds 3
 # must end with: self-test: OK - N frames rendered, ...
 build/control/Release/mediamax_control.exe --help
+build/control/Release/mediamax_control.exe --gui-self-test 90
+# hidden window, 90 full UI frames; exit 0 = OK. With
+# --gui-self-test-system <host:port> it also drives a running playback
+# engine through the GUI's command path (replaces that engine's show).
 ```
 
 MSVC workflow notes:
@@ -170,9 +174,32 @@ MSVC workflow notes:
   `beginTrackingTextureState(...)` (swapchain images: `Present`). Missing
   tracking yields "Unknown prior state" errors and, on some drivers, missing
   barriers.
-- The app owns the vk-hpp default dispatcher: it is defined once in
-  `render/src/VulkanContext.cpp` and initialized with the 4-arg form
-  (`instance, vkGetInstanceProcAddr, device, vkGetDeviceProcAddr`).
+- The app owns the vk-hpp default dispatcher: each final binary defines it
+  exactly once — `render/src/VulkanContext.cpp` for everything that links
+  `mediamax_render` (playback, render tests) and
+  `control/src/gui/GuiVulkan.cpp` for the control GUI (which links no NVRHI,
+  so it keeps a minimal raw-Vulkan context of its own). Both initialize it
+  with the 4-arg form (`instance, vkGetInstanceProcAddr, device,
+  vkGetDeviceProcAddr`) after device creation.
+- **The SDK headers (1.4.363) have drifted from the classic spec — check
+  `vulkan/vulkan_core.h` before touching any raw Vulkan struct.**
+  (1) `VkImageSubresourceRange` carries a **5th field, `baseArrayLayer`,
+  between `levelCount` and `layerCount`** — a 4-value brace-init silently
+  becomes `baseArrayLayer=1, layerCount=0` → invalid image view → *GPU
+  fault* (`nvlddmkm` Event 153 in the System log, then
+  `VK_ERROR_DEVICE_LOST` from every later call; the validation layer reports
+  it at `vkCreateImageView`). Initialize the fields individually.
+  (2) `VkPresentInfoKHR` has **no `fence` member** — the present fence goes
+  through a pNext `VkSwapchainPresentFenceInfoKHR`, which requires the
+  *device* ext `VK_KHR_swapchain_maintenance1` + the `swapchainMaintenance1`
+  feature (via `VkPhysicalDeviceSwapchainMaintenance1FeaturesKHR` chained on
+  `VkPhysicalDeviceFeatures2`); that device ext in turn requires the
+  *instance* exts `VK_KHR_surface_maintenance1` ←
+  `VK_KHR_get_surface_capabilities2`. (3) `VkSurfaceCreateInfoKHR` /
+  `vkCreateSurfaceKHR` are absent from the C headers — create the window
+  surface with `glfwCreateWindowSurface`. `control/src/gui/GuiVulkan.cpp`
+  is the reference for all of this (plus per-swapchain-image
+  `VkFramebuffer`s, which are required, not optional).
 - GPU debugging tools: the SDK ships `VkLayer_khronos_validation` (set
   `VK_LAYER_PATH=C:\VulkanSDK\<ver>\Bin` and
   `VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation`) and
@@ -232,7 +259,8 @@ A change is done when:
 2. `ctest --test-dir build -C Release --output-on-failure` passes (on a GPU
    machine, including the 12 render cases).
 3. Where the change is in the app layer, the relevant smoke command works
-   (`--self-test` for playback, `--help`/`--list` for control).
+   (`--self-test` for playback, `--help`/`--list` for control, and
+   `--gui-self-test 90` for control GUI changes).
 4. Docs are updated when behavior/protocol/format changed.
 5. The diff was self-reviewed against the conventions above.
 6. `git add` (explicit paths), `git commit` (conventional message),

@@ -4,6 +4,9 @@
 //   mediamax_control --system <name|idx> --command "method" [json-params]
 //   mediamax_control --system <name|idx>          (interactive REPL)
 //   mediamax_control --system <host:port>         (direct, no config file)
+//   mediamax_control --gui                        (windowed control GUI)
+//   mediamax_control --gui-self-test [frames]     (headless GUI smoke test)
+//       [--gui-self-test-system host:port]        (also drive a live engine)
 //
 // Systems are configured in a JSON file (default: ./systems.json):
 //   { "systems": [ { "name": "Living Room", "host": "192.168.1.50", "port": 47600 } ] }
@@ -20,6 +23,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "gui/GuiMain.h"
 #include "mediamax/net/ControlClient.h"
 #include "mediamax/protocol/CommandServer.h"
 #include "mediamax/util/Logger.h"
@@ -158,12 +162,19 @@ void printUsage()
         "  mediamax_control --list\n"
         "  mediamax_control --system <name|idx|host:port> --command \"method\" [json-params]\n"
         "  mediamax_control --system <name|idx|host:port>\n"
+        "  mediamax_control --gui\n"
+        "  mediamax_control --gui-self-test [frames] [--gui-self-test-system host:port]\n"
         "\n"
         "Options:\n"
         "  --config <file>    Systems config (default ./systems.json)\n"
         "  --list             List configured systems and exit\n"
         "  --system <spec>    Target system (config name, 1-based index or host:port)\n"
         "  --command <m>      One-shot command; optional json-params argument\n"
+        "  --gui              Open the windowed control GUI\n"
+        "  --gui-self-test    Headless GUI smoke test (renders [frames], default 90)\n"
+        "  --gui-self-test-system <host:port>\n"
+        "                     Also drive a running playback engine through the\n"
+        "                     GUI's command path (replaces its loaded show)\n"
         "  -h, --help         This help\n"
         "\n"
         "REPL commands:\n"
@@ -329,6 +340,10 @@ int main(int argc, char** argv)
     std::string paramsArg; // optional one-shot json-params (a positional)
     bool listOnly = false;
     bool help = false;
+    bool gui = false;
+    bool guiSelfTest = false;
+    std::string guiSelfTestSystem;
+    int guiSelfTestFrames = 90;
 
     for (int i = 1; i < argc; ++i)
     {
@@ -361,6 +376,37 @@ int main(int argc, char** argv)
         {
             command = next();
         }
+        else if (a == "--gui")
+        {
+            gui = true;
+        }
+        else if (a == "--gui-self-test")
+        {
+            guiSelfTest = true;
+            // Optional frame count as the next token (when numeric).
+            if (i + 1 < argc)
+            {
+                const std::string nextArg = argv[i + 1];
+                bool numeric = !nextArg.empty();
+                for (const char c : nextArg)
+                {
+                    if (c < '0' || c > '9')
+                    {
+                        numeric = false;
+                        break;
+                    }
+                }
+                if (numeric)
+                {
+                    guiSelfTestFrames = std::stoi(nextArg);
+                    ++i;
+                }
+            }
+        }
+        else if (a == "--gui-self-test-system")
+        {
+            guiSelfTestSystem = next();
+        }
         else if (a.rfind("--", 0) == 0)
         {
             std::cerr << "unknown option: " << a << std::endl;
@@ -388,6 +434,16 @@ int main(int argc, char** argv)
     }
 
     mediamax::Logger::instance().setLevel(mediamax::LogLevel::Error);
+
+    // GUI modes (the GUI loads the systems config itself).
+    if (gui || guiSelfTest)
+    {
+        if (gui)
+        {
+            return mediamax::gui::runGui(configPath);
+        }
+        return mediamax::gui::runGuiSelfTest(guiSelfTestFrames, guiSelfTestSystem);
+    }
 
     Config config;
     std::string error;
