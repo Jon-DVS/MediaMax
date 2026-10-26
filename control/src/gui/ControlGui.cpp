@@ -74,6 +74,10 @@ const char* modalPopupName(const std::string& which)
     {
         return "Pull show from system";
     }
+    if (which == "move")
+    {
+        return "Move display to system...";
+    }
     if (which == "about")
     {
         return "About MediaMax Control";
@@ -133,6 +137,7 @@ void ControlGuiApp::frame()
     renderMenuBar();
     renderDockspace();
     renderSystemsWindow();
+    renderDisplaysWindow();
     renderPlaybackWindow();
     renderShowEditorWindow();
     renderConsoleWindow();
@@ -398,7 +403,13 @@ void ControlGuiApp::renderDockspace()
         ImGuiID bottom = 0;
         ImGui::DockBuilderSplitNode(center, ImGuiDir_Down, 0.30f, &bottom, &center);
 
+        // The left column holds the system list (top) and the cross-system
+        // display list (bottom).
+        ImGuiID leftBottom = 0;
+        ImGui::DockBuilderSplitNode(left, ImGuiDir_Down, 0.5f, &leftBottom, &left);
+
         ImGui::DockBuilderDockWindow("Systems", left);
+        ImGui::DockBuilderDockWindow("Displays", leftBottom);
         ImGui::DockBuilderDockWindow("Show Editor", right);
         ImGui::DockBuilderDockWindow("Playback", center);
         ImGui::DockBuilderDockWindow("Console", bottom);
@@ -726,6 +737,86 @@ void ControlGuiApp::renderSystemsWindow()
         }
     }
     ImGui::EndChild();
+    ImGui::End();
+}
+
+// --- displays window (cross-system) ---------------------------------------------------
+
+void ControlGuiApp::renderDisplaysWindow()
+{
+    // Begin() may return false; End() must still be called (see above).
+    if (!ImGui::Begin("Displays"))
+    {
+        ImGui::End();
+        return;
+    }
+    // Every display of every online system, with the system it is attached
+    // to. "Move..." recreates the display on another system (display.add
+    // there + display.remove here).
+    int shown = 0;
+    if (ImGui::BeginTable("alldisplays", 8,
+                          ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_BordersOuter))
+    {
+        ImGui::TableSetupColumn("system");
+        ImGui::TableSetupColumn("display");
+        ImGui::TableSetupColumn("##id", ImGuiTableColumnFlags_WidthFixed, 32.0f);
+        ImGui::TableSetupColumn("x", ImGuiTableColumnFlags_WidthFixed, 52.0f);
+        ImGui::TableSetupColumn("y", ImGuiTableColumnFlags_WidthFixed, 52.0f);
+        ImGui::TableSetupColumn("w", ImGuiTableColumnFlags_WidthFixed, 52.0f);
+        ImGui::TableSetupColumn("h", ImGuiTableColumnFlags_WidthFixed, 52.0f);
+        ImGui::TableSetupColumn("##move", ImGuiTableColumnFlags_WidthFixed, 62.0f);
+        for (size_t i = 0; i < m_Systems.size(); ++i)
+        {
+            const SystemConnection::Snapshot snap = m_Systems[i]->snapshot();
+            if (!snap.haveStatus || !snap.status.contains("displays") ||
+                !snap.status["displays"].is_array())
+            {
+                continue;
+            }
+            for (const auto& d : snap.status["displays"])
+            {
+                const Id id = static_cast<Id>(d.value("id", 0u));
+                const std::string name = d.value("name", "display");
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                ImGui::TextUnformatted(m_Systems[i]->name().c_str());
+                ImGui::TableNextColumn();
+                ImGui::TextUnformatted(name.c_str());
+                ImGui::TableNextColumn();
+                ImGui::Text("%u", id);
+                ImGui::TableNextColumn();
+                ImGui::Text("%d", static_cast<int>(d.value("x", 0)));
+                ImGui::TableNextColumn();
+                ImGui::Text("%d", static_cast<int>(d.value("y", 0)));
+                ImGui::TableNextColumn();
+                ImGui::Text("%d", static_cast<int>(d.value("width", 0)));
+                ImGui::TableNextColumn();
+                ImGui::Text("%d", static_cast<int>(d.value("height", 0)));
+                ImGui::TableNextColumn();
+                // Unique per (system, display): display ids repeat across systems.
+                if (ImGui::Button(("Move##movedisp" + std::to_string(i) + "_" + std::to_string(id)).c_str()))
+                {
+                    m_MoveSourceSystem = static_cast<int>(i);
+                    m_MoveDisplayId = id;
+                    m_MoveName = name;
+                    m_MoveX = static_cast<std::int32_t>(d.value("x", 0));
+                    m_MoveY = static_cast<std::int32_t>(d.value("y", 0));
+                    m_MoveWidth = static_cast<std::int32_t>(d.value("width", 1920));
+                    m_MoveHeight = static_cast<std::int32_t>(d.value("height", 1080));
+                    m_MoveTarget = -1;
+                    m_MoveError.clear();
+                    m_MoveModal = true;
+                    ImGui::OpenPopup(modalPopupId("Move display to system..."));
+                }
+                ++shown;
+            }
+        }
+        ImGui::EndTable();
+    }
+    if (shown == 0)
+    {
+        ImGui::TextDisabled("(no displays on any online system)");
+    }
     ImGui::End();
 }
 
@@ -2125,6 +2216,110 @@ void ControlGuiApp::renderModals()
             ImGui::EndPopup();
         }
     }
+    if (m_MoveModal)
+    {
+        if (ImGui::BeginPopupModal("Move display to system...", &m_MoveModal))
+        {
+            const std::string sourceName =
+                (m_MoveSourceSystem >= 0 && m_MoveSourceSystem < static_cast<int>(m_Systems.size()))
+                    ? m_Systems[static_cast<size_t>(m_MoveSourceSystem)]->name()
+                    : "?";
+            ImGui::TextWrapped(
+                "Moves \"%s\" (display %u) from \"%s\" to another system: the display is "
+                "recreated on the target system with the same geometry (display.add) and "
+                "then removed from the source (display.remove).",
+                m_MoveName.c_str(), m_MoveDisplayId, sourceName.c_str());
+
+            // Candidates: every system except the source (display ids repeat
+            // across systems, so the target is an index, not an id).
+            std::vector<int> candidates;
+            for (int i = 0; i < static_cast<int>(m_Systems.size()); ++i)
+            {
+                if (i != m_MoveSourceSystem)
+                {
+                    candidates.push_back(i);
+                }
+            }
+            int comboIdx = -1;
+            for (size_t i = 0; i < candidates.size(); ++i)
+            {
+                if (m_MoveTarget == candidates[i])
+                {
+                    comboIdx = static_cast<int>(i);
+                }
+            }
+            const char* preview =
+                comboIdx >= 0 ? m_Systems[candidates[static_cast<size_t>(comboIdx)]]->name().c_str()
+                              : "(select a system)";
+            if (ImGui::BeginCombo("Target system##movetarget", preview))
+            {
+                for (size_t i = 0; i < candidates.size(); ++i)
+                {
+                    SystemConnection& sys = *m_Systems[candidates[i]];
+                    const std::string label =
+                        sys.name() + (sys.pollConnected() ? std::string() : "  (offline)");
+                    if (ImGui::Selectable(label.c_str(), comboIdx == static_cast<int>(i)))
+                    {
+                        comboIdx = static_cast<int>(i);
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            if (comboIdx >= 0)
+            {
+                m_MoveTarget = candidates[static_cast<size_t>(comboIdx)];
+            }
+
+            const bool canMove =
+                comboIdx >= 0 && m_MoveSourceSystem >= 0 && m_MoveSourceSystem < static_cast<int>(m_Systems.size());
+            if (!canMove)
+            {
+                ImGui::BeginDisabled();
+            }
+            if (ImGui::Button("Move##move") && canMove)
+            {
+                m_MoveError.clear();
+                SystemConnection& src = *m_Systems[static_cast<size_t>(m_MoveSourceSystem)];
+                SystemConnection& dst = *m_Systems[static_cast<size_t>(m_MoveTarget)];
+                nlohmann::json result;
+                std::string error;
+                // Create first: if the add fails the source display is
+                // untouched; if the remove fails afterwards, the error says
+                // exactly which side now holds the display.
+                if (dst.send("display.add",
+                             {{"x", m_MoveX}, {"y", m_MoveY}, {"width", m_MoveWidth},
+                              {"height", m_MoveHeight}, {"name", m_MoveName}},
+                             result, error))
+                {
+                    nlohmann::json removed;
+                    std::string removeError;
+                    if (src.send("display.remove", {{"display", m_MoveDisplayId}}, removed, removeError))
+                    {
+                        log("moved display " + m_MoveName + " (" + sourceName + ") to " + dst.name());
+                        m_MoveModal = false;
+                    }
+                    else
+                    {
+                        m_MoveError = "added on '" + dst.name() + "' but the remove on '" + src.name() +
+                                      "' failed: " + removeError;
+                    }
+                }
+                else
+                {
+                    m_MoveError = "display.add on '" + dst.name() + "' failed: " + error;
+                }
+            }
+            if (!canMove)
+            {
+                ImGui::EndDisabled();
+            }
+            if (!m_MoveError.empty())
+            {
+                ImGui::TextColored(kBadColor, "%s", m_MoveError.c_str());
+            }
+            ImGui::EndPopup();
+        }
+    }
 }
 
 // --- test hooks -----------------------------------------------------------------
@@ -2164,6 +2359,13 @@ void ControlGuiApp::openModal(const std::string& which)
     else if (which == "pull")
     {
         m_PullModal = true;
+    }
+    else if (which == "move")
+    {
+        // The real buttons fill the source/target state from a table row;
+        // the test hook only needs the dialog to open and close.
+        m_MoveModal = true;
+        m_MoveError.clear();
     }
     else
     {
@@ -2210,6 +2412,11 @@ bool ControlGuiApp::testCloseModal(const std::string& which)
     if (which == "pull")
     {
         m_PullModal = false;
+        return true;
+    }
+    if (which == "move")
+    {
+        m_MoveModal = false;
         return true;
     }
     if (which == "about")

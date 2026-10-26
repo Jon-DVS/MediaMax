@@ -2,11 +2,14 @@
 
 // The control GUI: application state + per-frame rendering (Dear ImGui).
 //
-// Layout (dockspace): Systems (left), Playback (center), Show Editor (right)
-// and Console (bottom). Every protocol method is reachable from the UI:
+// Layout (dockspace): Systems + Displays (left), Playback (center), Show
+// Editor (right) and Console (bottom). Every protocol method is reachable
+// from the UI:
 // transport, scene set/clear, live layer overrides, displays + warp grid,
 // media load/unload, system name, show authoring (saved or pushed live via
-// show.loadJson) and a raw command console as the catch-all.
+// show.loadJson) and a raw command console as the catch-all. The Displays
+// window lists every display of every online system (with its owning
+// system) and can move a display to another system.
 
 #include <array>
 #include <cstdint>
@@ -42,11 +45,11 @@ public:
     bool selfTestSystem(const std::string& host, std::uint16_t port, std::string& report);
 
     // --- test hooks (driven by --gui-self-test; no effect in normal use) ----
-    // Queues the given modal ("open", "saveas", "pull" or "about") to be
-    // opened by the next frame(): the same state the UI buttons set plus
-    // OpenPopup(). Deferred because OpenPopup() must run inside a frame (it
-    // dereferences the current ImGui window, which is NULL between frames).
-    // Returns false for an unknown name.
+    // Queues the given modal ("open", "saveas", "pull", "about" or "move")
+    // to be opened by the next frame(): the same state the UI buttons set
+    // plus OpenPopup(). Deferred because OpenPopup() must run inside a frame
+    // (it dereferences the current ImGui window, which is NULL between
+    // frames). Returns false for an unknown name.
     bool testOpenModal(const std::string& which);
     // True while the given modal sits open in Dear ImGui's popup stack.
     bool testModalOpen(const std::string& which) const;
@@ -76,6 +79,9 @@ private:
     // One-shot ping against a not-yet-registered address (the "Test" button);
     // blocking (<= ~2 s), run from the UI thread on explicit user action.
     void testSystemAddress(const std::string& host, int port);
+    // Cross-system display list: every display of every online system with
+    // its owning system, plus "Move..." (move a display to another system).
+    void renderDisplaysWindow();
     void renderPlaybackWindow();
     void renderTransportBlock(const SystemConnection::Snapshot& snap);
     void renderScenesBlock(const SystemConnection::Snapshot& snap);
@@ -134,6 +140,16 @@ private:
     bool m_PullModal = false;
     std::string m_PullPath;
     bool m_AboutModal = false;
+    // "Move display to system..." modal (the Displays window). The source
+    // display's record is copied from the clicked row; the move sends
+    // display.add to the target system and display.remove to the source.
+    bool m_MoveModal = false;
+    int m_MoveSourceSystem = -1; // index into m_Systems
+    Id m_MoveDisplayId = kInvalidId;
+    std::string m_MoveName;
+    std::int32_t m_MoveX = 0, m_MoveY = 0, m_MoveWidth = 0, m_MoveHeight = 0;
+    int m_MoveTarget = -1; // index into m_Systems
+    std::string m_MoveError;
     // Test hook: modal queued by testOpenModal(), opened by the next frame().
     std::string m_PendingTestOpenModal;
 
