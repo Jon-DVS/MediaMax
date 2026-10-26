@@ -7,12 +7,20 @@
 // playback engine installs the FFmpeg-based factory when built with FFmpeg;
 // tests install procedural factories). Loading a file that the installed
 // factory cannot decode fails cleanly - the library never throws.
+//
+// Media is deduplicated by file: the same file (canonicalized path) is
+// loaded once. Re-loading an unchanged file returns the existing asset id;
+// a file that changed on disk (size or last-write time) is reloaded in
+// place, keeping its id. The fingerprint is deliberately cheap (stat-based,
+// not a content hash): media files can be multi-gigabyte.
 
+#include <filesystem>
 #include <functional>
 #include <map>
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "mediamax/media/MediaSource.h"
@@ -44,7 +52,11 @@ public:
     void setProbeFunction(MediaProbeFunction fn) { m_Probe = std::move(fn); }
 
     // Loads a media file: probes it, creates a source, registers the asset.
-    // Returns the new asset id; kInvalidId (and an error) on failure.
+    // Returns the asset id; kInvalidId (and an error) on failure.
+    //
+    // Deduplication by file (see the class docs): a path that is already
+    // loaded with an unchanged file returns the existing id without
+    // touching the factory; a changed file is reloaded in place (same id).
     Id load(const std::string& path, std::string& error);
 
     // Probes a file without loading it.
@@ -63,7 +75,23 @@ public:
     bool empty() const { return m_Assets.empty(); }
 
 private:
+    // Change fingerprint of a file on disk: (size, last write time).
+    // nullopt when the file does not exist or cannot be stat'ed.
+    static std::optional<std::pair<std::uintmax_t, std::filesystem::file_time_type>>
+    fileFingerprint(const std::string& path);
+    // Normalized dedup key for a path: weakly canonical (missing components
+    // are tolerated) and lowercased on case-insensitive file systems.
+    static std::string pathKey(const std::string& path);
+
+    // One dedup entry per loaded file.
+    struct PathEntry
+    {
+        std::optional<std::pair<std::uintmax_t, std::filesystem::file_time_type>> fingerprint;
+        Id id = kInvalidId;
+    };
+
     std::map<Id, MediaAsset> m_Assets;
+    std::map<std::string, PathEntry> m_PathEntries;
     IdAllocator m_IdAllocator;
     MediaSourceFactory m_Factory;
     MediaProbeFunction m_Probe;

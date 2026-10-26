@@ -5,6 +5,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -224,6 +225,152 @@ TEST_CASE("MediaLibrary: no factory is a clean error")
     std::string error;
     CHECK(library.load("x.mp4", error) == kInvalidId);
     CHECK_FALSE(error.empty());
+}
+
+TEST_CASE("MediaLibrary: the same file loads once (dedup by path)")
+{
+    std::atomic<int> factoryCalls{0};
+    MediaLibrary library;
+    library.setSourceFactory(
+        [&factoryCalls](const std::string& path, std::string& error) -> std::shared_ptr<IMediaSource> {
+            ++factoryCalls;
+            if (path.empty())
+            {
+                error = "empty path";
+                return nullptr;
+            }
+            return std::make_shared<TestPatternSource>(16, 16, FrameRate::fps30(),
+                                                       Time::fromSeconds(1.0),
+                                                       TestPatternKind::Solid);
+        });
+
+    std::string error;
+    const Id a = library.load("clip.mp4", error);
+    const Id b = library.load("clip.mp4", error);
+    const Id c = library.load("./clip.mp4", error); // same file, spelled differently
+
+    CHECK(a != kInvalidId);
+    CHECK(b == a);
+    CHECK(c == a);
+    CHECK(factoryCalls.load() == 1); // the factory runs once for the file
+    CHECK(library.count() == 1);
+    // The first-registered spelling is kept in the asset record.
+    CHECK((*library.find(a))->path == "clip.mp4");
+
+    CHECK(library.unload(a));
+    // After unload the file may be loaded again (fresh id, factory re-runs).
+    const Id d = library.load("clip.mp4", error);
+    CHECK(d != kInvalidId);
+    CHECK(d != a);
+    CHECK(factoryCalls.load() == 2);
+}
+
+TEST_CASE("MediaLibrary: a changed file is reloaded with the same id")
+{
+    // Uses a real file on disk: the change fingerprint is (size, last write
+    // time), so both are varied explicitly to make the test deterministic.
+    const auto path = std::filesystem::temp_directory_path() / "mediamax_dedup_test.bin";
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+
+    auto write = [&](const std::string& content) {
+        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        out << content;
+    };
+    write("v1");
+
+    std::atomic<int> factoryCalls{0};
+    MediaLibrary library;
+    library.setSourceFactory(
+        [&factoryCalls](const std::string&, std::string& error) -> std::shared_ptr<IMediaSource> {
+            ++factoryCalls;
+            (void)error;
+            return std::make_shared<TestPatternSource>(16, 16, FrameRate::fps30(),
+                                                       Time::fromSeconds(1.0),
+                                                       TestPatternKind::Solid);
+        });
+
+    std::string error;
+    const Id a = library.load(std::string(path.string()), error);
+    CHECK(a != kInvalidId);
+    CHECK(factoryCalls.load() == 1);
+
+    // Unchanged re-load: same id, no factory call.
+    CHECK(library.load(std::string(path.string()), error) == a);
+    CHECK(factoryCalls.load() == 1);
+
+    // The file changes on disk (size + explicitly distinct mtime).
+    write("v2-is-longer");
+    std::filesystem::last_write_time(path,
+                                     std::filesystem::file_time_type::clock::now() +
+                                         std::chrono::hours(1),
+                                     ec);
+    REQUIRE_FALSE(ec);
+
+    CHECK(library.load(std::string(path.string()), error) == a); // same id...
+    CHECK(factoryCalls.load() == 2); // ...but the source was rebuilt
+    CHECK(library.count() == 1);
+
+    std::filesystem::remove(path, ec);
+}
+
+TEST_CASE("MediaLibrary: a changed file that fails to decode keeps the old source")
+{
+    const auto path = std::filesystem::temp_directory_path() / "mediamax_dedup_test_fail.bin";
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+    {
+        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        out << "v1";
+    }
+
+    int factoryCalls = 0;
+    bool failNext = false;
+    MediaLibrary library;
+    library.setSourceFactory(
+        [&](const std::string&, std::string& error) -> std::shared_ptr<IMediaSource> {
+            ++factoryCalls;
+            if (failNext)
+            {
+                error = "decode failed";
+                return nullptr;
+            }
+            return std::make_shared<TestPatternSource>(16, 16, FrameRate::fps30(),
+                                                       Time::fromSeconds(1.0),
+                                                       TestPatternKind::Solid);
+        });
+
+    std::string error;
+    const Id a = library.load(std::string(path.string()), error);
+    CHECK(a != kInvalidId);
+    REQUIRE(library.find(a).has_value());
+    const auto* before = *library.find(a);
+
+    // File changes, but the new content cannot be decoded.
+    {
+        std::ofstream out(path, std::ios::binary | std::ios::app);
+        out << "-changed";
+    }
+    std::filesystem::last_write_time(path,
+                                     std::filesystem::file_time_type::clock::now() +
+                                         std::chrono::hours(2),
+                                     ec);
+    failNext = true;
+    error.clear();
+    CHECK(library.load(std::string(path.string()), error) == kInvalidId);
+    CHECK(error == "decode failed");
+
+    // The asset is intact: same id, old source still there.
+    REQUIRE(library.find(a).has_value());
+    const auto* after = *library.find(a);
+    CHECK(after->source == before->source);
+
+    // A subsequent load of the (still changed) file retries the reload.
+    failNext = false;
+    CHECK(library.load(std::string(path.string()), error) == a);
+    CHECK(factoryCalls == 3);
+
+    std::filesystem::remove(path, ec);
 }
 
 #ifdef MEDIAMAX_HAS_FFMPEG

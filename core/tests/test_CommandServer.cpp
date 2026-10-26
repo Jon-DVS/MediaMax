@@ -299,7 +299,17 @@ TEST_CASE("layer.set rejects layer ids that are not in the show")
 TEST_CASE("media.load registers an asset with its metadata")
 {
     Fixture f;
-    const Response resp = f.run("media.load", {{"path", "media/video-a.mp4"}});
+    // The fixture already loaded video-a as kMediaA: a deduplicated re-load
+    // returns that existing asset (same id, no re-decode).
+    const Response dup = f.run("media.load", {{"path", "media/video-a.mp4"}});
+    REQUIRE(dup.ok);
+    CHECK(dup.result.at("id").get<std::uint64_t>() == kMediaA);
+    CHECK(dup.result.at("width").get<std::uint32_t>() == 640);
+
+    // A file that is not loaded registers a fresh asset. (Unload video-b so
+    // the factory has to build it again.)
+    REQUIRE(f.run("media.unload", {{"id", kMediaB}}).ok);
+    const Response resp = f.run("media.load", {{"path", "media/video-b.mp4"}});
     REQUIRE(resp.ok);
     const auto id = resp.result.at("id").get<std::uint64_t>();
     CHECK(id > 2); // a new asset, not one of the fixture loads
@@ -428,15 +438,18 @@ TEST_CASE("show.save then show.load round trips the show")
     CHECK(load.result.at("scenes").get<std::uint64_t>() == 2);
     CHECK(load.result.at("media").get<std::uint64_t>() == 2);
 
-    // Show-file media ids were remapped to fresh library assets.
+    // The show file's media ids are file-local and were remapped to library
+    // assets. Both files were already loaded by the fixture, so the deduped
+    // remap lands on the existing assets and the library does not grow.
     const Show& show = f.engine.show();
     CHECK(show.media.size() == 2);
+    CHECK(f.media.count() == 2);
     for (const auto& ref : show.media)
     {
         CHECK(ref.id != kInvalidId);
         CHECK(f.media.find(ref.id).has_value());
     }
-    // The video layer now points at the remapped asset.
+    // The video layer now points at the remapped (existing) asset.
     const Scene* sceneA = show.findScene(1);
     REQUIRE(sceneA);
     const Layer* videoLayer = nullptr;
@@ -448,7 +461,7 @@ TEST_CASE("show.save then show.load round trips the show")
         }
     }
     REQUIRE(videoLayer);
-    CHECK(videoLayer->mediaId != kMediaA); // remapped to a new id
+    CHECK(videoLayer->mediaId == kMediaA);
     CHECK(f.media.find(videoLayer->mediaId).has_value());
 
     // The engine was reset by the load.
@@ -520,12 +533,15 @@ TEST_CASE("show.loadJson loads an inline show document")
 
     CHECK(f.engine.state() == PlayState::Stopped);
     CHECK(f.engine.time().isZero());
+    // The show's media ids remap onto library assets; the fixture already
+    // had both files, so the deduped remap lands on the existing assets.
+    CHECK(f.media.count() == 2);
     for (const auto& ref : f.engine.show().media)
     {
         CHECK(ref.id != kInvalidId);
         CHECK(f.media.find(ref.id).has_value());
     }
-    // The video layer points at a remapped asset, not the show-local id.
+    // The video layer points at the existing library asset for its file.
     const Scene* sceneA = f.engine.show().findScene(1);
     REQUIRE(sceneA);
     const Layer* videoLayer = nullptr;
@@ -537,7 +553,8 @@ TEST_CASE("show.loadJson loads an inline show document")
         }
     }
     REQUIRE(videoLayer);
-    CHECK(videoLayer->mediaId != kMediaA);
+    CHECK(videoLayer->mediaId == kMediaA);
+    CHECK(f.media.find(videoLayer->mediaId).has_value());
 }
 
 TEST_CASE("show.loadJson validates its parameter")

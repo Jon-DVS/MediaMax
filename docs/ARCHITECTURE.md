@@ -89,7 +89,12 @@ pixels to this reference for every mode.
   (pulled with a timeout), metadata (type, size, frame rate, duration,
   audio layout).
 - `MediaLibrary` — the process-wide asset store: load (via a pluggable
-  source factory), unload, lookup. **Not internally synchronized**: the app
+  source factory), unload, lookup. Loads are deduplicated by file: the
+  canonicalized path is the key, and a stored `(file size, last write time)`
+  fingerprint decides re-loads — an unchanged file returns the existing
+  asset id, a changed file is reloaded in place keeping its id (the media
+  pump holds `shared_ptr` copies of sources, so in-flight frames stay safe).
+  **Not internally synchronized**: the app
   serializes access with its state mutex (the media pump is handed the same
   mutex), which is the synchronization point between the pump thread and
   everything else.

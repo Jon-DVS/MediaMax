@@ -141,6 +141,12 @@ Media object shape (used by `media.load`, `media.list`, `status`):
 
 - Params: `path` (string, required).
 - Result: the media object.
+- Media is deduplicated by file: loading a path that is already loaded
+  returns the existing media object (same `id`, no re-decode) unless the
+  file changed on disk (size or last-write time), in which case the source
+  is reloaded in place and the same `id` is kept. Loading the same file
+  through different spellings of the path (relative vs. absolute, case on
+  Windows) still dedupes to one asset.
 
 #### `media.list`
 
