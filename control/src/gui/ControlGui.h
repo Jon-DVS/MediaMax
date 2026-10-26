@@ -58,6 +58,11 @@ private:
     // checkDockInvariants() in ControlGui.cpp.
     void checkDockInvariants(std::uint32_t dockspaceId);
     void renderSystemsWindow();
+    // Registers and auto-connects a new system (the "Add system" form).
+    void addSystem(const std::string& name, const std::string& host, int port);
+    // One-shot ping against a not-yet-registered address (the "Test" button);
+    // blocking (<= ~2 s), run from the UI thread on explicit user action.
+    void testSystemAddress(const std::string& host, int port);
     void renderPlaybackWindow();
     void renderTransportBlock(const SystemConnection::Snapshot& snap);
     void renderScenesBlock(const SystemConnection::Snapshot& snap);
@@ -97,6 +102,8 @@ private:
     std::string m_NewName;
     std::string m_NewHost = "127.0.0.1";
     int m_NewPort = 47600;
+    std::string m_SysTestResult; // last "Test" outcome, shown under the form
+    bool m_SysTestOk = false;
 
     ShowEditor m_Editor;
     std::string m_EditorError;

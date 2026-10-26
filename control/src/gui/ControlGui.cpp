@@ -15,6 +15,7 @@
 #include <imgui_stdlib.h>
 
 #include "gui/GuiCrash.h"
+#include "mediamax/net/ControlClient.h"
 #include "mediamax/util/File.h"
 
 namespace mediamax::gui
@@ -475,6 +476,45 @@ void ControlGuiApp::checkDockInvariants(std::uint32_t dockspaceId)
 
 // --- systems window ---------------------------------------------------------------
 
+void ControlGuiApp::addSystem(const std::string& name, const std::string& host, int port)
+{
+    m_Systems.push_back(
+        std::make_unique<SystemConnection>(name, host, static_cast<std::uint16_t>(port)));
+    m_Systems.back()->connect(); // dials the running engine; the poll thread reports state
+    m_Active = static_cast<int>(m_Systems.size()) - 1;
+    m_ConfigDirty = true;
+    log("added system " + name + " (" + host + ":" + std::to_string(port) + "); connecting...");
+    m_NewName.clear();
+    m_SysTestResult.clear();
+    m_SysTestOk = false;
+}
+
+void ControlGuiApp::testSystemAddress(const std::string& host, int port)
+{
+    // One-shot probe (explicit user action, so a <= ~2 s UI-thread block is
+    // acceptable). Uses a throwaway connection: the poll connection of an
+    // already-registered system must not be disturbed.
+    m_SysTestOk = false;
+    mediamax::ControlClient client;
+    if (!client.connect(host, static_cast<std::uint16_t>(port), 2000))
+    {
+        m_SysTestResult = "unreachable: " + host + ":" + std::to_string(port) + " (no connection)";
+        return;
+    }
+    json result;
+    std::string error;
+    if (client.request("ping", json::object(), result, error, 2000))
+    {
+        m_SysTestOk = true;
+        m_SysTestResult = "reachable: system '" + result.value("system", std::string("unnamed")) + "'";
+    }
+    else
+    {
+        m_SysTestResult = "unreachable: " + error;
+    }
+    client.disconnect();
+}
+
 void ControlGuiApp::renderSystemsWindow()
 {
     // Begin() may return false (collapsed/fully clipped window) but the
@@ -505,98 +545,121 @@ void ControlGuiApp::renderSystemsWindow()
         ImGui::TextColored(kWarnColor, "(unsaved)");
     }
     ImGui::Spacing();
-
-    if (ImGui::BeginTable("systemlist", 4,
-                          ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_BordersOuter))
-    {
-        ImGui::TableSetupColumn("status", ImGuiTableColumnFlags_WidthFixed, 64.0f);
-        ImGui::TableSetupColumn("name");
-        ImGui::TableSetupColumn("address");
-        ImGui::TableSetupColumn("##action", ImGuiTableColumnFlags_WidthFixed, 118.0f);
-        for (size_t i = 0; i < m_Systems.size(); ++i)
-        {
-            auto& conn = *m_Systems[i];
-            ImGui::TableNextRow();
-            ImGui::TableNextColumn();
-            if (conn.pollConnected())
-            {
-                ImGui::TextColored(kOkColor, "online");
-            }
-            else
-            {
-                ImGui::TextColored(kBadColor, "offline");
-            }
-            ImGui::TableNextColumn();
-            ImGui::PushID(static_cast<int>(i));
-            if (ImGui::Selectable(conn.name().c_str(), m_Active == static_cast<int>(i)))
-            {
-                m_Active = static_cast<int>(i);
-            }
-            ImGui::PopID();
-            ImGui::TableNextColumn();
-            ImGui::TextUnformatted((conn.host() + ":" + std::to_string(conn.port())).c_str());
-            ImGui::TableNextColumn();
-            if (ImGui::Button(conn.active() ? "Disconnect" : "Connect##sys"))
-            {
-                if (conn.active())
-                {
-                    conn.disconnect();
-                    log(conn.name() + " disconnected");
-                }
-                else
-                {
-                    conn.connect();
-                    log(conn.name() + " connecting...");
-                }
-            }
-            ImGui::SameLine();
-            if (ImGui::Button("x##rm"))
-            {
-                const std::string name = conn.name();
-                conn.disconnect();
-                m_Systems.erase(m_Systems.begin() + static_cast<std::ptrdiff_t>(i));
-                if (m_Active >= static_cast<int>(m_Systems.size()))
-                {
-                    m_Active = static_cast<int>(m_Systems.size()) - 1;
-                }
-                else if (m_Active > static_cast<int>(i))
-                {
-                    --m_Active;
-                }
-                m_ConfigDirty = true;
-                log("removed system " + name);
-                break;
-            }
-        }
-        ImGui::EndTable();
-    }
-
-    ImGui::Spacing();
     ImGui::Separator();
+
+    // "Add system" — always visible at the top of the pane. This section used
+    // to sit below the systems table, where it scrolled out of view as soon
+    // as the list grew, so the button looked missing.
     ImGui::TextUnformatted("Add system");
     ImGui::InputTextWithHint("##newname", "name", &m_NewName);
     ImGui::InputText("##newhost", &m_NewHost);
     ImGui::SameLine();
+    ImGui::SetNextItemWidth(80.0f);
     ImGui::InputInt("##newport", &m_NewPort);
     ImGui::SameLine();
+    if (ImGui::Button("Test##systest"))
+    {
+        testSystemAddress(m_NewHost, m_NewPort);
+    }
+    if (!m_SysTestResult.empty())
+    {
+        ImGui::TextWrapped("%s", m_SysTestResult.c_str());
+    }
     const bool canAdd = !m_NewName.empty() && !m_NewHost.empty() && m_NewPort >= 1 && m_NewPort <= 65535;
-    if (ImGui::Button("Add##sys") && canAdd)
+    ImGui::BeginDisabled(!canAdd);
+    if (ImGui::Button("Add system##add"))
     {
-        m_Systems.push_back(std::make_unique<SystemConnection>(
-            m_NewName, m_NewHost, static_cast<std::uint16_t>(m_NewPort)));
-        m_Systems.back()->connect();
-        m_Active = static_cast<int>(m_Systems.size()) - 1;
-        m_ConfigDirty = true;
-        log("added system " + m_NewName);
-        m_NewName.clear();
+        addSystem(m_NewName, m_NewHost, m_NewPort);
     }
+    ImGui::EndDisabled();
+    if (!canAdd)
+    {
+        ImGui::TextDisabled("needs a name, a host and a port (1-65535)");
+    }
+    ImGui::Spacing();
+    ImGui::Separator();
 
-    // Errors of the selected system, if any.
-    if (SystemConnection* active = activeConnection(); active && !active->snapshot().lastError.empty())
+    // The system list scrolls on its own so a long list can never push the
+    // form (or the error line) out of view again.
+    if (ImGui::BeginChild("systemlist", ImVec2(0.0f, 0.0f), false))
     {
-        ImGui::Spacing();
-        ImGui::TextColored(kBadColor, "%s", active->snapshot().lastError.c_str());
+        if (ImGui::BeginTable("systems", 4,
+                              ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_BordersOuter))
+        {
+            ImGui::TableSetupColumn("status", ImGuiTableColumnFlags_WidthFixed, 64.0f);
+            ImGui::TableSetupColumn("name");
+            ImGui::TableSetupColumn("address");
+            ImGui::TableSetupColumn("##action", ImGuiTableColumnFlags_WidthFixed, 118.0f);
+            for (size_t i = 0; i < m_Systems.size(); ++i)
+            {
+                auto& conn = *m_Systems[i];
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                if (conn.pollConnected())
+                {
+                    ImGui::TextColored(kOkColor, "online");
+                }
+                else
+                {
+                    ImGui::TextColored(kBadColor, "offline");
+                }
+                ImGui::TableNextColumn();
+                ImGui::PushID(static_cast<int>(i));
+                if (ImGui::Selectable(conn.name().c_str(), m_Active == static_cast<int>(i)))
+                {
+                    m_Active = static_cast<int>(i);
+                }
+                ImGui::PopID();
+                ImGui::TableNextColumn();
+                ImGui::TextUnformatted((conn.host() + ":" + std::to_string(conn.port())).c_str());
+                ImGui::TableNextColumn();
+                if (ImGui::Button(conn.active() ? "Disconnect" : "Connect##sys"))
+                {
+                    if (conn.active())
+                    {
+                        conn.disconnect();
+                        log(conn.name() + " disconnected");
+                    }
+                    else
+                    {
+                        conn.connect();
+                        log(conn.name() + " connecting...");
+                    }
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("x##rm"))
+                {
+                    const std::string name = conn.name();
+                    conn.disconnect();
+                    m_Systems.erase(m_Systems.begin() + static_cast<std::ptrdiff_t>(i));
+                    if (m_Active >= static_cast<int>(m_Systems.size()))
+                    {
+                        m_Active = static_cast<int>(m_Systems.size()) - 1;
+                    }
+                    else if (m_Active > static_cast<int>(i))
+                    {
+                        --m_Active;
+                    }
+                    m_ConfigDirty = true;
+                    log("removed system " + name);
+                    break;
+                }
+            }
+            ImGui::EndTable();
+        }
+        if (m_Systems.empty())
+        {
+            ImGui::TextDisabled("(no systems - add one above)");
+        }
+
+        // Errors of the selected system, if any.
+        if (SystemConnection* active = activeConnection(); active && !active->snapshot().lastError.empty())
+        {
+            ImGui::Spacing();
+            ImGui::TextColored(kBadColor, "%s", active->snapshot().lastError.c_str());
+        }
     }
+    ImGui::EndChild();
     ImGui::End();
 }
 
