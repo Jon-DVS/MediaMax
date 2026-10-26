@@ -37,6 +37,8 @@ constexpr size_t kLogLineLimit = 400; // max characters kept per console line
 const ImVec4 kOkColor = {0.35f, 0.9f, 0.4f, 1.0f};
 const ImVec4 kBadColor = {0.9f, 0.35f, 0.35f, 1.0f};
 const ImVec4 kWarnColor = {1.0f, 0.8f, 0.3f, 1.0f};
+// The currently active scene's button (Scenes block).
+const ImVec4 kActiveSceneColor = {0.2f, 0.5f, 0.27f, 1.0f};
 
 // The modal dialogs are opened from several places (the menu bar, the show
 // editor) but must be Begun in one fixed context. In this Dear ImGui release
@@ -1035,22 +1037,46 @@ void ControlGuiApp::renderScenesBlock(const SystemConnection::Snapshot& snap)
         return;
     }
     const json& scenes = snap.scenes["scenes"];
-    for (int i = 0; i < static_cast<int>(scenes.size()); ++i)
+
+    // One row per scene: a full-width button labelled "<id> - <name>" and a
+    // status column. The active scene is highlighted on its button AND
+    // flagged in the status column - the flag lives in its own column
+    // because a full-width button leaves no room on the same line.
+    if (ImGui::BeginTable("scenes", 2,
+                          ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_BordersOuter))
     {
-        const json& s = scenes[static_cast<size_t>(i)];
-        const std::string label = std::to_string(s.value("id", 0u)) + " - " + s.value("name", "?");
-        ImGui::PushID(i);
-        if (ImGui::Button(label.c_str(), ImVec2(-FLT_MAX, 0.0f)))
+        ImGui::TableSetupColumn("scene", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("##active", ImGuiTableColumnFlags_WidthFixed, 60.0f);
+        for (int i = 0; i < static_cast<int>(scenes.size()); ++i)
         {
-            std::string error;
-            sendActive("scene.set", {{"index", i}}, error);
+            const json& s = scenes[static_cast<size_t>(i)];
+            const bool active = s.value("active", false);
+            const std::string label =
+                std::to_string(s.value("id", 0u)) + " - " + s.value("name", "?");
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::PushID(i);
+            if (active)
+            {
+                ImGui::PushStyleColor(ImGuiCol_Button, kActiveSceneColor);
+            }
+            if (ImGui::Button(label.c_str(), ImVec2(-FLT_MAX, 0.0f)))
+            {
+                std::string error;
+                sendActive("scene.set", {{"index", i}}, error);
+            }
+            if (active)
+            {
+                ImGui::PopStyleColor();
+            }
+            ImGui::TableNextColumn();
+            if (active)
+            {
+                ImGui::TextColored(kOkColor, "active");
+            }
+            ImGui::PopID();
         }
-        if (s.value("active", false))
-        {
-            ImGui::SameLine();
-            ImGui::TextColored(kOkColor, "active");
-        }
-        ImGui::PopID();
+        ImGui::EndTable();
     }
     if (ImGui::Button("Return to timeline (scene.clear)", ImVec2(-FLT_MAX, 0.0f)))
     {
