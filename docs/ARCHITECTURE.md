@@ -270,6 +270,15 @@ plus a private, never-again-submitted host window; the pane renders into the
 dead window and the process crashes once ImGui's 60 s memory compaction
 frees that host's draw-list channels.)
 
+The raw-Vulkan surface follows the official ImGui GLFW+Vulkan example: the
+swapchain is recreated when the framebuffer size changes (polled per frame;
+a minimized window's frames are skipped entirely) or on
+`OUT_OF_DATE`/`SUBOPTIMAL` from acquire/present. The render pass is
+format-bound and the format never changes, so it is created once and the
+Dear ImGui pipeline compiled against it stays valid across recreates. On
+Windows the window frame opts into dark mode (`DwmSetWindowAttribute`) so a
+light Windows theme does not put a white title bar over the dark UI.
+
 Crash diagnostics (`src/gui/GuiCrash.cpp`): the GUI thread installs an
 unhandled-exception filter that appends a crash report — registers plus a
 full Dear ImGui state dump (every window and dock node with flags, host

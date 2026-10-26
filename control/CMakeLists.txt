@@ -27,9 +27,10 @@ target_include_directories(mediamax_control
         ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 if(WIN32)
-    # MessageBoxW (crash diagnostics) and the same loader deployment as the
-    # playback app (no-op on newer SDKs).
-    target_link_libraries(mediamax_control PRIVATE user32)
+    # MessageBoxW (crash diagnostics), DwmSetWindowAttribute (dark title
+    # bar) and the same loader deployment as the playback app (no-op on
+    # newer SDKs).
+    target_link_libraries(mediamax_control PRIVATE user32 dwmapi)
     mediamax_deploy_vulkan_loader(mediamax_control)
 endif()
 

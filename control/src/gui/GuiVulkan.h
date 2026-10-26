@@ -56,13 +56,22 @@ public:
     VkRenderPass renderPass() const { return m_RenderPass; }
     std::size_t imageCount() const { return m_Images.size(); }
 
-    // Call when the window is resized (rebuilds the swapchain).
+    // Call when the window is resized (rebuilds the swapchain + framebuffers).
+    // The render pass is format-bound (the format never changes), so it - and
+    // the Dear ImGui pipeline compiled against it - survives a recreate. A
+    // failed recreate leaves the swapchain missing until the next call
+    // succeeds; beginFrame() skips frames in the meantime.
     void recreateSwapchain();
 
-    // Begins the in-flight frame: waits on the fence, acquires an image,
-    // begins the command buffer and render pass. Returns false when the
-    // swapchain is out of date or suboptimal (call recreateSwapchain() and
-    // retry); the frame is then not active and endFrame() must not run.
+    // True when a usable swapchain exists (a failed recreate leaves it
+    // missing until the next successful one).
+    bool swapchainValid() const { return m_Swapchain != VK_NULL_HANDLE; }
+
+    // Begins the in-flight frame: waits for the previous frame's present,
+    // acquires an image, begins the command buffer and render pass. Returns
+    // false when the swapchain is out of date or suboptimal (call
+    // recreateSwapchain() and retry) or missing; the frame is then not
+    // active and endFrame() must not run.
     bool beginFrame();
 
     // Ends the frame: closes the render pass, submits and presents.
@@ -79,7 +88,15 @@ public:
 private:
     bool createInstanceAndSurface(GLFWwindow* window, std::string& error);
     bool createDevice(std::string& error);
-    bool createSwapchain(std::string& error);
+    // Creates the swapchain (plus its image views). `oldSwapchain` is passed
+    // through so the driver can reuse the previous chain's buffer memory;
+    // it must not be destroyed by the caller until this has run (see
+    // recreateSwapchain()).
+    bool createSwapchain(VkSwapchainKHR oldSwapchain, std::string& error);
+    // Releases the framebuffers and image views (the swapchain's resources),
+    // keeping the swapchain handle itself.
+    void destroySwapchainResources();
+    // Releases everything the swapchain owns, including the handle.
     void destroySwapchain();
     bool createRenderPass();
     bool createFramebuffers();

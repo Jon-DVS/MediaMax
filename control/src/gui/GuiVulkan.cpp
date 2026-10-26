@@ -19,7 +19,12 @@ namespace mediamax::gui
 namespace
 {
 
-constexpr std::uint64_t kAcquireTimeoutNs = 100'000'000; // 100 ms
+// Preferred surface formats, in order (the official example's preference
+// list): the first one offered by the surface with the sRGB colorspace wins.
+const VkFormat kPreferredFormats[] = {VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM,
+                                      VK_FORMAT_B8G8R8_UNORM,    VK_FORMAT_R8G8B8_UNORM};
+
+const VkColorSpaceKHR kPreferredColorSpace = VK_COLORSPACE_SRGB_NONLINEAR_KHR;
 
 const VkClearValue kClearValue = {{0.06f, 0.08f, 0.12f, 1.0f}};
 
@@ -219,7 +224,7 @@ bool GuiVulkan::createDevice(std::string& error)
     return false;
 }
 
-bool GuiVulkan::createSwapchain(std::string& error)
+bool GuiVulkan::createSwapchain(VkSwapchainKHR oldSwapchain, std::string& error)
 {
     VkSurfaceCapabilitiesKHR caps;
     if (vkGetPhysicalDeviceSurfaceCapabilitiesKHR(m_PhysicalDevice, m_Surface, &caps) !=
@@ -239,14 +244,43 @@ bool GuiVulkan::createSwapchain(std::string& error)
     std::vector<VkSurfaceFormatKHR> formats(formatCount);
     vkGetPhysicalDeviceSurfaceFormatsKHR(m_PhysicalDevice, m_Surface, &formatCount,
                                          formats.data());
-    m_Format = formats[0].format;
-    const VkColorSpaceKHR colorSpace = formats[0].colorSpace;
+
+    // Pick the preferred format (see the official example): a single
+    // VK_FORMAT_UNDEFINED entry means "any format", so take the first
+    // preference; otherwise the first preference that is offered with the
+    // sRGB colorspace; otherwise whatever the surface offers first.
+    VkSurfaceFormatKHR surfaceFormat = formats[0];
+    if (formatCount == 1 && formats[0].format == VK_FORMAT_UNDEFINED)
+    {
+        surfaceFormat = {kPreferredFormats[0], kPreferredColorSpace};
+    }
+    else
+    {
+        for (const VkFormat preferred : kPreferredFormats)
+        {
+            for (const VkSurfaceFormatKHR& f : formats)
+            {
+                if (f.format == preferred && f.colorSpace == kPreferredColorSpace)
+                {
+                    surfaceFormat = f;
+                    break;
+                }
+            }
+            if (surfaceFormat.format == preferred && surfaceFormat.colorSpace == kPreferredColorSpace)
+            {
+                break;
+            }
+        }
+    }
+    m_Format = surfaceFormat.format;
 
     VkExtent2D extent = caps.currentExtent;
     if (extent.width == std::numeric_limits<std::uint32_t>::max() ||
-        extent.height == std::numeric_limits<std::uint32_t>::max())
+        extent.height == std::numeric_limits<std::uint32_t>::max() || extent.width == 0 ||
+        extent.height == 0)
     {
-        // The window is minimized: use its (nonzero) client size.
+        // Dynamic or unavailable extent (window minimized, or a driver that
+        // reports nothing yet): fall back to the window's framebuffer size.
         int w = 0;
         int h = 0;
         glfwGetFramebufferSize(m_Window, &w, &h);
@@ -267,7 +301,7 @@ bool GuiVulkan::createSwapchain(std::string& error)
     info.surface = m_Surface;
     info.minImageCount = imageCount;
     info.imageFormat = m_Format;
-    info.imageColorSpace = colorSpace;
+    info.imageColorSpace = surfaceFormat.colorSpace;
     info.imageExtent = extent;
     info.imageArrayLayers = 1;
     info.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
@@ -276,10 +310,15 @@ bool GuiVulkan::createSwapchain(std::string& error)
     info.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
     info.presentMode = VK_PRESENT_MODE_FIFO_KHR;
     info.clipped = VK_TRUE;
+    // Let the driver reuse the old swapchain's buffer memory when possible
+    // (the official example does the same via its H helpers).
+    info.oldSwapchain = oldSwapchain;
 
+    m_Swapchain = VK_NULL_HANDLE;
     if (vkCreateSwapchainKHR(m_Device, &info, nullptr, &m_Swapchain) != VK_SUCCESS)
     {
         error = "vkCreateSwapchainKHR failed";
+        m_Swapchain = VK_NULL_HANDLE;
         return false;
     }
 
@@ -320,7 +359,7 @@ bool GuiVulkan::createSwapchain(std::string& error)
     return true;
 }
 
-void GuiVulkan::destroySwapchain()
+void GuiVulkan::destroySwapchainResources()
 {
     // Framebuffers reference the image views: release them first.
     for (const VkFramebuffer fb : m_Framebuffers)
@@ -334,6 +373,11 @@ void GuiVulkan::destroySwapchain()
     }
     m_ImageViews.clear();
     m_Images.clear();
+}
+
+void GuiVulkan::destroySwapchain()
+{
+    destroySwapchainResources();
     if (m_Swapchain != VK_NULL_HANDLE)
     {
         vkDestroySwapchainKHR(m_Device, m_Swapchain, nullptr);
@@ -345,12 +389,16 @@ bool GuiVulkan::createRenderPass()
 {
     // Single color attachment: one per swapchain image (bound through the
     // framebuffers below); the render pass is cleared so the UI always
-    // redraws fully.
+    // redraws fully. Created exactly once: it is format-bound and the format
+    // never changes, so it (and the Dear ImGui pipeline compiled against
+    // it) stays valid across swapchain recreates.
     VkAttachmentDescription color{};
     color.format = m_Format;
     color.samples = VK_SAMPLE_COUNT_1_BIT;
     color.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    color.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    // The attachment is presented: the contents must be defined at the end
+    // of the pass (DONT_CARE would leave the presented pixels undefined).
+    color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     color.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
     color.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
     color.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -467,7 +515,7 @@ bool GuiVulkan::init(GLFWwindow* window, std::string& error)
         return fail("vkCreateSemaphore failed");
     }
 
-    if (!createSwapchain(error))
+    if (!createSwapchain(VK_NULL_HANDLE, error))
     {
         shutdown();
         return false;
@@ -489,21 +537,35 @@ void GuiVulkan::recreateSwapchain()
     {
         return;
     }
-    // The in-flight fence may still reference the old swapchain images.
+    // No frame is in flight here: beginFrame() waits for the previous
+    // frame's present before starting a new one, so the queue can be
+    // drained safely.
     vkDeviceWaitIdle(m_Device);
-    destroySwapchain();
+    const VkSwapchainKHR oldSwapchain = m_Swapchain;
+    // The old image views and framebuffers belong to the old swapchain.
+    destroySwapchainResources();
     std::string error;
-    // The render pass and framebuffers are format/extent-bound: rebuild them
-    // with the new swapchain. A failure leaves beginFrame() without a usable
-    // swapchain, which it detects and skips until the next retry.
-    createSwapchain(error) && createRenderPass() && createFramebuffers();
+    // Create the new swapchain first (hinting the old one so the driver can
+    // reuse its buffer memory, as the official example does). A failed
+    // create leaves m_Swapchain missing; beginFrame() detects that and the
+    // next frame retries with the current size. The render pass is not
+    // touched: it is format-bound and the format never changes, so the
+    // Dear ImGui pipeline compiled against it stays valid.
+    if (createSwapchain(oldSwapchain, error))
+    {
+        createFramebuffers();
+    }
+    if (oldSwapchain != VK_NULL_HANDLE)
+    {
+        vkDestroySwapchainKHR(m_Device, oldSwapchain, nullptr);
+    }
 }
 
 bool GuiVulkan::beginFrame()
 {
-    if (m_Swapchain == VK_NULL_HANDLE)
+    if (m_Swapchain == VK_NULL_HANDLE || m_Framebuffers.empty())
     {
-        return false;
+        return false; // missing swapchain (init not run, or a failed recreate)
     }
     // Wait for the previous frame to be *presented*, not just submitted: the
     // present consumes m_Rendered, which the next submit re-signals.
@@ -514,8 +576,12 @@ bool GuiVulkan::beginFrame()
         return false;
     }
 
+    // UINT64_MAX, as in the official example: the previous frame's present
+    // has already completed (the fence wait above), so an image is available
+    // and the wait cannot block indefinitely. A finite timeout risks leaving
+    // m_ImageIndex stale on VK_TIMEOUT.
     const VkResult acquire =
-        vkAcquireNextImageKHR(m_Device, m_Swapchain, kAcquireTimeoutNs, m_ImageAvailable,
+        vkAcquireNextImageKHR(m_Device, m_Swapchain, UINT64_MAX, m_ImageAvailable,
                               VK_NULL_HANDLE, &m_ImageIndex);
     if (acquire == VK_ERROR_OUT_OF_DATE_KHR || acquire == VK_SUBOPTIMAL_KHR)
     {
@@ -524,6 +590,10 @@ bool GuiVulkan::beginFrame()
     if (acquire != VK_SUCCESS && acquire != VK_TIMEOUT)
     {
         return false;
+    }
+    if (m_ImageIndex >= m_Framebuffers.size())
+    {
+        return false; // defensive: never index the framebuffer array out of range
     }
 
     // ONE_TIME_SUBMIT buffers must be reset before every new recording.
