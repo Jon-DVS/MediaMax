@@ -222,9 +222,18 @@ succeeds and reports `cleared: 0`.
 ```json
 {"scenes":[
   {"id":3,"name":"Intro","active":true,
-   "layers":[{"id":11,"name":"BG"},{"id":12,"name":"Cam1"}]}
+   "layers":[{"id":11,"name":"BG","x":0.0,"y":0.0,"override":true},
+             {"id":12,"name":"Cam1","override":false}]}
 ]}
 ```
+
+Per layer: `x`/`y` are the effective position at the current show time
+(static transform with keyframe tracks, cues and manual overrides
+resolved); they are only reported for layers of the *active* scene, where
+the position is well-defined (a hidden layer reports none). `override` is
+true when any manual override (opacity/visibility/blend/position) is set
+for the layer. The control GUI uses `x`/`y` to keep its position fields in
+sync with the engine and `override` to enable the per-layer Clear action.
 
 ### Layers
 

@@ -33,6 +33,10 @@ constexpr const char* kInterpolations[] = {"linear", "step"};
 constexpr int kInterpolationCount = 2;
 
 constexpr size_t kLogLineLimit = 400; // max characters kept per console line
+// After the UI sends a layer's position, the polled snapshot lags the
+// engine's state; for this long the snapshot's position is not trusted as a
+// resync source for that layer (must exceed one 500 ms poll period).
+constexpr auto kLayerPosSettle = std::chrono::seconds(2);
 
 const ImVec4 kOkColor = {0.35f, 0.9f, 0.4f, 1.0f};
 const ImVec4 kBadColor = {0.9f, 0.35f, 0.35f, 1.0f};
@@ -1109,8 +1113,14 @@ void ControlGuiApp::renderLayersBlock(const SystemConnection::Snapshot& snap)
     {
         const Id layerId = static_cast<Id>(layer.value("id", 0u));
         const std::string name = layer.value("name", "?");
+        const bool overridden = layer.value("override", false);
         ImGui::PushID(static_cast<int>(layerId));
         ImGui::Text("Layer %u - %s", layerId, name.c_str());
+        if (overridden)
+        {
+            ImGui::SameLine();
+            ImGui::TextColored(kWarnColor, "manual");
+        }
         LayerLive& lv = m_LayerLive[layerId];
         if (ImGui::SliderFloat("Opacity##op", &lv.opacity, 0.0f, 1.0f, "%.2f"))
         {
@@ -1130,19 +1140,61 @@ void ControlGuiApp::renderLayersBlock(const SystemConnection::Snapshot& snap)
             sendActive("layer.set", {{"layer", layerId}, {"blend", kBlendModes[lv.blend]}}, error);
         }
         ImGui::SameLine();
+        // Enabled only when the layer actually has overrides to clear.
+        ImGui::BeginDisabled(!overridden);
         if (ImGui::Button("Clear##clr"))
         {
             std::string error;
-            sendActive("layer.clear", {{"layer", layerId}}, error);
+            if (sendActive("layer.clear", {{"layer", layerId}}, error))
+            {
+                // The engine's position is valid again (snapshot catches up
+                // at the next poll).
+                m_LayerPosSentAt.erase(layerId);
+            }
         }
-        ImGui::InputFloat("x##lx", &lv.x, 10.0f, 50.0f);
-        ImGui::SameLine();
-        ImGui::InputFloat("y##ly", &lv.y, 10.0f, 50.0f);
-        ImGui::SameLine();
-        if (ImGui::Button("Set position##pos"))
+        ImGui::EndDisabled();
+        // The position is sent on commit (Enter or focus loss), both values
+        // together (the engine applies x/y as a pair). No extra button:
+        // committing a field is the send.
+        auto commitPosition = [&lv, &layerId, this]()
         {
             std::string error;
-            sendActive("layer.set", {{"layer", layerId}, {"x", lv.x}, {"y", lv.y}}, error);
+            if (sendActive("layer.set", {{"layer", layerId}, {"x", lv.x}, {"y", lv.y}}, error))
+            {
+                m_LayerPosSentAt[layerId] = std::chrono::steady_clock::now();
+            }
+        };
+        ImGui::InputFloat("x##lx", &lv.x, 10.0f, 50.0f);
+        bool xBusy = ImGui::IsItemActive();
+        if (ImGui::IsItemDeactivatedAfterEdit())
+        {
+            commitPosition();
+            xBusy = true; // also busy for this frame's resync
+        }
+        ImGui::SameLine();
+        ImGui::InputFloat("y##ly", &lv.y, 10.0f, 50.0f);
+        const bool yBusy = ImGui::IsItemActive() || ImGui::IsItemDeactivatedAfterEdit();
+        if (ImGui::IsItemDeactivatedAfterEdit())
+        {
+            commitPosition();
+        }
+        // Resync from the engine's effective position (scene.list reports it
+        // for the active scene). Never while a field is being edited, and
+        // not while a just-sent value is still catching up in the polled
+        // snapshot (which lags by up to one poll period).
+        if (!xBusy && !yBusy && layer.contains("x") && layer.contains("y"))
+        {
+            const float sx = layer["x"].get<float>();
+            const float sy = layer["y"].get<float>();
+            const auto sent = m_LayerPosSentAt.find(layerId);
+            const bool settling =
+                sent != m_LayerPosSentAt.end() &&
+                std::chrono::steady_clock::now() - sent->second < kLayerPosSettle;
+            if (!settling && (lv.x != sx || lv.y != sy))
+            {
+                lv.x = sx;
+                lv.y = sy;
+            }
         }
         ImGui::PopID();
     }

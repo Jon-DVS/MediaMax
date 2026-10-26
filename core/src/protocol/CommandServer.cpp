@@ -502,12 +502,31 @@ nlohmann::json CommandServer::handleSceneList() const
 {
     nlohmann::json arr = nlohmann::json::array();
     const Show& show = m_Engine.show();
+    const Id activeId = m_Engine.activeSceneAt(m_Engine.time());
+    // Resolved state of the active scene at the current time (tracks, cues
+    // and manual overrides applied): per-layer effective positions are only
+    // reported for that scene, where they are well-defined.
+    std::map<Id, const LayerFrame*> resolved;
+    for (const auto& layerFrame : m_Engine.frameState().layers)
+    {
+        resolved[layerFrame.layerId] = &layerFrame;
+    }
     for (const auto& scene : show.scenes)
     {
         nlohmann::json layerArr = nlohmann::json::array();
         for (const auto& layer : scene.layers)
         {
-            layerArr.push_back({{"id", layer.id}, {"name", layer.name}});
+            nlohmann::json layerJson = {{"id", layer.id}, {"name", layer.name}};
+            if (scene.id == activeId)
+            {
+                if (const auto it = resolved.find(layer.id); it != resolved.end())
+                {
+                    layerJson["x"] = it->second->x;
+                    layerJson["y"] = it->second->y;
+                }
+            }
+            layerJson["override"] = m_Engine.hasLayerOverride(layer.id);
+            layerArr.push_back(std::move(layerJson));
         }
         arr.push_back({
             {"id", scene.id},

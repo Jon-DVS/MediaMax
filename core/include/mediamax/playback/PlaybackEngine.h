@@ -151,6 +151,10 @@ public:
     bool setLayerBlend(Id layerId, BlendMode mode);
     bool setLayerPosition(Id layerId, float x, float y);
 
+    // True when any manual override (opacity/visibility/blend/position) is
+    // set for the layer.
+    bool hasLayerOverride(Id layerId) const;
+
     // Clears one layer's overrides; returns false if it had none.
     bool clearLayerOverride(Id layerId);
     // Clears all layer overrides; returns how many were removed.

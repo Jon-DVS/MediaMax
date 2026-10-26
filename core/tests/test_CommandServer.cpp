@@ -7,6 +7,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <string>
 #include <variant>
 
@@ -296,6 +297,79 @@ TEST_CASE("layer.set rejects layer ids that are not in the show")
     // Layers of inactive scenes are valid ids.
     CHECK(f.run("layer.set", {{"layer", 20}, {"opacity", 0.5}}).ok);
     f.run("layer.clear"); // leave the fixture clean
+}
+
+TEST_CASE("scene.list reports layer positions and override state")
+{
+    Fixture f;
+    auto layerEntry = [](const nlohmann::json& scenes, Id sceneId, Id layerId)
+                       -> std::optional<nlohmann::json>
+    {
+        for (const auto& s : scenes)
+        {
+            if (s.at("id").get<std::uint64_t>() == sceneId)
+            {
+                for (const auto& l : s.at("layers"))
+                {
+                    if (l.at("id").get<std::uint64_t>() == layerId)
+                    {
+                        return l;
+                    }
+                }
+            }
+        }
+        return std::nullopt;
+    };
+
+    // Before any override: the active scene's layers report their effective
+    // (here: static) position and no override.
+    const Response base = f.run("scene.list");
+    REQUIRE(base.ok);
+    const auto l11 = layerEntry(base.result.at("scenes"), 1, 11);
+    REQUIRE(l11.has_value());
+    CHECK(l11->value("x", -1.0f) == 0.0f);
+    CHECK(l11->value("y", -1.0f) == 0.0f);
+    CHECK(l11->value("override", true) == false);
+
+    // A position override is reported back (this is what the control GUI
+    // resyncs its x/y fields from).
+    REQUIRE(f.run("layer.set", {{"layer", 11}, {"x", 0.25}, {"y", -0.5}}).ok);
+    const Response moved = f.run("scene.list");
+    REQUIRE(moved.ok);
+    const auto l11m = layerEntry(moved.result.at("scenes"), 1, 11);
+    REQUIRE(l11m.has_value());
+    CHECK(l11m->at("x").get<float>() == doctest::Approx(0.25f));
+    CHECK(l11m->at("y").get<float>() == doctest::Approx(-0.5f));
+    CHECK(l11m->value("override", false) == true);
+
+    // Inactive scenes' layers report no position (undefined while not
+    // active), but the override flag is global.
+    const auto l20 = layerEntry(moved.result.at("scenes"), 2, 20);
+    REQUIRE(l20.has_value());
+    CHECK(!l20->contains("x"));
+    CHECK(!l20->contains("y"));
+    CHECK(l20->value("override", true) == false);
+
+    // A hidden layer is not resolved, so it reports no position either.
+    REQUIRE(f.run("layer.set", {{"layer", 10}, {"visible", false}}).ok);
+    const Response hidden = f.run("scene.list");
+    REQUIRE(hidden.ok);
+    const auto l10 = layerEntry(hidden.result.at("scenes"), 1, 10);
+    REQUIRE(l10.has_value());
+    CHECK(!l10->contains("x"));
+    CHECK(l10->value("override", false) == true);
+    REQUIRE(f.run("layer.clear", {{"layer", 10}}).ok);
+
+    // Clearing drops the override; the reported position returns to the
+    // timeline value.
+    REQUIRE(f.run("layer.clear", {{"layer", 11}}).ok);
+    const Response cleared = f.run("scene.list");
+    REQUIRE(cleared.ok);
+    const auto l11c = layerEntry(cleared.result.at("scenes"), 1, 11);
+    REQUIRE(l11c.has_value());
+    CHECK(l11c->at("x").get<float>() == doctest::Approx(0.0f));
+    CHECK(l11c->at("y").get<float>() == doctest::Approx(0.0f));
+    CHECK(l11c->value("override", true) == false);
 }
 
 TEST_CASE("media.load registers an asset with its metadata")

@@ -482,6 +482,11 @@ bool PlaybackEngine::setLayerPosition(Id layerId, float x, float y)
     return true;
 }
 
+bool PlaybackEngine::hasLayerOverride(Id layerId) const
+{
+    return m_Overrides.find(layerId) != m_Overrides.end();
+}
+
 bool PlaybackEngine::clearLayerOverride(Id layerId)
 {
     return m_Overrides.erase(layerId) > 0;

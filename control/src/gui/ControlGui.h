@@ -199,8 +199,11 @@ private:
     bool m_HaveNameEdit = false;
     std::string m_MediaPathInput;
 
-    // Last values the UI sent per layer (live overrides are not reported back
-    // in status, so the widgets keep their own state).
+    // Per-layer widget state. Opacity/visible/blend keep the last values the
+    // UI sent (the engine reports no effective values for them). x/y are
+    // resynced from scene.list (it reports the active scene's effective
+    // positions), except while a field is being edited or while a just-sent
+    // value is still catching up in the polled snapshot.
     struct LayerLive
     {
         float opacity = 1.0f;
@@ -210,6 +213,10 @@ private:
         float y = 0.0f;
     };
     std::map<Id, LayerLive> m_LayerLive;
+    // When the UI last sent a layer's position (or cleared it: erased). The
+    // polled snapshot lags the send, so the engine's reported position is
+    // not trusted as a resync source until it has had time to arrive.
+    std::map<Id, std::chrono::steady_clock::time_point> m_LayerPosSentAt;
 
     // "Display settings" dialog (Edit... in the Displays block). The working
     // values live in m_DisplayEdits, resynced from the snapshot every time
