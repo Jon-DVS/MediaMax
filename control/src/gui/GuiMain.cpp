@@ -327,7 +327,7 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
     //    kModalHostName in ControlGui.cpp).
     std::string modalReport;
     bool modalOk = true;
-    for (const char* which : {"about", "open", "saveas", "pull", "move"})
+    for (const char* which : {"about", "open", "saveas", "pull", "move", "edit", "warp"})
     {
         if (!app.testOpenModal(which))
         {

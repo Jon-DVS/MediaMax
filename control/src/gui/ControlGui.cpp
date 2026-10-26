@@ -78,6 +78,14 @@ const char* modalPopupName(const std::string& which)
     {
         return "Move display to system...";
     }
+    if (which == "edit")
+    {
+        return "Display settings";
+    }
+    if (which == "warp")
+    {
+        return "Projection warp";
+    }
     if (which == "about")
     {
         return "About MediaMax Control";
@@ -1042,6 +1050,55 @@ void ControlGuiApp::renderLayersBlock(const SystemConnection::Snapshot& snap)
     }
 }
 
+void ControlGuiApp::openDisplayEdit(const json& display, SystemConnection* target)
+{
+    const Id id = static_cast<Id>(display.value("id", 0u));
+    // Resync from the current record so the dialog always starts from the
+    // engine's live values (an old edit must not survive across systems or
+    // external display.set calls).
+    DisplayEdit& de = m_DisplayEdits[id];
+    de.x = static_cast<int>(display.value("x", 0));
+    de.y = static_cast<int>(display.value("y", 0));
+    de.width = static_cast<int>(display.value("width", 1920));
+    de.height = static_cast<int>(display.value("height", 1080));
+    de.brightness = static_cast<float>(display.value("brightness", 1.0));
+    de.enabled = display.value("enabled", true);
+    m_EditTarget = target;
+    m_EditDisplayId = id;
+    m_EditError.clear();
+    m_EditModal = true;
+    ImGui::OpenPopup(modalPopupId("Display settings"));
+}
+
+void ControlGuiApp::openWarpEdit(const json& display, SystemConnection* target)
+{
+    if (target == nullptr)
+    {
+        return;
+    }
+    // Drop warp state for systems that no longer exist (keyed by the
+    // connection pointer).
+    for (auto it = m_WarpEdits.begin(); it != m_WarpEdits.end();)
+    {
+        const bool stillThere =
+            std::any_of(m_Systems.begin(), m_Systems.end(),
+                        [&](const auto& s) { return s.get() == it->first; });
+        it = stillThere ? ++it : m_WarpEdits.erase(it);
+    }
+    WarpEdit& we = m_WarpEdits[target][static_cast<Id>(display.value("id", 0u))];
+    if (!we.valid)
+    {
+        we.n = 2;
+        we.points = {{0.0f, 0.0f}, {1.0f, 0.0f}, {0.0f, 1.0f}, {1.0f, 1.0f}};
+        we.valid = true;
+    }
+    m_WarpTarget = target;
+    m_WarpDisplayId = static_cast<Id>(display.value("id", 0u));
+    m_WarpError.clear();
+    m_WarpModal = true;
+    ImGui::OpenPopup(modalPopupId("Projection warp"));
+}
+
 void ControlGuiApp::renderDisplaysBlock(const SystemConnection::Snapshot& snap)
 {
     ImGui::TextUnformatted("Displays");
@@ -1062,147 +1119,69 @@ void ControlGuiApp::renderDisplaysBlock(const SystemConnection::Snapshot& snap)
     }
     const json& displays = snap.status["displays"];
 
+    // The table is a read-only overview: values are read straight from the
+    // snapshot (always the engine's current state). Editing happens in the
+    // "Display settings" dialog (Edit...) and the warp in its own dialog
+    // (Warp...).
     if (ImGui::BeginTable("displays", 9,
                           ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_BordersOuter))
     {
         ImGui::TableSetupColumn("##id", ImGuiTableColumnFlags_WidthFixed, 34.0f);
         ImGui::TableSetupColumn("name");
-        ImGui::TableSetupColumn("##enabled", ImGuiTableColumnFlags_WidthFixed, 44.0f);
-        ImGui::TableSetupColumn("x", ImGuiTableColumnFlags_WidthFixed, 60.0f);
-        ImGui::TableSetupColumn("y", ImGuiTableColumnFlags_WidthFixed, 60.0f);
-        ImGui::TableSetupColumn("w", ImGuiTableColumnFlags_WidthFixed, 60.0f);
-        ImGui::TableSetupColumn("h", ImGuiTableColumnFlags_WidthFixed, 60.0f);
-        ImGui::TableSetupColumn("brightness", ImGuiTableColumnFlags_WidthFixed, 90.0f);
-        ImGui::TableSetupColumn("##actions", ImGuiTableColumnFlags_WidthFixed, 120.0f);
+        ImGui::TableSetupColumn("x", ImGuiTableColumnFlags_WidthFixed, 56.0f);
+        ImGui::TableSetupColumn("y", ImGuiTableColumnFlags_WidthFixed, 56.0f);
+        ImGui::TableSetupColumn("w", ImGuiTableColumnFlags_WidthFixed, 56.0f);
+        ImGui::TableSetupColumn("h", ImGuiTableColumnFlags_WidthFixed, 56.0f);
+        ImGui::TableSetupColumn("brightness", ImGuiTableColumnFlags_WidthFixed, 64.0f);
+        ImGui::TableSetupColumn("##enabled", ImGuiTableColumnFlags_WidthFixed, 48.0f);
+        ImGui::TableSetupColumn("##actions", ImGuiTableColumnFlags_WidthFixed, 196.0f);
         for (const auto& d : displays)
         {
             const Id id = static_cast<Id>(d.value("id", 0u));
             const std::string name = d.value("name", "display");
-            DisplayEdit& de = m_DisplayEdits[id];
-            if (!de.valid)
-            {
-                de.x = static_cast<int>(d.value("x", 0));
-                de.y = static_cast<int>(d.value("y", 0));
-                de.width = static_cast<int>(d.value("width", 1920));
-                de.height = static_cast<int>(d.value("height", 1080));
-                de.brightness = static_cast<float>(d.value("brightness", 1.0));
-                de.enabled = d.value("enabled", true);
-                de.valid = true;
-            }
+            SystemConnection* target = activeConnection();
             ImGui::TableNextRow();
             ImGui::TableNextColumn();
             ImGui::Text("%u", id);
             ImGui::TableNextColumn();
             ImGui::TextUnformatted(name.c_str());
             ImGui::TableNextColumn();
-            ImGui::Checkbox("on##en", &de.enabled);
+            ImGui::Text("%d", static_cast<int>(d.value("x", 0)));
             ImGui::TableNextColumn();
-            ImGui::InputInt("##x", &de.x);
+            ImGui::Text("%d", static_cast<int>(d.value("y", 0)));
             ImGui::TableNextColumn();
-            ImGui::InputInt("##y", &de.y);
+            ImGui::Text("%d", static_cast<int>(d.value("width", 0)));
             ImGui::TableNextColumn();
-            ImGui::InputInt("##w", &de.width);
+            ImGui::Text("%d", static_cast<int>(d.value("height", 0)));
             ImGui::TableNextColumn();
-            ImGui::InputInt("##h", &de.height);
+            ImGui::Text("%.2f", static_cast<double>(d.value("brightness", 1.0)));
             ImGui::TableNextColumn();
-            ImGui::SliderFloat("##bright", &de.brightness, 0.0f, 1.0f, "%.2f");
-            ImGui::TableNextColumn();
-            if (ImGui::Button("Set##set"))
+            if (d.value("enabled", true))
             {
-                std::string error;
-                sendActive("display.set",
-                           {{"display", id}, {"x", de.x}, {"y", de.y}, {"width", de.width},
-                            {"height", de.height}, {"brightness", de.brightness},
-                            {"enabled", de.enabled}},
-                           error);
+                ImGui::TextUnformatted("on");
+            }
+            else
+            {
+                ImGui::TextDisabled("off");
+            }
+            ImGui::TableNextColumn();
+            if (ImGui::Button(("Edit##editdisp" + std::to_string(id)).c_str()))
+            {
+                openDisplayEdit(d, target);
             }
             ImGui::SameLine();
-            if (ImGui::Button("Remove##remove"))
+            if (ImGui::Button(("Warp##warpdisp" + std::to_string(id)).c_str()))
+            {
+                openWarpEdit(d, target);
+            }
+            ImGui::SameLine();
+            if (ImGui::Button(("Remove##removedisp" + std::to_string(id)).c_str()))
             {
                 std::string error;
                 sendActive("display.remove", {{"display", id}}, error);
             }
         }
         ImGui::EndTable();
-    }
-
-    // Warp grid editor per display.
-    for (const auto& d : displays)
-    {
-        const Id id = static_cast<Id>(d.value("id", 0u));
-        const std::string name = d.value("name", "display");
-        if (!ImGui::CollapsingHeader(("Warp - " + name).c_str()))
-        {
-            continue;
-        }
-        ImGui::PushID(static_cast<int>(id));
-        WarpEdit& we = m_WarpEdits[id];
-        if (!we.valid)
-        {
-            we.n = 2;
-            we.points = {{0.0f, 0.0f}, {1.0f, 0.0f}, {0.0f, 1.0f}, {1.0f, 1.0f}};
-            we.valid = true;
-        }
-        auto resetToIdentity = [&we]() {
-            for (size_t p = 0; p < we.points.size(); ++p)
-            {
-                const int row = static_cast<int>(p / we.n);
-                const int col = static_cast<int>(p % we.n);
-                we.points[p] = {static_cast<float>(col / (we.n - 1)),
-                                static_cast<float>(row / (we.n - 1))};
-            }
-        };
-        const char* grids[] = {"2x2", "3x3", "4x4"};
-        int grid = we.n - 2;
-        if (ImGui::Combo("Grid##grid", &grid, grids, 3))
-        {
-            we.n = grid + 2;
-            we.points.clear();
-            for (int row = 0; row < we.n; ++row)
-            {
-                for (int col = 0; col < we.n; ++col)
-                {
-                    we.points.push_back(
-                        {static_cast<float>(col / (we.n - 1)), static_cast<float>(row / (we.n - 1))});
-                }
-            }
-        }
-        if (we.points.size() == static_cast<size_t>(we.n * we.n))
-        {
-            if (ImGui::BeginTable("warppoints", 3, ImGuiTableFlags_SizingFixedFit))
-            {
-                ImGui::TableSetupColumn("point");
-                ImGui::TableSetupColumn("u");
-                ImGui::TableSetupColumn("v");
-                for (size_t p = 0; p < we.points.size(); ++p)
-                {
-                    ImGui::TableNextRow();
-                    ImGui::TableNextColumn();
-                    ImGui::Text("%d", static_cast<int>(p));
-                    ImGui::TableNextColumn();
-                    ImGui::InputFloat("##u", &we.points[p][0], 0.05f, 0.2f, "%.3f");
-                    ImGui::TableNextColumn();
-                    ImGui::InputFloat("##v", &we.points[p][1], 0.05f, 0.2f, "%.3f");
-                }
-                ImGui::EndTable();
-            }
-        }
-        if (ImGui::Button("Identity##warp"))
-        {
-            resetToIdentity();
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Apply warp##warp"))
-        {
-            json pts = json::array();
-            for (const auto& pt : we.points)
-            {
-                pts.push_back({pt[0], pt[1]});
-            }
-            std::string error;
-            sendActive("display.warp.set", {{"display", id}, {"points", pts}}, error);
-        }
-        ImGui::PopID();
     }
 }
 
@@ -2320,6 +2299,189 @@ void ControlGuiApp::renderModals()
             ImGui::EndPopup();
         }
     }
+    if (m_EditModal)
+    {
+        if (ImGui::BeginPopupModal("Display settings", &m_EditModal))
+        {
+            if (m_EditTarget && m_EditDisplayId != kInvalidId)
+            {
+                DisplayEdit& de = m_DisplayEdits[m_EditDisplayId];
+                ImGui::Text("Display %u on %s", m_EditDisplayId, m_EditTarget->name().c_str());
+                ImGui::Spacing();
+                ImGui::InputInt("X (px)##editx", &de.x);
+                ImGui::InputInt("Y (px)##edity", &de.y);
+                ImGui::InputInt("Width (px)##editw", &de.width);
+                ImGui::InputInt("Height (px)##edith", &de.height);
+                ImGui::SliderFloat("Brightness##editbright", &de.brightness, 0.0f, 1.0f, "%.2f");
+                ImGui::Checkbox("Enabled##editen", &de.enabled);
+                if (ImGui::Button("Apply##editapply"))
+                {
+                    m_EditError.clear();
+                    nlohmann::json result;
+                    std::string error;
+                    if (m_EditTarget->send("display.set",
+                                           {{"display", m_EditDisplayId},
+                                            {"x", de.x},
+                                            {"y", de.y},
+                                            {"width", de.width},
+                                            {"height", de.height},
+                                            {"brightness", de.brightness},
+                                            {"enabled", de.enabled}},
+                                           result, error))
+                    {
+                        log("display " + std::to_string(m_EditDisplayId) + " settings applied on " +
+                            m_EditTarget->name());
+                        m_EditModal = false;
+                    }
+                    else
+                    {
+                        m_EditError = error;
+                    }
+                }
+                if (!m_EditError.empty())
+                {
+                    ImGui::TextColored(kBadColor, "%s", m_EditError.c_str());
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Cancel##editcancel"))
+                {
+                    m_EditModal = false;
+                }
+            }
+            else
+            {
+                ImGui::TextDisabled("(no display selected)");
+                if (ImGui::Button("Close##editclose"))
+                {
+                    m_EditModal = false;
+                }
+            }
+            ImGui::EndPopup();
+        }
+        if (!m_EditModal)
+        {
+            // The modal went down (X or Cancel): drop the target so it can
+            // never dangle past the frame it was opened in.
+            m_EditTarget = nullptr;
+            m_EditDisplayId = kInvalidId;
+        }
+    }
+    if (m_WarpModal)
+    {
+        if (ImGui::BeginPopupModal("Projection warp", &m_WarpModal))
+        {
+            if (m_WarpTarget && m_WarpDisplayId != kInvalidId)
+            {
+                WarpEdit& we = m_WarpEdits[m_WarpTarget][m_WarpDisplayId];
+                if (!we.valid)
+                {
+                    we.n = 2;
+                    we.points = {{0.0f, 0.0f}, {1.0f, 0.0f}, {0.0f, 1.0f}, {1.0f, 1.0f}};
+                    we.valid = true;
+                }
+                ImGui::Text("Display %u on %s", m_WarpDisplayId, m_WarpTarget->name().c_str());
+                ImGui::TextWrapped(
+                    "Grid of points in display-local UV, (0,0) top-left to (1,1) bottom-right; "
+                    "point index = row * grid + col. Identity is an undistorted rectangle.");
+                auto resetToIdentity = [&we]() {
+                    for (size_t p = 0; p < we.points.size(); ++p)
+                    {
+                        const int row = static_cast<int>(p / we.n);
+                        const int col = static_cast<int>(p % we.n);
+                        we.points[p] = {static_cast<float>(col / (we.n - 1)),
+                                        static_cast<float>(row / (we.n - 1))};
+                    }
+                };
+                const char* grids[] = {"2x2", "3x3", "4x4"};
+                int grid = we.n - 2;
+                if (ImGui::Combo("Grid##grid", &grid, grids, 3))
+                {
+                    we.n = grid + 2;
+                    we.points.clear();
+                    for (int row = 0; row < we.n; ++row)
+                    {
+                        for (int col = 0; col < we.n; ++col)
+                        {
+                            we.points.push_back(
+                                {static_cast<float>(col / (we.n - 1)),
+                                 static_cast<float>(row / (we.n - 1))});
+                        }
+                    }
+                }
+                if (we.points.size() == static_cast<size_t>(we.n * we.n))
+                {
+                    if (ImGui::BeginTable("warppoints", 3, ImGuiTableFlags_SizingFixedFit))
+                    {
+                        ImGui::TableSetupColumn("point");
+                        ImGui::TableSetupColumn("u");
+                        ImGui::TableSetupColumn("v");
+                        for (size_t p = 0; p < we.points.size(); ++p)
+                        {
+                            ImGui::TableNextRow();
+                            ImGui::TableNextColumn();
+                            ImGui::Text("%d", static_cast<int>(p));
+                            ImGui::TableNextColumn();
+                            ImGui::InputFloat("##u", &we.points[p][0], 0.05f, 0.2f, "%.3f");
+                            ImGui::TableNextColumn();
+                            ImGui::InputFloat("##v", &we.points[p][1], 0.05f, 0.2f, "%.3f");
+                        }
+                        ImGui::EndTable();
+                    }
+                }
+                if (ImGui::Button("Identity##warp"))
+                {
+                    resetToIdentity();
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Apply warp##warp"))
+                {
+                    m_WarpError.clear();
+                    json pts = json::array();
+                    for (const auto& pt : we.points)
+                    {
+                        pts.push_back({pt[0], pt[1]});
+                    }
+                    nlohmann::json result;
+                    std::string error;
+                    if (m_WarpTarget->send("display.warp.set",
+                                           {{"display", m_WarpDisplayId}, {"points", pts}},
+                                           result, error))
+                    {
+                        log("warp applied to display " + std::to_string(m_WarpDisplayId) + " on " +
+                            m_WarpTarget->name());
+                        m_WarpModal = false;
+                    }
+                    else
+                    {
+                        m_WarpError = error;
+                    }
+                }
+                if (!m_WarpError.empty())
+                {
+                    ImGui::TextColored(kBadColor, "%s", m_WarpError.c_str());
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Cancel##warpcancel"))
+                {
+                    m_WarpModal = false;
+                }
+            }
+            else
+            {
+                ImGui::TextDisabled("(no display selected)");
+                if (ImGui::Button("Close##warpclose"))
+                {
+                    m_WarpModal = false;
+                }
+            }
+            ImGui::EndPopup();
+        }
+        if (!m_WarpModal)
+        {
+            m_WarpTarget = nullptr;
+            m_WarpDisplayId = kInvalidId;
+        }
+    }
 }
 
 // --- test hooks -----------------------------------------------------------------
@@ -2366,6 +2528,45 @@ void ControlGuiApp::openModal(const std::string& which)
         // the test hook only needs the dialog to open and close.
         m_MoveModal = true;
         m_MoveError.clear();
+    }
+    else if (which == "edit" || which == "warp")
+    {
+        // The real buttons fill the state from a table row; the test hook
+        // uses the active system's first display when it has one (the
+        // helpers open the popup themselves, so return early).
+        bool opened = false;
+        if (SystemConnection* active = activeConnection())
+        {
+            const auto snap = active->snapshot();
+            if (snap.haveStatus && snap.status.contains("displays") &&
+                !snap.status["displays"].empty())
+            {
+                if (which == "edit")
+                {
+                    openDisplayEdit(snap.status["displays"][0], active);
+                }
+                else
+                {
+                    openWarpEdit(snap.status["displays"][0], active);
+                }
+                opened = true;
+            }
+        }
+        if (!opened)
+        {
+            if (which == "edit")
+            {
+                m_EditModal = true;
+                m_EditError.clear();
+            }
+            else
+            {
+                m_WarpModal = true;
+                m_WarpError.clear();
+            }
+            ImGui::OpenPopup(modalPopupId(name));
+        }
+        return;
     }
     else
     {
@@ -2417,6 +2618,16 @@ bool ControlGuiApp::testCloseModal(const std::string& which)
     if (which == "move")
     {
         m_MoveModal = false;
+        return true;
+    }
+    if (which == "edit")
+    {
+        m_EditModal = false;
+        return true;
+    }
+    if (which == "warp")
+    {
+        m_WarpModal = false;
         return true;
     }
     if (which == "about")

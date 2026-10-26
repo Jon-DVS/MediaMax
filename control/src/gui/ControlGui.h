@@ -45,11 +45,11 @@ public:
     bool selfTestSystem(const std::string& host, std::uint16_t port, std::string& report);
 
     // --- test hooks (driven by --gui-self-test; no effect in normal use) ----
-    // Queues the given modal ("open", "saveas", "pull", "about" or "move")
-    // to be opened by the next frame(): the same state the UI buttons set
-    // plus OpenPopup(). Deferred because OpenPopup() must run inside a frame
-    // (it dereferences the current ImGui window, which is NULL between
-    // frames). Returns false for an unknown name.
+    // Queues the given modal ("open", "saveas", "pull", "about", "move",
+    // "edit" or "warp") to be opened by the next frame(): the same state the
+    // UI buttons set plus OpenPopup(). Deferred because OpenPopup() must run
+    // inside a frame (it dereferences the current ImGui window, which is
+    // NULL between frames). Returns false for an unknown name.
     bool testOpenModal(const std::string& which);
     // True while the given modal sits open in Dear ImGui's popup stack.
     bool testModalOpen(const std::string& which) const;
@@ -87,6 +87,11 @@ private:
     void renderScenesBlock(const SystemConnection::Snapshot& snap);
     void renderLayersBlock(const SystemConnection::Snapshot& snap);
     void renderDisplaysBlock(const SystemConnection::Snapshot& snap);
+    // Opens the "Display settings" / "Projection warp" dialog for the given
+    // display record, sending display.set / display.warp.set to `target`
+    // (the system the record came from).
+    void openDisplayEdit(const nlohmann::json& display, SystemConnection* target);
+    void openWarpEdit(const nlohmann::json& display, SystemConnection* target);
     void renderMediaBlock(const SystemConnection::Snapshot& snap);
     void renderShowEditorWindow();
     void renderShowTab();
@@ -150,6 +155,19 @@ private:
     std::int32_t m_MoveX = 0, m_MoveY = 0, m_MoveWidth = 0, m_MoveHeight = 0;
     int m_MoveTarget = -1; // index into m_Systems
     std::string m_MoveError;
+    // "Display settings" dialog (Edit... in the Displays block): per-display
+    // x/y/w/h/brightness/enabled. m_EditTarget is the system the dialog was
+    // opened from (modal, so it cannot be removed while open).
+    bool m_EditModal = false;
+    SystemConnection* m_EditTarget = nullptr;
+    Id m_EditDisplayId = kInvalidId;
+    std::string m_EditError;
+    // "Projection warp" dialog (Warp... in the Displays block): the warp
+    // grid editor, moved out of the Displays block into its own dialog.
+    bool m_WarpModal = false;
+    SystemConnection* m_WarpTarget = nullptr;
+    Id m_WarpDisplayId = kInvalidId;
+    std::string m_WarpError;
     // Test hook: modal queued by testOpenModal(), opened by the next frame().
     std::string m_PendingTestOpenModal;
 
@@ -178,6 +196,9 @@ private:
     };
     std::map<Id, LayerLive> m_LayerLive;
 
+    // "Display settings" dialog (Edit... in the Displays block). The working
+    // values live in m_DisplayEdits, resynced from the snapshot every time
+    // the dialog opens; Apply sends display.set to m_EditTarget.
     struct DisplayEdit
     {
         int x = 0;
@@ -186,17 +207,19 @@ private:
         int height = 1080;
         float brightness = 1.0f;
         bool enabled = true;
-        bool valid = false; // filled from a snapshot
     };
     std::map<Id, DisplayEdit> m_DisplayEdits;
 
+    // Warp editor state (Warp... in the Displays block), the last grid and
+    // points per (system, display). The warp is not reported in status, so
+    // the dialog starts from the last locally used values.
     struct WarpEdit
     {
         int n = 2;
         std::vector<std::array<float, 2>> points;
-        bool valid = false; // filled from a snapshot
+        bool valid = false; // identity grid filled in
     };
-    std::map<Id, WarpEdit> m_WarpEdits;
+    std::map<const SystemConnection*, std::map<Id, WarpEdit>> m_WarpEdits;
 
     // Show editor selection (scenes tab).
     int m_SelectedSceneIdx = 0;
