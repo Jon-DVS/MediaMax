@@ -61,6 +61,8 @@ void ShowEditor::newShow()
 void ShowEditor::touch()
 {
     m_Dirty = true;
+    ++m_Generation;
+    m_LastTouched = std::chrono::steady_clock::now();
 }
 
 Id ShowEditor::nextSceneId(const Show& show)

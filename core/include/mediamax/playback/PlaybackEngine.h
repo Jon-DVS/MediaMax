@@ -77,8 +77,17 @@ public:
 
     // --- Show management ---------------------------------------------------
 
-    // Replaces the current show and resets playback to time 0, stopped.
-    void loadShow(Show show);
+    // Replaces the current show. Without preserveState, playback resets to
+    // time 0, stopped (no scene override, no layer overrides).
+    //
+    // With preserveState, the live playback state carries over to the new
+    // show wherever the new show allows: the play state (playing/paused/
+    // stopped) is kept, the playhead is kept (clamped to the new duration),
+    // a manual scene override is kept when that scene id still exists, and
+    // layer overrides are kept for layers that still exist. Used for live
+    // edits pushed from the control interface, which must not restart
+    // playback.
+    void loadShow(Show show, bool preserveState = false);
 
     const Show& show() const { return m_Show; }
     Show& show() { return m_Show; }

@@ -12,6 +12,7 @@
 // system) and can move a display to another system.
 
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -56,6 +57,10 @@ public:
     // Closes the given modal: clears its app-side flag, which makes
     // BeginPopupModal() tear the popup down on the next frame.
     bool testCloseModal(const std::string& which);
+    // Renames the editor's show and marks it edited: gives the debounced
+    // auto-push (see autoPushEditedShow) something to push during the frame
+    // phase of the self-test, which then verifies the system received it.
+    void testTouchEditor(const std::string& name);
 
 private:
     // --- systems -----------------------------------------------------------
@@ -117,6 +122,10 @@ private:
                     nlohmann::json* outResult = nullptr);
     void consoleSubmit();
     void pushToActiveSystem();
+    // Debounced auto-push of edited shows to every connected system
+    // (show.loadJson with preserveState, so live edits do not restart
+    // playback). Called from frame().
+    void autoPushEditedShow();
 
     // --- state ---------------------------------------------------------------
 
@@ -134,6 +143,12 @@ private:
 
     ShowEditor m_Editor;
     std::string m_EditorError;
+    // Auto-push of edited shows to connected systems (default on): one
+    // show.loadJson (preserveState) per connected system, at most once per
+    // second per edit generation, kAutoPushDelay after the last edit.
+    bool m_AutoPushEdits = true;
+    std::uint64_t m_AutoPushedGeneration = 0; // last generation fully pushed
+    std::chrono::steady_clock::time_point m_NextAutoPushAttempt{}; // retry throttle
 
     // Modals.
     bool m_OpenModal = false;

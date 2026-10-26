@@ -96,7 +96,8 @@ Referenced media files are loaded into the library automatically (file-local
 media ids are remapped to library ids); missing media files are logged and
 skipped, not fatal.
 
-- Params: `path` (string, required) — path readable by the engine process.
+- Params: `path` (string, required) — path readable by the engine process;
+  `preserveState` (bool, optional, default `false`) — see `show.loadJson`.
 - Result: `{"name","scenes":<n>,"media":<n>}`
 
 #### `show.loadJson`
@@ -106,11 +107,21 @@ instead of a file path. This lets an authoring tool (e.g. the control GUI's
 show editor) push an edited show to a system without a shared filesystem.
 
 - Params: `show` (object, required) — the complete show document (see
-  [SHOW_FORMAT.md](SHOW_FORMAT.md)), as `Show::toJson` produces it.
+  [SHOW_FORMAT.md](SHOW_FORMAT.md)), as `Show::toJson` produces it;
+  `preserveState` (bool, optional, default `false`).
 - Result: `{"name","scenes":<n>,"media":<n>}` (same as `show.load`).
 - Errors: missing/non-object `show` parameter, an invalid document, or a
   malformed file are reported the same way as for `show.load`. Media
   loading (and skipping of missing media files) is identical.
+
+Without `preserveState`, loading a show resets playback (stopped, time 0,
+no scene/layer overrides). With `preserveState: true`, the live playback
+state carries over to the new show wherever it still makes sense: the play
+state (playing/paused/stopped) is kept, the playhead is kept (clamped to the
+new duration), a manual scene override is kept when that scene still exists,
+and layer overrides are kept for layers that still exist. This is what the
+control GUI's auto-push of live edits uses, so editing a show does not
+restart playback on the systems it is pushed to.
 
 #### `show.save`
 

@@ -299,13 +299,14 @@ nlohmann::json CommandServer::handleShowLoad(const nlohmann::json& params) const
     {
         throw ParameterError("invalid JSON in show file: " + std::string(e.what()));
     }
-    return applyShowDocument(parsed, "show file");
+    return applyShowDocument(parsed, "show file", optionalBool(params, "preserveState"));
 }
 
 // Parses a show document (a parsed JSON object), loads and remaps the media it
 // references, and makes the show active. Shared by show.load and show.loadJson.
 nlohmann::json CommandServer::applyShowDocument(const nlohmann::json& parsed,
-                                                const char* context) const
+                                                const char* context,
+                                                bool preserveState) const
 {
     std::string error;
     auto show = Show::fromJson(parsed, error);
@@ -355,7 +356,7 @@ nlohmann::json CommandServer::applyShowDocument(const nlohmann::json& parsed,
         }
     }
 
-    m_Engine.loadShow(*show);
+    m_Engine.loadShow(*show, preserveState);
     return {
         {"name", show->name},
         {"scenes", show->scenes.size()},
@@ -369,7 +370,7 @@ nlohmann::json CommandServer::handleShowLoadJson(const nlohmann::json& params) c
     {
         throw ParameterError("show.loadJson requires a 'show' object parameter");
     }
-    return applyShowDocument(params.at("show"), "show JSON");
+    return applyShowDocument(params.at("show"), "show JSON", optionalBool(params, "preserveState"));
 }
 
 nlohmann::json CommandServer::handleShowSave(const nlohmann::json& params) const
@@ -751,6 +752,15 @@ std::optional<std::string> CommandServer::optionalString(const nlohmann::json& p
         return params[key].get<std::string>();
     }
     return std::nullopt;
+}
+
+bool CommandServer::optionalBool(const nlohmann::json& params, const char* key)
+{
+    if (params.contains(key) && params[key].is_boolean())
+    {
+        return params[key].get<bool>();
+    }
+    return false;
 }
 
 } // namespace mediamax::protocol

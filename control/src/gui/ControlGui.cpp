@@ -155,6 +155,8 @@ void ControlGuiApp::frame()
     {
         m_FirstFrame = false;
     }
+    // After the UI: the debounced auto-push of edited shows (no ImGui work).
+    autoPushEditedShow();
 }
 
 // --- systems -----------------------------------------------------------------
@@ -284,13 +286,83 @@ void ControlGuiApp::pushToActiveSystem()
     }
     log("pushing show '" + m_Editor.show().name + "' to " + active->name() + " (show.loadJson)");
     std::string error;
-    if (sendActive("show.loadJson", {{"show", m_Editor.documentJson()}}, error))
+    // preserveState: a running system keeps playing (state, time, overrides)
+    // instead of restarting at 0.
+    if (sendActive("show.loadJson", {{"show", m_Editor.documentJson()}, {"preserveState", true}},
+                   error))
     {
         m_EditorError.clear();
     }
     else
     {
         m_EditorError = error;
+    }
+}
+
+// kAutoPushDelay: how long after the last edit before an auto-push goes out
+// (keeps a burst of edits to a single push), and the retry throttle after a
+// failed one.
+constexpr auto kAutoPushDelay = std::chrono::seconds(1);
+
+void ControlGuiApp::autoPushEditedShow()
+{
+    if (!m_AutoPushEdits || !m_Editor.dirty())
+    {
+        return;
+    }
+    const std::uint64_t generation = m_Editor.generation();
+    if (generation == m_AutoPushedGeneration)
+    {
+        return; // this edit burst was already pushed (or is not yet dirty)
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (now - m_Editor.lastTouched() < kAutoPushDelay)
+    {
+        return; // debounce: the user is still editing
+    }
+    if (now < m_NextAutoPushAttempt)
+    {
+        return; // retry throttle after a failed push
+    }
+    std::vector<SystemConnection*> targets;
+    for (auto& system : m_Systems)
+    {
+        if (system->pollConnected())
+        {
+            targets.push_back(system.get());
+        }
+    }
+    if (targets.empty())
+    {
+        return; // nothing to push to; re-checked on later frames
+    }
+    m_NextAutoPushAttempt = now + kAutoPushDelay;
+
+    json doc = m_Editor.documentJson();
+    bool allOk = true;
+    for (SystemConnection* target : targets)
+    {
+        json result;
+        std::string error;
+        if (target->send("show.loadJson", {{"show", doc}, {"preserveState", true}}, result, error))
+        {
+            log("auto-pushed show '" + m_Editor.show().name + "' to " + target->name());
+        }
+        else
+        {
+            log("auto-push to " + target->name() + " failed: " + error);
+            allOk = false;
+        }
+    }
+    if (allOk)
+    {
+        m_AutoPushedGeneration = generation;
+        m_EditorError.clear();
+    }
+    else
+    {
+        // Retry on a later frame (throttled) until every system accepted it.
+        m_EditorError = "auto-push failed for some systems (see console)";
     }
 }
 
@@ -1298,6 +1370,13 @@ void ControlGuiApp::renderShowEditorWindow()
         ImGui::OpenPopup(modalPopupId("Pull show from system"));
     }
     ImGui::EndDisabled();
+    ImGui::SameLine();
+    // Auto-push: edits are sent to every connected system (debounced,
+    // preserving playback state) without the Push button.
+    if (ImGui::Checkbox("Auto-push edits##autopush", &m_AutoPushEdits))
+    {
+        log(std::string("auto-push edits ") + (m_AutoPushEdits ? "enabled" : "disabled"));
+    }
 
     ImGui::Spacing();
     const std::string where =
@@ -2638,6 +2717,12 @@ bool ControlGuiApp::testCloseModal(const std::string& which)
     return false;
 }
 
+void ControlGuiApp::testTouchEditor(const std::string& name)
+{
+    m_Editor.show().name = name;
+    m_Editor.touch();
+}
+
 // --- self test ---------------------------------------------------------------------------
 
 bool ControlGuiApp::selfTestSystem(const std::string& host, std::uint16_t port, std::string& report)
@@ -2645,6 +2730,13 @@ bool ControlGuiApp::selfTestSystem(const std::string& host, std::uint16_t port, 
     // Drives the exact same command path the UI uses (SystemConnection),
     // against a running playback engine. The target show is replaced by a
     // deterministic one; run it against a scratch playback instance.
+    //
+    // The system is also registered in the app itself: the UI (and the
+    // auto-push of edited shows) must see it as a real system. addSystem()
+    // marks the systems config dirty; undo that, so the self-test never
+    // writes a config file (its config path is deliberately nonexistent).
+    addSystem("self-test", host, port);
+    m_ConfigDirty = false;
     SystemConnection conn("self-test", host, port);
     bool allOk = true;
     auto step = [&](const std::string& name, bool ok, const std::string& detail = "") {

@@ -2,11 +2,13 @@
 // media library and display set. This is the integration test for the
 // protocol layer - it exercises every one of the 24 commands.
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <variant>
 
 #include <doctest/doctest.h>
 
@@ -686,6 +688,101 @@ TEST_CASE("show.loadJson tolerates missing media like show.load")
     const Scene* scene = f.engine.show().findScene(1);
     REQUIRE(scene);
     CHECK(scene->layers[0].mediaId == 1);
+}
+
+TEST_CASE("show.loadJson resets live playback by default")
+{
+    Fixture f;
+    f.engine.play();
+    f.engine.seek(Time::fromSeconds(3.0));
+    CHECK(f.engine.setSceneNow(1)); // scene 2 is on the timeline at 3 s
+    CHECK(f.engine.setLayerOpacity(11, 0.25f));
+
+    const Response resp = f.run("show.loadJson", {{"show", f.engine.show().toJson()}});
+    REQUIRE(resp.ok);
+    CHECK(f.engine.state() == PlayState::Stopped);
+    CHECK(f.engine.time().isZero());
+    CHECK_FALSE(f.engine.hasSceneOverride());
+    // The layer override is gone: at 1 s scene 1 is on the timeline, and the
+    // background layer renders at its default opacity again.
+    const FrameState fs = f.engine.frameStateAt(Time::fromSeconds(1.0));
+    const LayerFrame* bg = nullptr;
+    for (const auto& layer : fs.layers)
+    {
+        if (layer.layerId == 11)
+        {
+            bg = &layer;
+        }
+    }
+    REQUIRE(bg);
+    CHECK(bg->opacity == doctest::Approx(1.0f));
+}
+
+TEST_CASE("show.loadJson with preserveState keeps live playback going")
+{
+    Fixture f;
+    f.engine.play();
+    f.engine.seek(Time::fromSeconds(3.0)); // timeline scene at 3 s is 2 (cue at 2 s)
+    CHECK(f.engine.setSceneNow(1));        // operator override back to scene 1
+    CHECK(f.engine.setLayerOpacity(11, 0.25f));
+
+    const Response resp =
+        f.run("show.loadJson", {{"show", f.engine.show().toJson()}, {"preserveState", true}});
+    REQUIRE(resp.ok);
+
+    CHECK(f.engine.state() == PlayState::Playing);
+    CHECK(f.engine.time() == Time::fromSeconds(3.0));
+    CHECK(f.engine.hasSceneOverride());
+    CHECK(f.engine.activeSceneAt(f.engine.time()) == 1); // override still wins
+    const FrameState fs = f.engine.frameState();
+    const LayerFrame* bg = nullptr;
+    for (const auto& layer : fs.layers)
+    {
+        if (layer.layerId == 11)
+        {
+            bg = &layer;
+        }
+    }
+    REQUIRE(bg);
+    CHECK(bg->opacity == doctest::Approx(0.25f)); // layer override survived
+}
+
+TEST_CASE("show.loadJson with preserveState drops what the new show lacks")
+{
+    Fixture f;
+    f.engine.play();
+    f.engine.seek(Time::fromSeconds(6.5));
+    CHECK(f.engine.setSceneNow(2)); // scene 2 (layers 20)
+    CHECK(f.engine.setLayerOpacity(20, 0.25f));
+
+    // The edited show: scene 2 (and its cues) are gone, the duration is
+    // shorter than the current playhead.
+    Show next = mediamax::test::makeTestShow();
+    next.name = "Trimmed";
+    next.duration = Time::fromSeconds(3.0);
+    next.scenes.erase(std::remove_if(next.scenes.begin(), next.scenes.end(),
+                                     [](const Scene& s) { return s.id == 2; }),
+                      next.scenes.end());
+    next.cues.erase(std::remove_if(next.cues.begin(), next.cues.end(),
+                                   [](const Cue& c) {
+                                       return std::holds_alternative<PlayScene>(c.action) &&
+                                              std::get<PlayScene>(c.action).scene == 2;
+                                   }),
+                    next.cues.end());
+
+    const Response resp =
+        f.run("show.loadJson", {{"show", next.toJson()}, {"preserveState", true}});
+    REQUIRE(resp.ok);
+
+    CHECK(f.engine.state() == PlayState::Playing); // still playing the trimmed show
+    CHECK(f.engine.time() == Time::fromSeconds(3.0)); // clamped to the new duration
+    CHECK_FALSE(f.engine.hasSceneOverride());         // scene 2 no longer exists
+    // Layer 20 is gone, so its override cannot survive.
+    const FrameState fs = f.engine.frameState();
+    for (const auto& layer : fs.layers)
+    {
+        CHECK(layer.layerId != 20);
+    }
 }
 
 TEST_CASE("scene.clear releases the operator scene override")

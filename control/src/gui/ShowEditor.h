@@ -6,6 +6,8 @@
 // Show directly; saving serializes through Show::toJson (the same codec the
 // engine uses), so the GUI cannot emit an invalid document.
 
+#include <chrono>
+#include <cstdint>
 #include <string>
 
 #include "mediamax/show/Show.h"
@@ -33,8 +35,16 @@ public:
     const std::string& filePath() const { return m_Path; }
     bool dirty() const { return m_Dirty; }
 
-    // Marks the content as edited (call after any Show mutation).
+    // Marks the content as edited (call after any Show mutation). Also
+    // advances the edit generation and timestamp, which the debounced
+    // auto-push (ControlGuiApp) uses.
     void touch();
+
+    // Monotonic count of edits since the editor was created; changes with
+    // every touch().
+    std::uint64_t generation() const { return m_Generation; }
+    // When the last touch() happened (the debounce reference).
+    std::chrono::steady_clock::time_point lastTouched() const { return m_LastTouched; }
 
     // The current document as JSON (for show.loadJson) / pretty text.
     nlohmann::json documentJson() const { return m_Show.toJson(); }
@@ -49,6 +59,8 @@ private:
     Show m_Show;
     std::string m_Path;
     bool m_Dirty = false;
+    std::uint64_t m_Generation = 0;
+    std::chrono::steady_clock::time_point m_LastTouched{};
 };
 
 } // namespace mediamax::gui

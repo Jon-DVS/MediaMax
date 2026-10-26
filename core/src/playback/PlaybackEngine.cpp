@@ -6,14 +6,70 @@
 namespace mediamax
 {
 
-void PlaybackEngine::loadShow(Show show)
+namespace
 {
+
+// True when any scene of the show contains the layer (a layer override is
+// only meaningful for a layer that still exists).
+bool layerExistsInShow(const Show& show, Id layerId)
+{
+    for (const auto& scene : show.scenes)
+    {
+        for (const auto& layer : scene.layers)
+        {
+            if (layer.id == layerId)
+            {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+} // namespace
+
+void PlaybackEngine::loadShow(Show show, bool preserveState)
+{
+    if (!preserveState)
+    {
+        m_Show = std::move(show);
+        m_State = PlayState::Stopped;
+        m_Time = Time::zero();
+        m_PreviewScene = 0;
+        m_ForceScene.reset();
+        m_Overrides.clear();
+        return;
+    }
+
+    // Live edit: carry the playback state over to the new show wherever it
+    // still makes sense.
+    const PlayState state = m_State;
+    const Time time = m_Time;
+    const std::optional<Id> forceScene = m_ForceScene;
     m_Show = std::move(show);
-    m_State = PlayState::Stopped;
-    m_Time = Time::zero();
-    m_PreviewScene = 0;
-    m_ForceScene.reset();
-    m_Overrides.clear();
+    m_State = state;
+    m_Time = time;
+    if (m_Show.duration.isValid() && m_Time > m_Show.duration)
+    {
+        m_Time = m_Show.duration;
+    }
+    if (m_PreviewScene >= static_cast<int>(m_Show.scenes.size()))
+    {
+        m_PreviewScene = 0;
+    }
+    if (forceScene.has_value() && m_Show.findScene(*forceScene) == nullptr)
+    {
+        m_ForceScene.reset();
+    }
+    else
+    {
+        m_ForceScene = forceScene;
+    }
+    for (auto it = m_Overrides.begin(); it != m_Overrides.end();)
+    {
+        const bool kept = layerExistsInShow(m_Show, it->first);
+        it = kept ? std::next(it) : m_Overrides.erase(it);
+    }
 }
 
 void PlaybackEngine::play()

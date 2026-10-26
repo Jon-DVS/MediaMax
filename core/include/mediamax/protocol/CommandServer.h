@@ -88,16 +88,20 @@ private:
     nlohmann::json handleDisplaySet(const nlohmann::json& params) const;
     nlohmann::json handleDisplayWarpSet(const nlohmann::json& params) const;
 
-    // Parses a show document, loads and remaps its media, and makes it active.
-    // Shared by show.load (after the file read) and show.loadJson. `context`
-    // is only used in error messages ("show file" / "show JSON").
-    nlohmann::json applyShowDocument(const nlohmann::json& parsed, const char* context) const;
+    // Parses a show document, loads and remaps its media, and makes it
+    // active. Shared by show.load (after the file read) and show.loadJson.
+    // `context` is only used in error messages ("show file" / "show JSON").
+    // `preserveState` keeps the live playback state across the load (see
+    // PlaybackEngine::loadShow).
+    nlohmann::json applyShowDocument(const nlohmann::json& parsed, const char* context,
+                                     bool preserveState) const;
 
     // Parameter extraction helpers (throw protocol::ParameterError).
     static std::string requireString(const nlohmann::json& params, const char* key);
     static double requireNumber(const nlohmann::json& params, const char* key);
     static int requireInt(const nlohmann::json& params, const char* key);
     static std::optional<std::string> optionalString(const nlohmann::json& params, const char* key);
+    static bool optionalBool(const nlohmann::json& params, const char* key);
 
     PlaybackEngine& m_Engine;
     MediaLibrary& m_Media;

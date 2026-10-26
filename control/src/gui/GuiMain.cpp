@@ -1,8 +1,10 @@
 #include "gui/GuiMain.h"
 
+#include <chrono>
 #include <cstdint>
 #include <iostream>
 #include <string>
+#include <thread>
 
 #include "gui/ControlGui.h"
 #include "gui/GuiCrash.h"
@@ -280,6 +282,10 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
     //    running playback engine was given.
     bool liveOk = true;
     std::string liveReport;
+    std::string liveHost;
+    std::uint16_t livePort = 0;
+    bool haveLiveSystem = false;
+    std::string autoPushName;
     if (!liveSystem.empty())
     {
         const size_t colon = liveSystem.rfind(':');
@@ -291,11 +297,11 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
             glfwTerminate();
             return 2;
         }
-        const std::string host = liveSystem.substr(0, colon);
-        std::uint16_t port = 47600;
+        liveHost = liveSystem.substr(0, colon);
+        livePort = 47600;
         try
         {
-            port = static_cast<std::uint16_t>(std::stoi(liveSystem.substr(colon + 1)));
+            livePort = static_cast<std::uint16_t>(std::stoi(liveSystem.substr(colon + 1)));
         }
         catch (const std::exception&)
         {
@@ -305,7 +311,16 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
             glfwTerminate();
             return 2;
         }
-        liveOk = app.selfTestSystem(host, port, liveReport);
+        liveOk = app.selfTestSystem(liveHost, livePort, liveReport);
+        haveLiveSystem = true;
+        if (liveOk)
+        {
+            // Edit the editor's show: the frames below give the debounced
+            // auto-push time to run, and step 4 verifies the system received
+            // the edit (issue 8).
+            autoPushName = "AutoPush self-test";
+            app.testTouchEditor(autoPushName);
+        }
     }
 
     // 2) Render N full UI frames into the hidden window.
@@ -364,6 +379,36 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
             modalReport += " - did not close";
         }
         modalReport += "\n";
+    }
+
+    // 4) Auto-push (issue 8): the editor edit from step 1 must have reached
+    //    the system via the debounced auto-push during the frame phases.
+    //    Keep rendering frames (the push happens in frame()) while polling
+    //    show.info for the pushed show name.
+    if (haveLiveSystem && !autoPushName.empty())
+    {
+        SystemConnection check("auto-push-check", liveHost, livePort);
+        nlohmann::json result;
+        std::string checkError;
+        bool arrived = false;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (!arrived && std::chrono::steady_clock::now() < deadline)
+        {
+            glfwPollEvents();
+            runtime.renderFrame();
+            if (check.send("show.info", nlohmann::json::object(), result, checkError) &&
+                result.value("name", std::string()) == autoPushName)
+            {
+                arrived = true;
+            }
+            else
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(150));
+            }
+        }
+        std::cout << (arrived ? "PASS" : "FAIL") << " auto-push - show.info name = "
+                  << (arrived ? autoPushName : "<not received>") << std::endl;
+        liveOk = liveOk && arrived;
     }
 
     runtime.shutdown();
