@@ -28,6 +28,12 @@ constexpr std::uint32_t kAcquireTimeoutMs = 100;
 // Dense warp texture size (display pass).
 constexpr std::uint32_t kWarpTextureSize = 512;
 
+// Frames to wait after applying record geometry to the window before the
+// write-back direction may act again (the WM reports the resulting size a
+// frame or two later; until then the difference is our own in-flight apply,
+// not user input).
+constexpr int kApplyGraceFrames = 8;
+
 } // namespace
 
 PlaybackApp::PlaybackApp(AppArgs args)
@@ -636,13 +642,31 @@ void PlaybackApp::pollWindowEvents()
                 m_ShutdownRequested.store(true);
                 return;
             }
-            // Keep the enabled flag in sync with DisplayManager (display.set).
+
+            // Keep the window in sync with the DisplayManager record - the
+            // single source of truth in both directions. A record that
+            // changed (display.set) is applied to the window, which
+            // re-initializes the display: handleWindowResizes() recreates
+            // the swapchain when the framebuffer size follows, and the scene
+            // size follows via outputBounds(). A window that moved or
+            // resized on its own (manual drag) is written back into the
+            // record so it is not fought next frame.
             bool enabled = true;
+            bool haveRecord = false;
+            std::int32_t rx = 0, ry = 0, rw = 0, rh = 0;
             {
                 std::lock_guard lock(m_StateMutex);
                 if (const auto display = m_Displays.find(ds.displayId))
                 {
                     enabled = (*display)->enabled;
+                    if ((*display)->valid())
+                    {
+                        rx = (*display)->x;
+                        ry = (*display)->y;
+                        rw = (*display)->width;
+                        rh = (*display)->height;
+                        haveRecord = true;
+                    }
                 }
             }
             if (enabled != ds.enabled)
@@ -656,6 +680,50 @@ void PlaybackApp::pollWindowEvents()
                 {
                     glfwHideWindow(ds.window);
                 }
+            }
+            if (!haveRecord)
+            {
+                continue;
+            }
+
+            int wx = 0, wy = 0, ww = 0, wh = 0;
+            glfwGetWindowPos(ds.window, &wx, &wy);
+            glfwGetWindowSize(ds.window, &ww, &wh);
+            if (rx != ds.appliedX || ry != ds.appliedY || rw != ds.appliedW || rh != ds.appliedH)
+            {
+                // The record changed: re-initialize the window to match it.
+                if (wx != rx || wy != ry)
+                {
+                    glfwSetWindowPos(ds.window, rx, ry);
+                }
+                if (ww != rw || wh != rh)
+                {
+                    glfwSetWindowSize(ds.window, rw, rh);
+                }
+                ds.appliedX = rx;
+                ds.appliedY = ry;
+                ds.appliedW = rw;
+                ds.appliedH = rh;
+                ds.applyGraceFrames = kApplyGraceFrames;
+            }
+            else if (ds.applyGraceFrames > 0)
+            {
+                // Our apply is still in flight: the window is about to report
+                // the new size. Do not treat the stale size as user input.
+                --ds.applyGraceFrames;
+            }
+            else if (wx != rx || wy != ry || ww != rw || wh != rh)
+            {
+                // The window changed on its own (manual move/resize): the
+                // record follows the window.
+                {
+                    std::lock_guard lock(m_StateMutex);
+                    m_Displays.setDisplayGeometry(ds.displayId, wx, wy, ww, wh);
+                }
+                ds.appliedX = wx;
+                ds.appliedY = wy;
+                ds.appliedW = ww;
+                ds.appliedH = wh;
             }
         }
     }

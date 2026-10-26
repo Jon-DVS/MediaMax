@@ -82,6 +82,14 @@ private:
         bool sizeDirty = false;
         bool enabled = true;
 
+        // Last record geometry applied to the window. pollWindowEvents()
+        // keeps window and DisplayManager record in sync in both directions;
+        // these values tell which side changed last, and applyGraceFrames
+        // withholds the write-back direction while our own apply is still in
+        // flight (the WM reports the new size a frame or two later).
+        std::int32_t appliedX = 0, appliedY = 0, appliedW = 0, appliedH = 0;
+        int applyGraceFrames = 0;
+
         // Last warp offsets uploaded (cheap change detection).
         std::vector<std::array<float, 2>> lastWarpOffsets;
     };

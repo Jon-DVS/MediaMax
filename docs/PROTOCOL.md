@@ -267,6 +267,13 @@ Update any subset of a display's properties.
   `enabled` (bool).
 - Result: the updated display object.
 
+A geometry update reinitializes the playback engine's display for that
+record: the engine's window is moved/resized to the new geometry, the
+swapchain is recreated when the size changes, and the scene re-slices to
+the new output bounds. Conversely, manually moving or resizing the engine
+window writes the window's client geometry back into the record, so the
+record stays the single source of truth in both directions.
+
 #### `display.warp.set`
 
 Set the projection warp for a display from a grid of points in
