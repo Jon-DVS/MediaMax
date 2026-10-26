@@ -2093,8 +2093,11 @@ void ControlGuiApp::renderModals()
     {
         if (ImGui::BeginPopupModal("About MediaMax Control", &m_AboutModal))
         {
-            ImGui::Text("MediaMax control interface");
-            ImGui::Text("Control protocol v1   |   Dear ImGui %s", ImGui::GetVersion());
+            ImGui::Text("MediaMax control interface  (version %s)", MEDIAMAX_VERSION);
+            ImGui::Text("Control protocol v%d   |   Dear ImGui %s", mediamax::protocol::kProtocolVersion,
+                        ImGui::GetVersion());
+            ImGui::Text("%d system%s configured", static_cast<int>(m_Systems.size()),
+                        m_Systems.size() == 1 ? "" : "s");
             ImGui::TextWrapped(
                 "Systems: connect to any number of playback engines.  Playback: live transport, "
                 "scenes, layer overrides, displays and warp.  Show Editor: author and push "

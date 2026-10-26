@@ -26,6 +26,11 @@ target_include_directories(mediamax_control
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
+# Project version, shown in Help > About.
+target_compile_definitions(mediamax_control
+    PRIVATE
+        MEDIAMAX_VERSION="${PROJECT_VERSION}")
+
 if(WIN32)
     # MessageBoxW (crash diagnostics), DwmSetWindowAttribute (dark title
     # bar) and the same loader deployment as the playback app (no-op on
