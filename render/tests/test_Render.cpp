@@ -65,7 +65,7 @@ void runGpuTest(const char* what, Fn&& fn)
     auto& g = gpu();
     if (!g.ok)
     {
-        DOCTEST_MESSAGE("skipping: no usable GPU (" << g.error << ")");
+        DOCTEST_MESSAGE("skipping " << what << ": no usable GPU (" << g.error << ")");
         return;
     }
     fn(g);
@@ -160,6 +160,20 @@ SceneRenderer::LayerDraw colorLayer(Color4 c, int zIndex = 0)
     return d;
 }
 
+// A color layer whose quad is `size` px on a side, anchored at the scene
+// center (128,128) unless the caller overrides the transform.
+SceneRenderer::LayerDraw partialColorLayer(Color4 c, int size)
+{
+    SceneRenderer::LayerDraw d;
+    d.color = c;
+    d.opacity = 1.f;
+    d.transform = Transform2D{};
+    d.transform.x = 128.f;
+    d.transform.y = 128.f;
+    d.mediaSize = Size2i{size, size};
+    return d;
+}
+
 // Offscreen "display" target: a plain render target used like a swapchain
 // image (isSwapchainImage = false).
 nvrhi::TextureHandle makeOffscreenTarget(nvrhi::DeviceHandle device, int w, int h)
@@ -242,6 +256,95 @@ TEST_CASE("Layer compositing matches the CPU blend reference")
         checkClose("g", p.g, expected.g);
         checkClose("b", p.b, expected.b);
         checkClose("a", p.a, 1.f);
+    });
+}
+
+TEST_CASE("Partial layer keeps the background outside its quad (2 layers)")
+{
+    // Regression: NVRHI render passes load the destination's previous content
+    // (loadOp=LOAD), so the second layer's target must carry the first layer's
+    // full-screen result before the pass; without that copy, everything the
+    // first layer drew outside the second layer's quad was lost (even layer
+    // counts left the final accumulation in a target that was never written
+    // with the first layer).
+    runGpuTest("partial-2", [](Gpu& g) {
+        const Color4 bg{0.25f, 0.5f, 0.75f, 1.f};
+        const Color4 fg{0.9f, 0.1f, 0.1f, 1.f};
+
+        SceneRenderer::FrameInput frame;
+        frame.layers.push_back(colorLayer(bg));
+        frame.layers.push_back(partialColorLayer(fg, 128)); // covers (64..192)^2
+
+        renderOneFrame(g.renderer, frame);
+
+        std::vector<std::uint8_t> rgba;
+        REQUIRE(g.renderer.readBackScene(rgba));
+
+        // Inside the quad: the foreground.
+        const Pixel inQuad = pixelAt(rgba, 256, 128, 128);
+        checkClose("fg r", inQuad.r, fg.r);
+        checkClose("fg g", inQuad.g, fg.g);
+        checkClose("fg b", inQuad.b, fg.b);
+
+        // Outside the quad: the background must survive the ping-pong.
+        const Pixel outQuad = pixelAt(rgba, 256, 20, 20);
+        checkClose("bg r", outQuad.r, bg.r);
+        checkClose("bg g", outQuad.g, bg.g);
+        checkClose("bg b", outQuad.b, bg.b);
+        CHECK(outQuad.a == 255);
+    });
+}
+
+TEST_CASE("Partial layers accumulate in order across the ping-pong (3 layers)")
+{
+    // Regression: the middle layer's result must be carried into the third
+    // layer's destination (the ping-pong target written two passes earlier),
+    // so the third layer blends over background+middle everywhere it covers.
+    runGpuTest("partial-3", [](Gpu& g) {
+        const Color4 bg{0.25f, 0.5f, 0.75f, 1.f};
+        const Color4 mid{0.9f, 0.1f, 0.1f, 1.f};
+        const Color4 top{0.1f, 0.9f, 0.1f, 0.5f};
+
+        SceneRenderer::FrameInput frame;
+        frame.layers.push_back(colorLayer(bg));
+        frame.layers.push_back(partialColorLayer(mid, 128));          // (64..192)^2
+        auto topLayer = partialColorLayer(top, 100);                  // x (118..218), y (78..178)
+        topLayer.transform.x = 168.f;
+        frame.layers.push_back(topLayer);
+
+        renderOneFrame(g.renderer, frame);
+
+        std::vector<std::uint8_t> rgba;
+        REQUIRE(g.renderer.readBackScene(rgba));
+
+        const Color4 midOverBg = blend::apply(bg, mid, BlendMode::Normal);
+        const Color4 topOverMid = blend::apply(midOverBg, top, BlendMode::Normal);
+        const Color4 topOverBg = blend::apply(bg, top, BlendMode::Normal);
+
+        // Inside mid only (100 < 118).
+        const Pixel pMid = pixelAt(rgba, 256, 100, 128);
+        checkClose("mid r", pMid.r, midOverBg.r);
+        checkClose("mid g", pMid.g, midOverBg.g);
+        checkClose("mid b", pMid.b, midOverBg.b);
+
+        // Inside mid + top (118 <= 160 < 192).
+        const Pixel pBoth = pixelAt(rgba, 256, 160, 128);
+        checkClose("both r", pBoth.r, topOverMid.r);
+        checkClose("both g", pBoth.g, topOverMid.g);
+        checkClose("both b", pBoth.b, topOverMid.b);
+
+        // Inside top but outside mid (200 >= 192): the region that needs the
+        // middle layer's contribution carried into the third layer's target.
+        const Pixel pTopOnly = pixelAt(rgba, 256, 200, 128);
+        checkClose("top r", pTopOnly.r, topOverBg.r);
+        checkClose("top g", pTopOnly.g, topOverBg.g);
+        checkClose("top b", pTopOnly.b, topOverBg.b);
+
+        // Outside both: the background.
+        const Pixel pBg = pixelAt(rgba, 256, 20, 20);
+        checkClose("bg r", pBg.r, bg.r);
+        checkClose("bg g", pBg.g, bg.g);
+        checkClose("bg b", pBg.b, bg.b);
     });
 }
 

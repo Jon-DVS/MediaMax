@@ -497,8 +497,29 @@ void SceneRenderer::recordFrame(nvrhi::ICommandList* cmd, const FrameInput& fram
     std::uint32_t vertexStart = 0;
     const auto& sceneSize = m_SceneSize;
 
-    for (const auto& layer : frame.layers)
+    for (std::size_t layerIndex = 0; layerIndex < frame.layers.size(); ++layerIndex)
     {
+        const auto& layer = frame.layers[layerIndex];
+
+        // NVRHI render passes always load the destination's existing content
+        // (loadOp=LOAD is not configurable), so the pixels this layer's quad
+        // does not cover keep whatever the destination held before the pass.
+        // The first layer's destination was cleared to black above (the
+        // correct "no layers yet" state); every later destination holds
+        // stale content from an earlier frame, so carry the current
+        // accumulation over before drawing. Without this, scenes whose
+        // layers do not all span the full screen drop everything drawn
+        // before the final layer everywhere but its own quad.
+        if (layerIndex > 0)
+        {
+            cmd->copyTexture(next,
+                             nvrhi::TextureSlice()
+                                 .setWidth(static_cast<std::uint32_t>(sceneSize.width))
+                                 .setHeight(static_cast<std::uint32_t>(sceneSize.height)),
+                             prev,
+                             nvrhi::TextureSlice());
+        }
+
         nvrhi::ITexture* mediaTex =
             layer.texture.Get() != nullptr ? layer.texture.Get() : m_WhiteTexture.Get();
 
