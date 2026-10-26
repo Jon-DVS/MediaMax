@@ -11,7 +11,12 @@ or more playback engines (`mediamax_playback`).
   are not valid JSON are rejected.
 - Connection lifetime: a client may send any number of commands over one
   connection; the server processes them in order and answers each in turn.
-  Requests and responses are strictly **1:1** with the `id` echoed.
+  Requests and responses are strictly **1:1** with the `id` echoed. Idle
+  connections are **kept open** (the server never drops a quiet client):
+  interactive command connections sit between operations for minutes. A
+  client whose socket has gone stale (engine restart, network hiccup)
+  reconnects transparently — `ControlClient` retries one request after
+  re-establishing the connection.
 
 ## Envelope (protocol version 1)
 

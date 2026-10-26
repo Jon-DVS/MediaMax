@@ -144,6 +144,29 @@ TEST_CASE("TcpConnection: receiveLine times out on a quiet connection")
               std::chrono::steady_clock::now() - start).count() >= 100);
 }
 
+TEST_CASE("TcpConnection: receiveLine distinguishes timeout from EOF")
+{
+    net::TcpListener listener;
+    REQUIRE(listener.bind("127.0.0.1", 0));
+    const auto port = listener.boundPort();
+
+    net::TcpConnection client;
+    REQUIRE(client.connect("127.0.0.1", port, 3000));
+    net::TcpConnection serverSide;
+    REQUIRE(listener.accept(serverSide, 3000));
+
+    std::string line;
+    bool timedOut = false;
+    CHECK_FALSE(client.receiveLine(line, 150, &timedOut));
+    CHECK(timedOut); // timeout, not a hard failure
+    CHECK(client.valid()); // the connection is still usable
+
+    serverSide.close();
+    timedOut = true; // must be reset on a hard failure
+    CHECK_FALSE(client.receiveLine(line, 3000, &timedOut));
+    CHECK_FALSE(timedOut);
+}
+
 TEST_CASE("TcpConnection: EOF is detected after the peer closes")
 {
     net::TcpListener listener;
@@ -349,6 +372,89 @@ TEST_CASE("ControlServer: stop disconnects active clients promptly")
     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                              std::chrono::steady_clock::now() - start).count();
     CHECK(elapsed < 2000);
+}
+
+TEST_CASE("ControlServer: idle connections are kept open")
+{
+    // The GUI's command connection sits idle between interactions. The
+    // server must not close it when the receive wait times out (the old
+    // 5 s idle kill made the next send fail with "failed to send command");
+    // the timeout only re-checks the running flag.
+    TestHandler handler;
+    ControlServer server("127.0.0.1", 0, /*idleCheckMs=*/100);
+    server.setHandler([&handler](const protocol::Command& cmd) { return handler.handle(cmd); });
+    REQUIRE(server.start());
+
+    ControlClient client;
+    REQUIRE(client.connect("127.0.0.1", server.port(), 3000));
+    std::string error;
+    nlohmann::json result;
+    REQUIRE(client.request("echo", {{"text", "one"}}, result, error));
+
+    std::this_thread::sleep_for(600ms); // six idle re-checks go by
+    REQUIRE(client.request("echo", {{"text", "two"}}, result, error));
+    CHECK(result.at("echo").get<std::string>() == "two");
+
+    server.stop();
+}
+
+TEST_CASE("ControlClient: a dropped connection is re-established transparently")
+{
+    // The engine went away (peer closed the connection) while the client
+    // still believed it was connected. The next request(s) must re-connect
+    // to the same endpoint without the caller noticing; depending on RST
+    // timing the first request either retries its own send or fails with
+    // EOF and the second one reconnects lazily - either way the second
+    // request must complete over the fresh connection.
+    net::TcpListener listener;
+    REQUIRE(listener.bind("127.0.0.1", 0));
+    const auto port = listener.boundPort();
+
+    ControlClient client;
+    REQUIRE(client.connect("127.0.0.1", port, 3000));
+
+    // The peer closes the connection (engine shutdown/restart).
+    net::TcpConnection deadPeer;
+    REQUIRE(listener.accept(deadPeer, 3000));
+    deadPeer.close();
+
+    // The "new" engine instance: accepts the reconnection and answers up to
+    // two command lines (both requests may travel over it, when the first
+    // request retried its send).
+    std::atomic<int> answered{0};
+    std::thread responder([&]() {
+        net::TcpConnection peer;
+        if (!listener.accept(peer, 10000))
+        {
+            return;
+        }
+        for (int i = 0; i < 2; ++i)
+        {
+            std::string line;
+            if (!peer.receiveLine(line, 1000))
+            {
+                break;
+            }
+            protocol::Command cmd;
+            if (!protocol::decodeCommand(line, cmd))
+            {
+                break;
+            }
+            peer.sendLine(protocol::encodeResponse(protocol::Response::success(
+                cmd.id, {{"echo", cmd.params.value("text", std::string())}})));
+            ++answered;
+        }
+    });
+
+    std::string error;
+    nlohmann::json result;
+    client.request("echo", {{"text", "one"}}, result, error);
+    const bool secondOk = client.request("echo", {{"text", "two"}}, result, error);
+
+    responder.join();
+    CHECK(answered.load() >= 1);
+    REQUIRE(secondOk);
+    CHECK(result.at("echo").get<std::string>() == "two");
 }
 
 } // TEST_SUITE("Net")

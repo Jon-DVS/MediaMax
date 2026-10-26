@@ -245,6 +245,7 @@ bool TcpConnection::connect(const std::string& host, std::uint16_t port, std::ui
 {
     ensureWinsock();
     close();
+    m_Buffer.clear(); // a fresh connection starts with a clean stream state
     SocketHandle handle = kBadSocket;
     if (!connectSocket(handle, host, port, timeoutMs))
     {
@@ -286,8 +287,12 @@ bool TcpConnection::sendLine(const std::string& line)
     return sendAll(&newline, 1);
 }
 
-bool TcpConnection::receiveLine(std::string& outLine, std::uint32_t timeoutMs)
+bool TcpConnection::receiveLine(std::string& outLine, std::uint32_t timeoutMs, bool* outTimedOut)
 {
+    if (outTimedOut)
+    {
+        *outTimedOut = false;
+    }
     if (m_Handle == kInvalid)
     {
         return false;
@@ -320,6 +325,10 @@ bool TcpConnection::receiveLine(std::string& outLine, std::uint32_t timeoutMs)
         const auto now = std::chrono::steady_clock::now();
         if (now >= deadline)
         {
+            if (outTimedOut)
+            {
+                *outTimedOut = true;
+            }
             return false; // no complete line before the deadline
         }
         const auto remaining =
@@ -340,6 +349,10 @@ bool TcpConnection::receiveLine(std::string& outLine, std::uint32_t timeoutMs)
             // Timed out. A partial line without a terminator is not a valid
             // protocol message, so report failure (the stream is desynced).
             // The partial data stays buffered for the next call.
+            if (outTimedOut)
+            {
+                *outTimedOut = true;
+            }
             return false;
         }
 

@@ -24,6 +24,9 @@ public:
 
     // Sends a command and waits for the correlated response.
     // Returns false (with error set) on timeout, protocol error or ok=false.
+    // Robust against stale connections: if the socket is gone (peer closed
+    // it, engine restarted) it reconnects once to the last used endpoint; a
+    // failed send that the retry cannot fix reports "failed to send command".
     bool request(const std::string& method, const nlohmann::json& params,
                  nlohmann::json& outResult, std::string& error, std::uint32_t timeoutMs = 5000);
 
@@ -34,6 +37,10 @@ public:
 private:
     net::TcpConnection m_Connection;
     std::int64_t m_NextId = 1;
+    // Endpoint of the last successful connect(), remembered so request() can
+    // reconnect once after the peer dropped the connection.
+    std::string m_LastHost;
+    std::uint16_t m_LastPort = 0;
 };
 
 } // namespace mediamax

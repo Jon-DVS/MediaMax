@@ -38,7 +38,12 @@ using CommandHandler = std::function<protocol::Response(const protocol::Command&
 class ControlServer
 {
 public:
-    ControlServer(std::string host, std::uint16_t port);
+    // idleCheckMs: how often an idle client connection is re-checked for
+    // shutdown. Idle connections are kept open deliberately: GUI command
+    // connections stay quiet between interactions, and closing an idle
+    // connection made the next send fail ("failed to send command"). The
+    // interval only bounds how fast a stopped server notices.
+    ControlServer(std::string host, std::uint16_t port, std::uint32_t idleCheckMs = 5000);
 
     // Stops the server if it is still running (stop is idempotent).
     ~ControlServer() { stop(); }
@@ -64,10 +69,11 @@ private:
     static void serveClient(std::shared_ptr<net::TcpConnection> client,
                             std::shared_ptr<std::atomic<bool>> running,
                             std::shared_ptr<std::mutex> handlerMutex,
-                            std::shared_ptr<CommandHandler> handler);
+                            std::shared_ptr<CommandHandler> handler, std::uint32_t idleCheckMs);
 
     std::string m_Host;
     std::uint16_t m_Port;
+    std::uint32_t m_IdleCheckMs;
 
     net::TcpListener m_Listener;
     std::thread m_AcceptThread;

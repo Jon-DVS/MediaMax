@@ -36,8 +36,12 @@ public:
     bool sendLine(const std::string& line);
 
     // Receives one \n-terminated line (terminator stripped). Waits up to
-    // timeoutMs; false on timeout, EOF or error.
-    bool receiveLine(std::string& outLine, std::uint32_t timeoutMs);
+    // timeoutMs; false on timeout, EOF or error. When `outTimedOut` is
+    // non-null it reports the failure kind: true for a timeout (the deadline
+    // passed without a complete line; the connection is still usable) and
+    // false for a hard failure (EOF, socket error, oversized line; the
+    // connection should be closed).
+    bool receiveLine(std::string& outLine, std::uint32_t timeoutMs, bool* outTimedOut = nullptr);
 
     void close();
 

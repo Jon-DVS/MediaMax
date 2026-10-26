@@ -5,9 +5,10 @@
 namespace mediamax
 {
 
-ControlServer::ControlServer(std::string host, std::uint16_t port)
+ControlServer::ControlServer(std::string host, std::uint16_t port, std::uint32_t idleCheckMs)
     : m_Host(std::move(host))
     , m_Port(port)
+    , m_IdleCheckMs(idleCheckMs)
 {
 }
 
@@ -80,8 +81,8 @@ void ControlServer::acceptLoop()
 
         auto shared = std::make_shared<net::TcpConnection>(std::move(connection));
         std::thread clientThread([shared, running = m_Running, mutex = m_HandlerMutex,
-                                  handler = m_Handler]() {
-            serveClient(shared, running, mutex, handler);
+                                  handler = m_Handler, idleCheckMs = m_IdleCheckMs]() {
+            serveClient(shared, running, mutex, handler, idleCheckMs);
         });
         {
             std::lock_guard lock(m_ClientsMutex);
@@ -94,7 +95,7 @@ void ControlServer::acceptLoop()
 void ControlServer::serveClient(std::shared_ptr<net::TcpConnection> client,
                                 std::shared_ptr<std::atomic<bool>> running,
                                 std::shared_ptr<std::mutex> handlerMutex,
-                                std::shared_ptr<CommandHandler> handler)
+                                std::shared_ptr<CommandHandler> handler, std::uint32_t idleCheckMs)
 {
     Logger::instance().info("Control client connected");
     for (;;)
@@ -104,9 +105,17 @@ void ControlServer::serveClient(std::shared_ptr<net::TcpConnection> client,
             break;
         }
         std::string line;
-        if (!client->receiveLine(line, 5000))
+        bool timedOut = false;
+        if (!client->receiveLine(line, idleCheckMs, &timedOut))
         {
-            break; // timeout, EOF or error
+            if (timedOut)
+            {
+                // Idle: keep the connection. Command connections (the GUI's
+                // interactive one in particular) sit between clicks for
+                // minutes; closing them here made the next send fail.
+                continue;
+            }
+            break; // EOF or error
         }
         if (line.empty())
         {
