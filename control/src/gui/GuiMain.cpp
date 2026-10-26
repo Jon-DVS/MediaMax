@@ -6,6 +6,7 @@
 #include <string>
 
 #include "gui/ControlGui.h"
+#include "gui/GuiCrash.h"
 // Vulkan before GLFW: the GLFW header includes the Vulkan header (and the
 // platform surface macro must already be in effect for the surface structs).
 #include "gui/GuiVulkan.h"
@@ -197,6 +198,7 @@ int runGui(const std::string& systemsPath)
     }
     glfwSetWindowUserPointer(window, &runtime);
     glfwSetFramebufferSizeCallback(window, &GuiRuntime::framebufferSizeCallback);
+    installCrashDiagnostics(); // never die silently: report + message box
 
     while (!glfwWindowShouldClose(window) && !app.shutdownRequested())
     {

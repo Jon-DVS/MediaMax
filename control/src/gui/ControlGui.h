@@ -52,6 +52,11 @@ private:
 
     void renderMenuBar();
     void renderDockspace();
+    // Walks the dock node tree before DockSpace() and records any drift
+    // (foreign/stale HostWindow, broken parent links, host draw list that
+    // lost its docking channels) to the console + crash log. See
+    // checkDockInvariants() in ControlGui.cpp.
+    void checkDockInvariants(std::uint32_t dockspaceId);
     void renderSystemsWindow();
     void renderPlaybackWindow();
     void renderTransportBlock(const SystemConnection::Snapshot& snap);

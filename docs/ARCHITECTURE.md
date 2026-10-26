@@ -258,6 +258,32 @@ resolves `--system <name|idx|host:port>`, then either sends one
 core only — it can even validate command syntax offline against
 `CommandServer`.
 
+`--gui` runs the operator interface (Dear ImGui docking on GLFW + a minimal
+raw-Vulkan surface): one dockspace with Systems (left), Show Editor (right),
+Playback (center) and Console (bottom). The initial layout is built once by
+`DockBuilder` on the first frame; `DockSpace()` is then called with the
+*dockspace root* ID every frame. (The builder's split calls replace the node
+they split, so the "remaining" node ID must be tracked in a separate
+variable — passing the root ID as a split out-parameter clobbers it, makes
+`DockSpace()` target a child node, and that node keeps the `DockSpace` flag
+plus a private, never-again-submitted host window; the pane renders into the
+dead window and the process crashes once ImGui's 60 s memory compaction
+frees that host's draw-list channels.)
+
+Crash diagnostics (`src/gui/GuiCrash.cpp`): the GUI thread installs an
+unhandled-exception filter that appends a crash report — registers plus a
+full Dear ImGui state dump (every window and dock node with flags, host
+links and draw-list splitter state) — to `mediamax_control_crash.log` next
+to the executable, then shows a message box, so a failure is never silent.
+Each frame, `ControlGuiApp::checkDockInvariants()` walks the dock node tree
+before `DockSpace()` and appends a line to the same log (and the in-UI
+console) whenever a node drifts (foreign/stale host window, broken parent
+link, host draw list missing its docking channels), so a docking crash is
+always preceded by a diagnostic. `--gui-self-test [frames]` renders the GUI
+headless (hidden window) for a fixed number of frames; with
+`--gui-self-test-system <host:port>` it additionally drives a running
+playback engine through the GUI's command path.
+
 ## Data flow, one frame
 
 ```

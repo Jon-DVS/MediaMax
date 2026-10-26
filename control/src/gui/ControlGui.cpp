@@ -14,6 +14,7 @@
 // std::string overloads for the text input widgets.
 #include <imgui_stdlib.h>
 
+#include "gui/GuiCrash.h"
 #include "mediamax/util/File.h"
 
 namespace mediamax::gui
@@ -233,6 +234,7 @@ void ControlGuiApp::renderMenuBar()
             m_OpenModal = true;
             m_OpenSelection = -1;
             refreshOpenFiles();
+            ImGui::OpenPopup("Open show...");
         }
         const bool canSave = !m_Editor.filePath().empty();
         if (ImGui::MenuItem("Save", nullptr, nullptr, canSave) && canSave)
@@ -247,6 +249,7 @@ void ControlGuiApp::renderMenuBar()
         {
             m_SaveAsModal = true;
             m_SaveAsPath = m_Editor.filePath();
+            ImGui::OpenPopup("Save show as...");
         }
         ImGui::Separator();
         if (ImGui::MenuItem("Exit"))
@@ -276,6 +279,7 @@ void ControlGuiApp::renderMenuBar()
         if (ImGui::MenuItem("About"))
         {
             m_AboutModal = true;
+            ImGui::OpenPopup("About MediaMax Control");
         }
         ImGui::EndMenu();
     }
@@ -307,29 +311,178 @@ void ControlGuiApp::renderDockspace()
         ImGui::DockBuilderSetNodePos(dockspaceId, viewport->WorkPos);
         ImGui::DockBuilderSetNodeSize(dockspaceId, viewport->WorkSize);
 
+        // Split the root into the final layout. Each split replaces the
+        // node it operates on, so the "remaining" (opposite) node ID must
+        // be threaded through a dedicated variable: passing &dockspaceId
+        // here clobbers the root ID, and the DockSpace() call below would
+        // then target the center node on the first frame. That node keeps
+        // the DockSpace flag and a private host window forever (child
+        // nodes normally inherit their host from their parent, but
+        // IsDockSpace() nodes use their own), so the Playback pane
+        // renders into a window that is never submitted again, and once
+        // ImGui's memory compaction (ConfigMemoryCompactTimer, 60 s)
+        // frees that host's draw-list channels the docking code crashes
+        // with a write-to-NULL in ImDrawListSplitter::SetCurrentChannel.
+        ImGuiID center = dockspaceId;
         ImGuiID left = 0;
-        ImGui::DockBuilderSplitNode(dockspaceId, ImGuiDir_Left, 0.16f, &left, &dockspaceId);
+        ImGui::DockBuilderSplitNode(dockspaceId, ImGuiDir_Left, 0.16f, &left, &center);
         ImGuiID right = 0;
-        ImGui::DockBuilderSplitNode(dockspaceId, ImGuiDir_Right, 0.28f, &right, &dockspaceId);
+        ImGui::DockBuilderSplitNode(center, ImGuiDir_Right, 0.28f, &right, &center);
         ImGuiID bottom = 0;
-        ImGui::DockBuilderSplitNode(dockspaceId, ImGuiDir_Down, 0.30f, &bottom, &dockspaceId);
+        ImGui::DockBuilderSplitNode(center, ImGuiDir_Down, 0.30f, &bottom, &center);
 
         ImGui::DockBuilderDockWindow("Systems", left);
         ImGui::DockBuilderDockWindow("Show Editor", right);
-        ImGui::DockBuilderDockWindow("Playback", dockspaceId);
+        ImGui::DockBuilderDockWindow("Playback", center);
         ImGui::DockBuilderDockWindow("Console", bottom);
+        // Finish with the root ID (the one given to DockBuilderAddNode);
+        // DockSpace() below must receive the same root every frame.
         ImGui::DockBuilderFinish(dockspaceId);
     }
+    checkDockInvariants(dockspaceId);
     ImGui::DockSpace(dockspaceId, ImVec2(0.0f, 0.0f), ImGuiDockNodeFlags_None);
     ImGui::End();
+}
+
+// Dear ImGui's docking keeps the node tree and the single DockSpace host
+// window in a strict relation: during DockNodeUpdate(), every node
+// reachable from the dockspace root takes its HostWindow from its parent
+// (child nodes set `node->HostWindow = node->ParentNode->HostWindow`), so
+// all nodes share the root's freshly Begin()-ed host, whose DrawList Begin()
+// split into the docking channels. If a node ever holds a foreign/stale
+// HostWindow (a window whose draw list was never split), the next
+// DockNodeUpdate crashes with a write-to-NULL in
+// ImDrawListSplitter::SetCurrentChannel. This check walks the tree before
+// DockSpace() each frame and records any drift, so such a crash is always
+// preceded by a diagnostic (console + crash log).
+void ControlGuiApp::checkDockInvariants(std::uint32_t dockspaceId)
+{
+    const ImGuiDockNode* root = ImGui::DockBuilderGetNode(dockspaceId);
+    if (root == nullptr)
+    {
+        return;
+    }
+
+    auto describeWindow = [](const ImGuiWindow* w) {
+        if (w == nullptr)
+        {
+            return std::string("null");
+        }
+        char buf[320];
+        std::snprintf(buf, sizeof(buf), "'%s' id=0x%08X flags=0x%08X active=%d",
+                      w->Name != nullptr ? w->Name : "(null)", w->ID,
+                      static_cast<unsigned int>(w->Flags), w->Active ? 1 : 0);
+        return std::string(buf);
+    };
+    auto nodeId = [](const ImGuiDockNode* n) -> std::string {
+        char buf[16];
+        std::snprintf(buf, sizeof(buf), "0x%08X", n != nullptr ? n->ID : 0);
+        return buf;
+    };
+
+    const ImGuiWindow* expectedHost = root->HostWindow;
+    std::vector<std::string> issues;
+
+    // Host sanity (frame 2+; on the first frame the host window is created
+    // by the DockSpace() call that follows this check).
+    if (!m_FirstFrame)
+    {
+        if (expectedHost == nullptr)
+        {
+            issues.push_back("dockspace root " + nodeId(root) + " has no host window before DockSpace()");
+        }
+        else if ((expectedHost->Flags & ImGuiWindowFlags_DockNodeHost) == 0)
+        {
+            issues.push_back("dockspace host window is not a DockNodeHost: " + describeWindow(expectedHost));
+        }
+        else if (expectedHost->DrawList != nullptr &&
+                 expectedHost->DrawList->_Splitter._Channels.Capacity == 0)
+        {
+            char buf[320];
+            std::snprintf(buf, sizeof(buf),
+                          "dockspace host '%s' draw list lost its docking channels before DockSpace() "
+                          "(splitter{current=%d count=%d})",
+                          expectedHost->Name != nullptr ? expectedHost->Name : "(null)",
+                          expectedHost->DrawList->_Splitter._Current,
+                          expectedHost->DrawList->_Splitter._Count);
+            issues.push_back(buf);
+        }
+    }
+
+    // Tree walk: every child must point back at the node that references it,
+    // and (once the first DockSpace ran) every node's HostWindow must be the
+    // root's host.
+    const int kMaxDepth = 16;
+    auto walk = [&](auto&& self, const ImGuiDockNode* parent, int depth) -> void {
+        if (depth >= kMaxDepth)
+        {
+            return;
+        }
+        for (int slot = 0; slot < 2; ++slot)
+        {
+            const ImGuiDockNode* child = parent->ChildNodes[slot];
+            if (child == nullptr)
+            {
+                continue;
+            }
+            if (child->ParentNode != parent)
+            {
+                issues.push_back("node " + nodeId(child) + " (slot " + std::to_string(slot) + " of " +
+                                 nodeId(parent) + ") has parent " + nodeId(child->ParentNode) +
+                                 ", not the node that references it");
+            }
+            if (!m_FirstFrame && child->HostWindow != nullptr && child->HostWindow != expectedHost)
+            {
+                issues.push_back("node " + nodeId(child) + " holds foreign host window " +
+                                 describeWindow(child->HostWindow) + " (expected " +
+                                 describeWindow(expectedHost) + ")");
+            }
+            if (child->HostWindow != nullptr &&
+                (child->HostWindow->Flags & ImGuiWindowFlags_DockNodeHost) == 0)
+            {
+                issues.push_back("node " + nodeId(child) + " host window lacks the DockNodeHost flag: " +
+                                 describeWindow(child->HostWindow));
+            }
+            self(self, child, depth + 1);
+        }
+    };
+    walk(walk, root, 0);
+
+    if (issues.empty())
+    {
+        return;
+    }
+    std::string text = "dock invariant: ";
+    for (size_t i = 0; i < issues.size(); ++i)
+    {
+        if (i > 0)
+        {
+            text += " | ";
+        }
+        text += issues[i];
+    }
+    // A persistent violation must not spam the 500-line console: log only
+    // when the reported state changes.
+    static std::string s_Last;
+    if (text == s_Last)
+    {
+        return;
+    }
+    s_Last = text;
+    log(text);
+    appendDiagnostic(text);
 }
 
 // --- systems window ---------------------------------------------------------------
 
 void ControlGuiApp::renderSystemsWindow()
 {
+    // Begin() may return false (collapsed/fully clipped window) but the
+    // window is already on the stack: a matching End() is still required
+    // (ImGui's Begin/End are asymmetric, unlike BeginPopup/EndPopup etc.).
     if (!ImGui::Begin("Systems"))
     {
+        ImGui::End();
         return;
     }
     ImGui::InputText("Config file", &m_SystemsPath);
@@ -451,8 +604,10 @@ void ControlGuiApp::renderSystemsWindow()
 
 void ControlGuiApp::renderPlaybackWindow()
 {
+    // Begin() may return false; End() must still be called (see above).
     if (!ImGui::Begin("Playback"))
     {
+        ImGui::End();
         return;
     }
     SystemConnection* active = activeConnection();
@@ -875,8 +1030,10 @@ void ControlGuiApp::renderMediaBlock(const SystemConnection::Snapshot& snap)
 
 void ControlGuiApp::renderShowEditorWindow()
 {
+    // Begin() may return false; End() must still be called (see above).
     if (!ImGui::Begin("Show Editor"))
     {
+        ImGui::End();
         return;
     }
     if (ImGui::Button("New"))
@@ -890,6 +1047,7 @@ void ControlGuiApp::renderShowEditorWindow()
         m_OpenModal = true;
         m_OpenSelection = -1;
         refreshOpenFiles();
+        ImGui::OpenPopup("Open show...");
     }
     ImGui::SameLine();
     const bool canSave = !m_Editor.filePath().empty();
@@ -908,6 +1066,7 @@ void ControlGuiApp::renderShowEditorWindow()
     {
         m_SaveAsModal = true;
         m_SaveAsPath = m_Editor.filePath();
+        ImGui::OpenPopup("Save show as...");
     }
     ImGui::SameLine();
     SystemConnection* active = activeConnection();
@@ -921,6 +1080,7 @@ void ControlGuiApp::renderShowEditorWindow()
     {
         m_PullModal = true;
         m_PullPath = m_Editor.filePath();
+        ImGui::OpenPopup("Pull show from system");
     }
     ImGui::EndDisabled();
 
@@ -1635,8 +1795,10 @@ void ControlGuiApp::renderCueAction(Cue& cue)
 
 void ControlGuiApp::renderConsoleWindow()
 {
+    // Begin() may return false; End() must still be called (see above).
     if (!ImGui::Begin("Console"))
     {
+        ImGui::End();
         return;
     }
     if (SystemConnection* active = activeConnection(); active)
@@ -1749,8 +1911,8 @@ void ControlGuiApp::renderModals()
                     m_EditorError = error;
                 }
             }
+            ImGui::EndPopup();
         }
-        ImGui::EndPopup();
     }
     if (m_SaveAsModal)
     {
@@ -1770,8 +1932,8 @@ void ControlGuiApp::renderModals()
                     m_EditorError = error;
                 }
             }
+            ImGui::EndPopup();
         }
-        ImGui::EndPopup();
     }
     if (m_PullModal)
     {
@@ -1795,8 +1957,8 @@ void ControlGuiApp::renderModals()
                     m_EditorError = error;
                 }
             }
+            ImGui::EndPopup();
         }
-        ImGui::EndPopup();
     }
     if (m_AboutModal)
     {
@@ -1812,8 +1974,8 @@ void ControlGuiApp::renderModals()
             {
                 m_AboutModal = false;
             }
+            ImGui::EndPopup();
         }
-        ImGui::EndPopup();
     }
 }
 

@@ -8,6 +8,7 @@
 add_executable(mediamax_control
     src/main.cpp
     src/gui/ControlGui.cpp
+    src/gui/GuiCrash.cpp
     src/gui/GuiMain.cpp
     src/gui/GuiVulkan.cpp
     src/gui/ShowEditor.cpp
@@ -26,7 +27,9 @@ target_include_directories(mediamax_control
         ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 if(WIN32)
-    # Same loader deployment as the playback app (no-op on newer SDKs).
+    # MessageBoxW (crash diagnostics) and the same loader deployment as the
+    # playback app (no-op on newer SDKs).
+    target_link_libraries(mediamax_control PRIVATE user32)
     mediamax_deploy_vulkan_loader(mediamax_control)
 endif()
 
