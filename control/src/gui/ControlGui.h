@@ -41,6 +41,19 @@ public:
     // and fills `report` with one PASS/FAIL line per step.
     bool selfTestSystem(const std::string& host, std::uint16_t port, std::string& report);
 
+    // --- test hooks (driven by --gui-self-test; no effect in normal use) ----
+    // Queues the given modal ("open", "saveas", "pull" or "about") to be
+    // opened by the next frame(): the same state the UI buttons set plus
+    // OpenPopup(). Deferred because OpenPopup() must run inside a frame (it
+    // dereferences the current ImGui window, which is NULL between frames).
+    // Returns false for an unknown name.
+    bool testOpenModal(const std::string& which);
+    // True while the given modal sits open in Dear ImGui's popup stack.
+    bool testModalOpen(const std::string& which) const;
+    // Closes the given modal: clears its app-side flag, which makes
+    // BeginPopupModal() tear the popup down on the next frame.
+    bool testCloseModal(const std::string& which);
+
 private:
     // --- systems -----------------------------------------------------------
 
@@ -80,6 +93,9 @@ private:
     void renderConsoleWindow();
     void renderModals();
     void refreshOpenFiles();
+    // Performs a modal open (same state the buttons set + OpenPopup). Must
+    // run inside frame() while the modal host window is current.
+    void openModal(const std::string& which);
 
     // --- helpers -------------------------------------------------------------
 
@@ -118,6 +134,8 @@ private:
     bool m_PullModal = false;
     std::string m_PullPath;
     bool m_AboutModal = false;
+    // Test hook: modal queued by testOpenModal(), opened by the next frame().
+    std::string m_PendingTestOpenModal;
 
     // Console.
     std::string m_ConsoleInput;

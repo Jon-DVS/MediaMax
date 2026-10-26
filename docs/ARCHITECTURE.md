@@ -281,6 +281,21 @@ Dear ImGui pipeline compiled against it stays valid across recreates. On
 Windows the window frame opts into dark mode (`DwmSetWindowAttribute`) so a
 light Windows theme does not put a white title bar over the dark UI.
 
+Modal dialogs (Open/Save As/Pull/About) are Begun inside a small invisible
+`##modalhost` window that `ControlGuiApp::frame()` keeps open for the whole
+frame, and every `OpenPopup()` call passes the explicit id
+`ImHashStr(name, 0, ImHashStr("##modalhost"))`. This is required, not a
+style choice: in this Dear ImGui release popup ids are computed as
+`currentWindow->GetID(name)` — i.e. seeded by the *current* window's ID
+stack — so the same modal name opened from the menu bar and Begun outside
+any window yields different ids (the modal silently never opens and its
+`bool*` is reset), and `BeginPopupModal()` with no current window is a null
+dereference. A top-level window's id is a plain name hash, so the host's
+popup id is computable from anywhere; the host must have no `PushID`s.
+`OpenPopup()` itself also dereferences the current window, so it may only
+run inside a frame (the self-test's modal opens are therefore deferred to
+`frame()` via a pending flag).
+
 Crash diagnostics (`src/gui/GuiCrash.cpp`): the GUI thread installs an
 unhandled-exception filter that appends a crash report — registers plus a
 full Dear ImGui state dump (every window and dock node with flags, host
@@ -291,8 +306,9 @@ before `DockSpace()` and appends a line to the same log (and the in-UI
 console) whenever a node drifts (foreign/stale host window, broken parent
 link, host draw list missing its docking channels), so a docking crash is
 always preceded by a diagnostic. `--gui-self-test [frames]` renders the GUI
-headless (hidden window) for a fixed number of frames; with
-`--gui-self-test-system <host:port>` it additionally drives a running
+headless (hidden window) for a fixed number of frames, then opens and
+closes every modal dialog (failing if one does not open or does not close);
+with `--gui-self-test-system <host:port>` it additionally drives a running
 playback engine through the GUI's command path.
 
 ## Data flow, one frame

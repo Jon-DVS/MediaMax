@@ -319,18 +319,67 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
         }
     }
 
+    // 3) Modal dialogs: open each dialog the UI buttons open and verify
+    //    Dear ImGui actually shows it, then verify it closes again. This is
+    //    the regression guard for "clicking Open / Save As / About does
+    //    nothing": the modal BeginPopupModal() calls must run in a window
+    //    context whose popup ids match the OpenPopup() ids (see
+    //    kModalHostName in ControlGui.cpp).
+    std::string modalReport;
+    bool modalOk = true;
+    for (const char* which : {"about", "open", "saveas", "pull"})
+    {
+        if (!app.testOpenModal(which))
+        {
+            modalOk = false;
+            modalReport += "FAIL modal " + std::string(which) + " - unknown modal name\n";
+            continue;
+        }
+        bool shown = false;
+        for (int i = 0; i < 3 && !shown; ++i)
+        {
+            glfwPollEvents();
+            if (runtime.renderFrame())
+            {
+                shown = app.testModalOpen(which);
+            }
+        }
+        app.testCloseModal(which);
+        bool stillOpen = true;
+        for (int i = 0; i < 3 && stillOpen; ++i)
+        {
+            glfwPollEvents();
+            runtime.renderFrame();
+            stillOpen = app.testModalOpen(which);
+        }
+        const bool ok = shown && !stillOpen;
+        modalOk = modalOk && ok;
+        modalReport += (ok ? "PASS modal " : "FAIL modal ") + std::string(which);
+        if (!shown)
+        {
+            modalReport += " - did not open";
+        }
+        else if (stillOpen)
+        {
+            modalReport += " - did not close";
+        }
+        modalReport += "\n";
+    }
+
     runtime.shutdown();
     glfwDestroyWindow(window);
     glfwTerminate();
 
     std::cout << "gui-self-test: rendered " << rendered << "/" << frames << " frames" << std::endl;
+    std::cout << modalReport;
+    std::cout << (modalOk ? "gui-self-test: modals OK" : "gui-self-test: modals FAILED") << std::endl;
     if (!liveSystem.empty())
     {
         std::cout << liveReport;
         std::cout << (liveOk ? "gui-self-test: live system OK" : "gui-self-test: live system FAILED")
                   << std::endl;
     }
-    return (liveOk && rendered > 0) ? 0 : 1;
+    return (liveOk && modalOk && rendered > 0) ? 0 : 1;
 }
 
 } // namespace mediamax::gui

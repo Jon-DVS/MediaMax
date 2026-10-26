@@ -38,6 +38,49 @@ const ImVec4 kOkColor = {0.35f, 0.9f, 0.4f, 1.0f};
 const ImVec4 kBadColor = {0.9f, 0.35f, 0.35f, 1.0f};
 const ImVec4 kWarnColor = {1.0f, 0.8f, 0.3f, 1.0f};
 
+// The modal dialogs are opened from several places (the menu bar, the show
+// editor) but must be Begun in one fixed context. In this Dear ImGui release
+// OpenPopup()/BeginPopupModal() hash the popup name against the *current*
+// window's ID stack - so the same name opened from two different windows
+// yields two different popup ids, and BeginPopupModal() outside of any
+// window (g.CurrentWindow == NULL) is a null dereference that never matches
+// the id OpenPopup() pushed. The modals are therefore Begun inside a small
+// invisible "##modalhost" window that is open for the whole frame, and
+// OpenPopup() is called with the explicit id that BeginPopupModal() computes
+// there. A top-level window's id is a plain name hash (context-free), and
+// the host keeps no PushIDs, so the id is computable from anywhere:
+//   host id = ImHashStr("##modalhost")          (window->ID)
+//   popup id = ImHashStr(name, 0, host id)      (window->GetID(name))
+constexpr const char* kModalHostName = "##modalhost";
+
+ImGuiID modalPopupId(const char* name)
+{
+    return ImHashStr(name, 0, ImHashStr(kModalHostName));
+}
+
+// Maps a test-hook name to the popup's display name (the string used in the
+// BeginPopupModal() calls); null for unknown names.
+const char* modalPopupName(const std::string& which)
+{
+    if (which == "open")
+    {
+        return "Open show...";
+    }
+    if (which == "saveas")
+    {
+        return "Save show as...";
+    }
+    if (which == "pull")
+    {
+        return "Pull show from system";
+    }
+    if (which == "about")
+    {
+        return "About MediaMax Control";
+    }
+    return nullptr;
+}
+
 std::string truncate(const std::string& s, size_t limit)
 {
     return s.size() <= limit ? s : s.substr(0, limit) + " ...";
@@ -65,6 +108,28 @@ void ControlGuiApp::frame()
         m_HaveNameEdit = false;
         m_SeekHeld = false;
     }
+    // Invisible host for the modal dialogs (see kModalHostName). It is Begun
+    // before the menu bar so the popup ids exist by the time a menu item can
+    // fire, and Ended after renderModals() (which Begins the modals inside it).
+    // A Begin/End pair around the whole frame is required: BeginPopupModal()
+    // computes its id from the current window and would otherwise run with
+    // g.CurrentWindow == NULL.
+    ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(1.0f, 1.0f), ImGuiCond_Always);
+    ImGui::Begin(kModalHostName, nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoBackground |
+                     ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoSavedSettings |
+                     ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoBringToFrontOnFocus |
+                     ImGuiWindowFlags_NoNavFocus);
+    // Test-hook modal opens are deferred here: OpenPopup() must run inside a
+    // frame with a current window (it dereferences g.CurrentWindow, which is
+    // NULL between frames).
+    if (!m_PendingTestOpenModal.empty())
+    {
+        const std::string which = m_PendingTestOpenModal;
+        m_PendingTestOpenModal.clear();
+        openModal(which);
+    }
     renderMenuBar();
     renderDockspace();
     renderSystemsWindow();
@@ -72,6 +137,7 @@ void ControlGuiApp::frame()
     renderShowEditorWindow();
     renderConsoleWindow();
     renderModals();
+    ImGui::End();
     if (m_FirstFrame)
     {
         m_FirstFrame = false;
@@ -235,7 +301,7 @@ void ControlGuiApp::renderMenuBar()
             m_OpenModal = true;
             m_OpenSelection = -1;
             refreshOpenFiles();
-            ImGui::OpenPopup("Open show...");
+            ImGui::OpenPopup(modalPopupId("Open show..."));
         }
         const bool canSave = !m_Editor.filePath().empty();
         if (ImGui::MenuItem("Save", nullptr, nullptr, canSave) && canSave)
@@ -250,7 +316,7 @@ void ControlGuiApp::renderMenuBar()
         {
             m_SaveAsModal = true;
             m_SaveAsPath = m_Editor.filePath();
-            ImGui::OpenPopup("Save show as...");
+            ImGui::OpenPopup(modalPopupId("Save show as..."));
         }
         ImGui::Separator();
         if (ImGui::MenuItem("Exit"))
@@ -280,7 +346,7 @@ void ControlGuiApp::renderMenuBar()
         if (ImGui::MenuItem("About"))
         {
             m_AboutModal = true;
-            ImGui::OpenPopup("About MediaMax Control");
+            ImGui::OpenPopup(modalPopupId("About MediaMax Control"));
         }
         ImGui::EndMenu();
     }
@@ -1110,7 +1176,7 @@ void ControlGuiApp::renderShowEditorWindow()
         m_OpenModal = true;
         m_OpenSelection = -1;
         refreshOpenFiles();
-        ImGui::OpenPopup("Open show...");
+        ImGui::OpenPopup(modalPopupId("Open show..."));
     }
     ImGui::SameLine();
     const bool canSave = !m_Editor.filePath().empty();
@@ -1129,7 +1195,7 @@ void ControlGuiApp::renderShowEditorWindow()
     {
         m_SaveAsModal = true;
         m_SaveAsPath = m_Editor.filePath();
-        ImGui::OpenPopup("Save show as...");
+        ImGui::OpenPopup(modalPopupId("Save show as..."));
     }
     ImGui::SameLine();
     SystemConnection* active = activeConnection();
@@ -1143,7 +1209,7 @@ void ControlGuiApp::renderShowEditorWindow()
     {
         m_PullModal = true;
         m_PullPath = m_Editor.filePath();
-        ImGui::OpenPopup("Pull show from system");
+        ImGui::OpenPopup(modalPopupId("Pull show from system"));
     }
     ImGui::EndDisabled();
 
@@ -2040,6 +2106,99 @@ void ControlGuiApp::renderModals()
             ImGui::EndPopup();
         }
     }
+}
+
+// --- test hooks -----------------------------------------------------------------
+
+bool ControlGuiApp::testOpenModal(const std::string& which)
+{
+    if (modalPopupName(which) == nullptr)
+    {
+        return false;
+    }
+    // Deferred to the next frame(): OpenPopup() dereferences the current
+    // ImGui window, which is NULL between frames.
+    m_PendingTestOpenModal = which;
+    return true;
+}
+
+void ControlGuiApp::openModal(const std::string& which)
+{
+    // The same state the UI buttons/menus set before calling OpenPopup().
+    // Must run inside frame() (the modal host window is current).
+    const char* name = modalPopupName(which);
+    if (name == nullptr)
+    {
+        return;
+    }
+    if (which == "open")
+    {
+        m_OpenModal = true;
+        m_OpenSelection = -1;
+        refreshOpenFiles();
+    }
+    else if (which == "saveas")
+    {
+        m_SaveAsModal = true;
+        m_SaveAsPath = m_Editor.filePath();
+    }
+    else if (which == "pull")
+    {
+        m_PullModal = true;
+    }
+    else
+    {
+        m_AboutModal = true;
+    }
+    ImGui::OpenPopup(modalPopupId(name));
+}
+
+bool ControlGuiApp::testModalOpen(const std::string& which) const
+{
+    const char* name = modalPopupName(which);
+    if (name == nullptr)
+    {
+        return false;
+    }
+    // IsPopupOpen() has no context-free (id) overload in this release, so
+    // check the popup stack directly for the id BeginPopupModal() will use.
+    const ImGuiID id = modalPopupId(name);
+    const ImGuiContext& g = *ImGui::GetCurrentContext();
+    for (const ImGuiPopupData& popup : g.OpenPopupStack)
+    {
+        if (popup.PopupId == id)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool ControlGuiApp::testCloseModal(const std::string& which)
+{
+    // Clearing the app-side flag is the documented close path: BeginPopupModal
+    // sees *p_open == false and calls ClosePopupToLevel() itself.
+    if (which == "open")
+    {
+        m_OpenModal = false;
+        return true;
+    }
+    if (which == "saveas")
+    {
+        m_SaveAsModal = false;
+        return true;
+    }
+    if (which == "pull")
+    {
+        m_PullModal = false;
+        return true;
+    }
+    if (which == "about")
+    {
+        m_AboutModal = false;
+        return true;
+    }
+    return false;
 }
 
 // --- self test ---------------------------------------------------------------------------
