@@ -76,8 +76,14 @@ webp/gif — still images, or GIF as animation), audio.
   `zIndex`** (higher `zIndex` drawn on top; equal indices keep file order —
   stable sort).
 
-Exactly one scene is active at a time; cues (and the operator) switch
-between them.
+Usually one scene is active at a time; cues (and the operator) switch
+between them. Several scenes may also be active at once (the operator's
+`scene.toggle` from the control interface, see
+[PROTOCOL.md](PROTOCOL.md)): all active scenes are composited together,
+**in the order they appear in the `scenes` list** (first active scene
+bottom-most, then each scene's layers by `zIndex`). Reordering the list
+therefore reorders the compositing. Cues reference scenes by `id`, so
+reordering does not affect the timeline.
 
 ### Layer
 

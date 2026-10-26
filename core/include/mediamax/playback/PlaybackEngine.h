@@ -61,11 +61,16 @@ struct LayerFrame
 };
 
 // The complete, resolved state to render for one frame.
-// Layers are sorted for drawing (zIndex ascending, stable).
+// Layers are sorted for drawing: active scenes in show-list order, and
+// zIndex ascending within each scene (stable).
 struct FrameState
 {
     Time showTime;
+    // The primary (bottom-most in compositing order) active scene.
     Id activeSceneId = kInvalidId;
+    // All active scenes, in show-list order (= compositing order, bottom to
+    // top). activeSceneId is the first one, kept for compatibility.
+    std::vector<Id> activeSceneIds;
     bool playing = false;
     std::vector<LayerFrame> layers;
 };
@@ -125,12 +130,18 @@ public:
     // The resolved state at an arbitrary show time (pure function).
     FrameState frameStateAt(const Time& t) const;
 
-    // The scene id active at show time t (cue-driven; preview scene when no
-    // PlayScene cue has fired yet). A scene set with setSceneNow() takes
-    // precedence for the live time.
+    // All scenes active at show time t, in show-list order (= compositing
+    // order: the first is bottom-most). While a manual scene set is live
+    // (setSceneNow/toggleSceneNow) that set is returned; otherwise the single
+    // timeline scene (the last PlayScene cue at or before t; the preview
+    // scene when none has fired).
+    std::vector<Id> activeScenesAt(const Time& t) const;
+
+    // The primary active scene at t: the first of activeScenesAt(t)
+    // (kInvalidId when none). Kept for compatibility; prefer activeScenesAt.
     Id activeSceneAt(const Time& t) const;
 
-    // The show time at which the scene active at t became active.
+    // The show time at which the primary active scene became active at t.
     Time sceneStartAt(const Time& t) const;
 
     // --- Manual overrides (via control interface) ---------------------------
@@ -139,12 +150,19 @@ public:
     void setPreviewScene(int sceneIndex);
     int previewScene() const { return m_PreviewScene; }
 
-    // Switches the active scene immediately (live operation from the control
-    // interface). The media in the new scene start from the current show
-    // time. clearSceneNow() returns to cue-driven scene selection.
+    // Live scene control from the control interface. setSceneNow() activates
+    // exactly the given scene (solo); toggleSceneNow() adds/removes the
+    // scene from the manual set - taken from a timeline-driven state it
+    // first takes the timeline scene with it, so a toggle adds to (or, for
+    // the timeline scene itself, removes) what the timeline shows. The media
+    // in a manually activated scene start from its activation time.
+    // clearSceneNow() returns to cue-driven scene selection (a PlayScene cue
+    // crossed while playing does the same) and returns how many manual
+    // scenes were released.
     bool setSceneNow(Id sceneId);
-    void clearSceneNow();
-    bool hasSceneOverride() const { return m_ForceScene.has_value(); }
+    bool toggleSceneNow(Id sceneId);
+    int clearSceneNow();
+    bool hasSceneOverride() const { return !m_ForceScenes.empty(); }
 
     bool setLayerOpacity(Id layerId, float value);
     bool setLayerVisible(Id layerId, bool value);
@@ -165,7 +183,14 @@ public:
     static std::string stateToString(PlayState s);
 
 private:
-    const Scene* activeScene(const Time& t, Time& sceneStart) const;
+    // The single scene the timeline selects at t: the last PlayScene cue at
+    // or before t, or the preview scene (kInvalidId when the show has no
+    // scenes at all).
+    Id timelineSceneAt(const Time& t) const;
+    // The show time at which scene `sceneId` became active at t: the manual
+    // activation time when the scene is in the live manual set, otherwise
+    // the last PlayScene cue targeting it (zero when none).
+    Time sceneStartFor(const Time& t, Id sceneId) const;
     void resolveLayer(const Layer& layer, const Time& showTime, const Time& sceneStart,
                       LayerFrame& out) const;
     // Applies the layer-targeting cues (opacity/visibility/blend/position)
@@ -179,8 +204,11 @@ private:
     PlayState m_State = PlayState::Stopped;
     Time m_Time;
     int m_PreviewScene = 0;
-    std::optional<Id> m_ForceScene;
-    Time m_ForceSceneTime;
+    // Manually active scenes (scene.set/scene.toggle) mapped to the show time
+    // at which each was activated (its media start from there). While
+    // non-empty this set is the active set; scene.clear or a crossed
+    // PlayScene cue empties it.
+    std::map<Id, Time> m_ForceScenes;
 
     struct LayerOverride
     {

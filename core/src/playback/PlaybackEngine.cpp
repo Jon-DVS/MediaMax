@@ -36,7 +36,7 @@ void PlaybackEngine::loadShow(Show show, bool preserveState)
         m_State = PlayState::Stopped;
         m_Time = Time::zero();
         m_PreviewScene = 0;
-        m_ForceScene.reset();
+        m_ForceScenes.clear();
         m_Overrides.clear();
         return;
     }
@@ -45,7 +45,6 @@ void PlaybackEngine::loadShow(Show show, bool preserveState)
     // still makes sense.
     const PlayState state = m_State;
     const Time time = m_Time;
-    const std::optional<Id> forceScene = m_ForceScene;
     m_Show = std::move(show);
     m_State = state;
     m_Time = time;
@@ -57,13 +56,9 @@ void PlaybackEngine::loadShow(Show show, bool preserveState)
     {
         m_PreviewScene = 0;
     }
-    if (forceScene.has_value() && m_Show.findScene(*forceScene) == nullptr)
+    for (auto it = m_ForceScenes.begin(); it != m_ForceScenes.end();)
     {
-        m_ForceScene.reset();
-    }
-    else
-    {
-        m_ForceScene = forceScene;
+        it = m_Show.findScene(it->first) ? std::next(it) : m_ForceScenes.erase(it);
     }
     for (auto it = m_Overrides.begin(); it != m_Overrides.end();)
     {
@@ -124,7 +119,7 @@ void PlaybackEngine::tick(const Time& dt)
     // is sorted by time, so a single scan suffices. Layer cues are not fired
     // here: they are re-derived from time in frameStateAt(), so they work
     // identically when seeking. PlayScene cues are fired only to release the
-    // operator's scene override: the timeline takes back scene control at
+    // operator's manual scene set: the timeline takes back scene control at
     // the next PlayScene cue it crosses.
     for (const auto& cue : m_Show.cues)
     {
@@ -150,7 +145,7 @@ void PlaybackEngine::tick(const Time& dt)
         }
         if (std::holds_alternative<PlayScene>(cue.action))
         {
-            m_ForceScene.reset();
+            m_ForceScenes.clear();
         }
         if (const auto* seek = std::get_if<SeekTo>(&cue.action))
         {
@@ -171,14 +166,8 @@ FrameState PlaybackEngine::frameState() const
     return frameStateAt(m_Time);
 }
 
-Id PlaybackEngine::activeSceneAt(const Time& t) const
+Id PlaybackEngine::timelineSceneAt(const Time& t) const
 {
-    // Live scene override (setSceneNow) wins for the current time.
-    if (m_ForceScene.has_value() && t == m_Time)
-    {
-        return *m_ForceScene;
-    }
-
     // The most recent PlayScene cue at or before t wins; otherwise the
     // preview scene.
     Id sceneId = kInvalidId;
@@ -206,13 +195,48 @@ Id PlaybackEngine::activeSceneAt(const Time& t) const
     return sceneId;
 }
 
-Time PlaybackEngine::sceneStartAt(const Time& t) const
+std::vector<Id> PlaybackEngine::activeScenesAt(const Time& t) const
 {
-    const Id sceneId = activeSceneAt(t);
-    if (m_ForceScene.has_value() && t == m_Time && *m_ForceScene == sceneId)
+    std::vector<Id> result;
+    // The live manual set (setSceneNow/toggleSceneNow) wins for the current
+    // time; reported in show-list order, which is the compositing order.
+    if (t == m_Time && !m_ForceScenes.empty())
     {
-        return m_ForceSceneTime;
+        for (const auto& scene : m_Show.scenes)
+        {
+            if (m_ForceScenes.count(scene.id) > 0)
+            {
+                result.push_back(scene.id);
+            }
+        }
+        return result;
     }
+    const Id sceneId = timelineSceneAt(t);
+    if (sceneId != kInvalidId)
+    {
+        result.push_back(sceneId);
+    }
+    return result;
+}
+
+Id PlaybackEngine::activeSceneAt(const Time& t) const
+{
+    const std::vector<Id> active = activeScenesAt(t);
+    return active.empty() ? kInvalidId : active.front();
+}
+
+Time PlaybackEngine::sceneStartFor(const Time& t, Id sceneId) const
+{
+    // A manually activated scene starts (its media) from its activation
+    // time.
+    if (t == m_Time)
+    {
+        if (const auto it = m_ForceScenes.find(sceneId); it != m_ForceScenes.end())
+        {
+            return it->second;
+        }
+    }
+    // Otherwise: the most recent PlayScene cue targeting the scene.
     Time start = Time::zero();
     for (const auto& cue : m_Show.cues)
     {
@@ -224,18 +248,16 @@ Time PlaybackEngine::sceneStartAt(const Time& t) const
         {
             if (playScene->scene == sceneId)
             {
-                start = cue.time; // most recent matching cue
+                start = cue.time;
             }
         }
     }
     return start;
 }
 
-const Scene* PlaybackEngine::activeScene(const Time& t, Time& sceneStart) const
+Time PlaybackEngine::sceneStartAt(const Time& t) const
 {
-    const Id sceneId = activeSceneAt(t);
-    sceneStart = sceneStartAt(t);
-    return m_Show.findScene(sceneId);
+    return sceneStartFor(t, activeSceneAt(t));
 }
 
 FrameState PlaybackEngine::frameStateAt(const Time& t) const
@@ -244,31 +266,40 @@ FrameState PlaybackEngine::frameStateAt(const Time& t) const
     state.showTime = t;
     state.playing = m_State == PlayState::Playing;
 
-    Time sceneStart;
-    const Scene* scene = activeScene(t, sceneStart);
-    if (!scene)
+    // Every active scene is composited, in show-list order (bottom to top);
+    // within a scene, layers draw by zIndex ascending, stable. The first
+    // scene is the primary one (activeSceneId).
+    for (const Id sceneId : activeScenesAt(t))
     {
-        return state;
-    }
-    state.activeSceneId = scene->id;
-
-    // Draw order: zIndex ascending, stable for equal z.
-    std::vector<const Layer*> ordered;
-    ordered.reserve(scene->layers.size());
-    for (const auto& layer : scene->layers)
-    {
-        ordered.push_back(&layer);
-    }
-    std::stable_sort(ordered.begin(), ordered.end(),
-                     [](const Layer* a, const Layer* b) { return a->zIndex < b->zIndex; });
-
-    for (const Layer* layer : ordered)
-    {
-        LayerFrame lf;
-        resolveLayer(*layer, t, sceneStart, lf);
-        if (lf.visible && lf.opacity > 0.0f)
+        const Scene* scene = m_Show.findScene(sceneId);
+        if (!scene)
         {
-            state.layers.push_back(std::move(lf));
+            continue;
+        }
+        state.activeSceneIds.push_back(scene->id);
+        if (state.activeSceneId == kInvalidId)
+        {
+            state.activeSceneId = scene->id;
+        }
+        const Time sceneStart = sceneStartFor(t, scene->id);
+
+        std::vector<const Layer*> ordered;
+        ordered.reserve(scene->layers.size());
+        for (const auto& layer : scene->layers)
+        {
+            ordered.push_back(&layer);
+        }
+        std::stable_sort(ordered.begin(), ordered.end(),
+                         [](const Layer* a, const Layer* b) { return a->zIndex < b->zIndex; });
+
+        for (const Layer* layer : ordered)
+        {
+            LayerFrame lf;
+            resolveLayer(*layer, t, sceneStart, lf);
+            if (lf.visible && lf.opacity > 0.0f)
+            {
+                state.layers.push_back(std::move(lf));
+            }
         }
     }
     return state;
@@ -445,14 +476,44 @@ bool PlaybackEngine::setSceneNow(Id sceneId)
     {
         return false;
     }
-    m_ForceScene = sceneId;
-    m_ForceSceneTime = m_Time;
+    m_ForceScenes.clear();
+    m_ForceScenes[sceneId] = m_Time;
     return true;
 }
 
-void PlaybackEngine::clearSceneNow()
+bool PlaybackEngine::toggleSceneNow(Id sceneId)
 {
-    m_ForceScene.reset();
+    if (!m_Show.findScene(sceneId))
+    {
+        return false;
+    }
+    if (m_ForceScenes.empty())
+    {
+        // Taking manual control from a timeline state: keep the timeline
+        // scene active (starting where the timeline started it), so the
+        // toggle adds to what the timeline shows.
+        const Id timelineId = timelineSceneAt(m_Time);
+        if (timelineId != kInvalidId && timelineId != sceneId)
+        {
+            m_ForceScenes[timelineId] = sceneStartFor(m_Time, timelineId);
+        }
+    }
+    if (const auto it = m_ForceScenes.find(sceneId); it != m_ForceScenes.end())
+    {
+        m_ForceScenes.erase(it);
+    }
+    else
+    {
+        m_ForceScenes[sceneId] = m_Time;
+    }
+    return true;
+}
+
+int PlaybackEngine::clearSceneNow()
+{
+    const int count = static_cast<int>(m_ForceScenes.size());
+    m_ForceScenes.clear();
+    return count;
 }
 
 bool PlaybackEngine::setLayerOpacity(Id layerId, float value)

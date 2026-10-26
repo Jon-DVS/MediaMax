@@ -78,6 +78,7 @@ private:
     nlohmann::json handlePlaybackStop() const;
     nlohmann::json handlePlaybackSeek(const nlohmann::json& params) const;
     nlohmann::json handleSceneSet(const nlohmann::json& params) const;
+    nlohmann::json handleSceneToggle(const nlohmann::json& params) const;
     nlohmann::json handleSceneList() const;
     nlohmann::json handleSceneClear() const;
     nlohmann::json handleLayerSet(const nlohmann::json& params) const;

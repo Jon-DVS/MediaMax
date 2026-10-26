@@ -1,6 +1,6 @@
 // The command server: the full control surface mapped onto a real engine,
 // media library and display set. This is the integration test for the
-// protocol layer - it exercises every one of the 24 commands.
+// protocol layer - it exercises every one of the 25 commands.
 
 #include <algorithm>
 #include <atomic>
@@ -220,6 +220,64 @@ TEST_CASE("scene.list marks the active scene")
     const auto& scenes2 = resp2.result.at("scenes");
     CHECK_FALSE(scenes2[0].at("active").get<bool>());
     CHECK(scenes2[1].at("active").get<bool>());
+}
+
+TEST_CASE("scene.toggle composites multiple scenes in list order")
+{
+    Fixture f;
+
+    // Toggling scene 2 (index 1) on from the timeline (scene 1 at t=0)
+    // keeps the timeline scene active as well: both scenes are active, in
+    // show-list order.
+    const Response on = f.run("scene.toggle", {{"index", 1}});
+    REQUIRE(on.ok);
+    CHECK(on.result.at("scene").get<std::uint64_t>() == 2);
+    CHECK(on.result.at("active").get<bool>());
+    CHECK(on.result.at("activeScenes").get<std::vector<std::uint64_t>>() ==
+          std::vector<std::uint64_t>{1, 2});
+
+    // Both scenes' layers are composited in list order (scene 1: 11, 10;
+    // scene 2: 20).
+    std::vector<Id> order;
+    for (const auto& l : f.engine.frameState().layers)
+    {
+        order.push_back(l.layerId);
+    }
+    CHECK(order == std::vector<Id>{11, 10, 20});
+
+    // scene.list marks every active scene; status reports the active set
+    // (the primary scene stays the single "scene" field).
+    const Response list = f.run("scene.list");
+    REQUIRE(list.ok);
+    CHECK(list.result.at("scenes")[0].at("active").get<bool>());
+    CHECK(list.result.at("scenes")[1].at("active").get<bool>());
+    const nlohmann::json status = f.run("status").result;
+    CHECK(status.at("scene").get<std::uint64_t>() == 1);
+    CHECK(status.at("activeScenes").get<std::vector<std::uint64_t>>() ==
+          std::vector<std::uint64_t>{1, 2});
+
+    // Toggling scene 1 off leaves scene 2 (manual) active.
+    const Response off = f.run("scene.toggle", {{"index", 0}});
+    REQUIRE(off.ok);
+    CHECK_FALSE(off.result.at("active").get<bool>());
+    CHECK(off.result.at("activeScenes").get<std::vector<std::uint64_t>>() ==
+          std::vector<std::uint64_t>{2});
+
+    // Toggling the last manual scene off returns to the timeline.
+    const Response off2 = f.run("scene.toggle", {{"index", 1}});
+    REQUIRE(off2.ok);
+    CHECK(off2.result.at("activeScenes").get<std::vector<std::uint64_t>>() ==
+          std::vector<std::uint64_t>{1});
+    CHECK_FALSE(f.engine.hasSceneOverride());
+
+    // scene.set is still a solo: exactly the given scene, nothing else.
+    REQUIRE(f.run("scene.set", {{"index", 1}}).ok);
+    CHECK(f.run("status").result.at("activeScenes").get<std::vector<std::uint64_t>>() ==
+          std::vector<std::uint64_t>{2});
+
+    // Out of range.
+    CHECK_FALSE(f.run("scene.toggle", {{"index", 5}}).ok);
+    CHECK(f.run("scene.toggle", {{"index", 5}}).error.find("out of range") != std::string::npos);
 }
 
 TEST_CASE("layer.set applies manual overrides")

@@ -1043,9 +1043,11 @@ void ControlGuiApp::renderScenesBlock(const SystemConnection::Snapshot& snap)
     const json& scenes = snap.scenes["scenes"];
 
     // One row per scene: a full-width button labelled "<id> - <name>" and a
-    // status column. The active scene is highlighted on its button AND
-    // flagged in the status column - the flag lives in its own column
-    // because a full-width button leaves no room on the same line.
+    // status column. Clicking a scene toggles it in/out of the active set
+    // (scene.toggle) - several scenes may be active at once, composited in
+    // list order. Active scenes are highlighted on their button AND flagged
+    // in the status column - the flag lives in its own column because a
+    // full-width button leaves no room on the same line.
     if (ImGui::BeginTable("scenes", 2,
                           ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_BordersOuter))
     {
@@ -1067,7 +1069,7 @@ void ControlGuiApp::renderScenesBlock(const SystemConnection::Snapshot& snap)
             if (ImGui::Button(label.c_str(), ImVec2(-FLT_MAX, 0.0f)))
             {
                 std::string error;
-                sendActive("scene.set", {{"index", i}}, error);
+                sendActive("scene.toggle", {{"index", i}}, error);
             }
             if (active)
             {
@@ -1640,6 +1642,27 @@ void ControlGuiApp::renderScenesTab()
         }
         m_Editor.touch();
     }
+    // Reorder within the list: the list order is the compositing order when
+    // several scenes are active at once (first = bottom-most). Cues reference
+    // scenes by id, so reordering does not change the timeline.
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!hasSel || m_SelectedSceneIdx <= 0);
+    if (ImGui::Button("Up##sceneup"))
+    {
+        std::swap(show.scenes[m_SelectedSceneIdx - 1], show.scenes[m_SelectedSceneIdx]);
+        --m_SelectedSceneIdx;
+        m_Editor.touch();
+    }
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!hasSel || m_SelectedSceneIdx + 1 >= static_cast<int>(show.scenes.size()));
+    if (ImGui::Button("Down##scenedown"))
+    {
+        std::swap(show.scenes[m_SelectedSceneIdx], show.scenes[m_SelectedSceneIdx + 1]);
+        ++m_SelectedSceneIdx;
+        m_Editor.touch();
+    }
+    ImGui::EndDisabled();
     ImGui::EndTable();
 
     if (!hasSel)
@@ -2885,6 +2908,31 @@ bool ControlGuiApp::selfTestSystem(const std::string& host, std::uint16_t port, 
     conn.send("status", json::object(), result, error);
     step("status after scene.set (scene 2)", result.value("scene", 0u) == 2u,
          "scene=" + std::to_string(result.value("scene", 0u)));
+
+    // Multiple scenes can be active at once: with scene 2 manually active,
+    // toggling scene 1 on adds it - composited in list order.
+    step("scene.toggle index 0 (adds scene 1)",
+         conn.send("scene.toggle", {{"index", 0}}, result, error), error);
+    auto activeScenes = [&result]() {
+        std::vector<std::uint64_t> ids;
+        if (result.contains("activeScenes") && result["activeScenes"].is_array())
+        {
+            for (const auto& v : result["activeScenes"])
+            {
+                ids.push_back(v.get<std::uint64_t>());
+            }
+        }
+        return ids;
+    };
+    step("toggle: both scenes active in list order",
+         result.value("active", false) && activeScenes() == std::vector<std::uint64_t>{1, 2},
+         "activeScenes size=" + std::to_string(activeScenes().size()));
+
+    step("scene.toggle index 0 again (removes scene 1)",
+         conn.send("scene.toggle", {{"index", 0}}, result, error), error);
+    step("toggle: only scene 2 remains",
+         activeScenes() == std::vector<std::uint64_t>{2},
+         "activeScenes size=" + std::to_string(activeScenes().size()));
 
     step("scene.clear", conn.send("scene.clear", json::object(), result, error), error);
     step("scene.clear returns to timeline (scene 1)", result.value("scene", 0u) == 1u,

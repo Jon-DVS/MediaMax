@@ -73,7 +73,8 @@ Full snapshot of the system.
 | `timecode` | `HH:MM:SS:FF` at the show frame rate |
 | `duration` | show duration (s), `-1` when unlimited |
 | `frameRate` | broadcast string, e.g. `"30"` or `"29.97"` |
-| `scene` | active scene id |
+| `scene` | primary (bottom-most) active scene id |
+| `activeScenes` | all active scene ids, in show-list order (= compositing order) |
 | `previewScene` | show's preview scene index (always `0` in v1; not settable via the protocol) |
 | `layers` | number of layers in the current frame |
 | `media` | array of media objects (below) |
@@ -197,22 +198,42 @@ Stop and return to time 0.
 
 ### Scenes
 
+Several scenes may be active at once (composited, in show-list order — the
+first active scene is bottom-most). `scene.set` activates exactly one scene
+(solo), `scene.toggle` adds/removes a scene, and `scene.clear` releases the
+whole manual set back to the timeline.
+
 #### `scene.set`
 
-Force a scene immediately (operator override; takes effect over the
-timeline until the timeline's next `playScene` cue or another `scene.set`).
+Force exactly one scene immediately (operator solo; takes effect over the
+timeline until the timeline's next `playScene` cue, another `scene.set`, or
+`scene.clear`). Any other manually active scenes are released.
 
 - Params: `index` (int, required) — 0-based scene index in the show.
-- Result: `{"scene":<id>,"name":"<name>"}`
+- Result: `{"scene":<id>,"name":"<name>","activeScenes":[<id>,...]}`
+
+#### `scene.toggle`
+
+Toggle a scene in/out of the manual active set. Taken from a
+timeline-driven state (no manual set yet) it first takes the timeline scene
+with it, so toggling a *different* scene on composites it **with** what the
+timeline shows, and toggling the timeline scene itself is a no-op. Each
+manually activated scene starts its media from its activation time. The
+timeline's next `playScene` cue (crossed while playing) releases the whole
+manual set, like `scene.clear`.
+
+- Params: `index` (int, required) — 0-based scene index in the show.
+- Result: `{"scene":<id>,"name":"<name>","active":<bool>,"activeScenes":[<id>,...]}`
+  — `activeScenes` in show-list order (= compositing order, bottom to top).
 
 #### `scene.clear`
 
-Release the operator's scene override (from `scene.set`): scene selection
-returns to the timeline. Idempotent — clearing when there is no override
-succeeds and reports `cleared: 0`.
+Release the operator's manual scene set (from `scene.set`/`scene.toggle`):
+scene selection returns to the timeline. Idempotent — clearing when there is
+no manual set succeeds and reports `cleared: 0`.
 
 - Params: none.
-- Result: `{"cleared":<0|1>,"scene":<active scene id after the clear>}`
+- Result: `{"cleared":<count>,"scene":<primary scene id after the clear>,"activeScenes":[<id>,...]}`
 
 #### `scene.list`
 
@@ -227,13 +248,14 @@ succeeds and reports `cleared: 0`.
 ]}
 ```
 
-Per layer: `x`/`y` are the effective position at the current show time
-(static transform with keyframe tracks, cues and manual overrides
-resolved); they are only reported for layers of the *active* scene, where
-the position is well-defined (a hidden layer reports none). `override` is
-true when any manual override (opacity/visibility/blend/position) is set
-for the layer. The control GUI uses `x`/`y` to keep its position fields in
-sync with the engine and `override` to enable the per-layer Clear action.
+`active` is true for every scene in the active set (several may be true at
+once). Per layer: `x`/`y` are the effective position at the current show
+time (static transform with keyframe tracks, cues and manual overrides
+resolved); they are only reported for layers of *active* scenes, where the
+position is well-defined (a hidden layer reports none). `override` is true
+when any manual override (opacity/visibility/blend/position) is set for the
+layer. The control GUI uses `x`/`y` to keep its position fields in sync with
+the engine and `override` to enable the per-layer Clear action.
 
 ### Layers
 

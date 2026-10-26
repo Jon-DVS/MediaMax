@@ -360,6 +360,81 @@ TEST_CASE("Scene override releases at the next PlayScene cue")
     CHECK(engine.activeSceneAt(engine.time()) == 1);
 }
 
+TEST_CASE("Multiple scenes can be active at once (composited in list order)")
+{
+    auto media = makeLoadedMediaLibrary();
+    auto engine = makeTestEngine(media);
+
+    engine.play();
+    engine.seek(Time::fromSeconds(1.0)); // timeline scene 1
+
+    // Toggling scene 2 on seeds the manual set with the timeline scene, so
+    // both are active, in show-list order.
+    CHECK(engine.toggleSceneNow(2));
+    CHECK(engine.hasSceneOverride());
+    CHECK(engine.activeSceneAt(engine.time()) == 1); // primary = bottom-most
+    CHECK(engine.activeScenesAt(engine.time()) == std::vector<Id>{1, 2});
+
+    // Both scenes' layers are composited: scene 1's (z order: 11, 10), then
+    // scene 2's (20).
+    const FrameState state = engine.frameState();
+    CHECK(state.activeSceneId == 1);
+    CHECK(state.activeSceneIds == std::vector<Id>{1, 2});
+    std::vector<Id> order;
+    for (const auto& l : state.layers)
+    {
+        order.push_back(l.layerId);
+    }
+    CHECK(order == std::vector<Id>{11, 10, 20});
+
+    // Media in the toggled scene start from its activation time (the seek
+    // point), like setSceneNow.
+    for (const auto& l : state.layers)
+    {
+        if (l.layerId == 20)
+        {
+            CHECK(l.mediaTime == Time::zero());
+        }
+    }
+
+    // Toggling scene 2 off leaves scene 1 (manual) active.
+    CHECK(engine.toggleSceneNow(2));
+    CHECK(engine.activeScenesAt(engine.time()) == std::vector<Id>{1});
+
+    // Toggling the last manual scene off returns to the timeline.
+    CHECK(engine.toggleSceneNow(1));
+    CHECK_FALSE(engine.hasSceneOverride());
+    CHECK(engine.activeScenesAt(engine.time()) == std::vector<Id>{1}); // by cue
+
+    // Toggling a scene that is not in the show is rejected.
+    CHECK_FALSE(engine.toggleSceneNow(99));
+}
+
+TEST_CASE("Scene list order determines compositing order")
+{
+    auto media = makeLoadedMediaLibrary();
+    Show show = makeTestShow();
+    // Reorder the scenes: scene 2 first, scene 1 second. Cues reference
+    // scenes by id, so the timeline is unaffected.
+    show.scenes = {show.scenes[1], show.scenes[0]};
+    auto engine = makeTestEngine(media, show);
+
+    engine.play();
+    engine.seek(Time::fromSeconds(1.0)); // timeline scene 1 (by cue id)
+    CHECK(engine.activeSceneAt(engine.time()) == 1);
+
+    engine.toggleSceneNow(2);
+    CHECK(engine.activeScenesAt(engine.time()) == std::vector<Id>{2, 1});
+    const FrameState state = engine.frameState();
+    CHECK(state.activeSceneId == 2); // bottom-most = first in the list
+    std::vector<Id> order;
+    for (const auto& l : state.layers)
+    {
+        order.push_back(l.layerId);
+    }
+    CHECK(order == std::vector<Id>{20, 11, 10});
+}
+
 TEST_CASE("Layers render in z order (stable)")
 {
     auto media = makeLoadedMediaLibrary();

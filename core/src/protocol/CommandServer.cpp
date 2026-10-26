@@ -55,6 +55,16 @@ nlohmann::json displayToJson(const Display& d)
     };
 }
 
+nlohmann::json idArray(const std::vector<Id>& ids)
+{
+    nlohmann::json arr = nlohmann::json::array();
+    for (const Id id : ids)
+    {
+        arr.push_back(id);
+    }
+    return arr;
+}
+
 // Layer ids are validated against the loaded show (the engine's override
 // storage is generic and would silently accept unknown ids).
 bool layerExistsInShow(const Show& show, Id layerId)
@@ -91,6 +101,7 @@ std::vector<std::string> CommandServer::supportedMethods()
             "playback.stop",
             "playback.seek",
             "scene.set",
+            "scene.toggle",
             "scene.list",
             "scene.clear",
             "layer.set",
@@ -166,6 +177,10 @@ Response CommandServer::handle(const Command& cmd) const
         else if (cmd.method == "scene.set")
         {
             result = handleSceneSet(cmd.params);
+        }
+        else if (cmd.method == "scene.toggle")
+        {
+            result = handleSceneToggle(cmd.params);
         }
         else if (cmd.method == "scene.list")
         {
@@ -265,6 +280,7 @@ nlohmann::json CommandServer::handleStatus() const
         {"duration", show.duration.isValid() ? show.duration.toSeconds() : -1.0},
         {"frameRate", show.frameRate.toString()},
         {"scene", state.activeSceneId},
+        {"activeScenes", idArray(state.activeSceneIds)},
         {"previewScene", m_Engine.previewScene()},
         {"layers", state.layers.size()},
         {"media", mediaArr},
@@ -495,17 +511,41 @@ nlohmann::json CommandServer::handleSceneSet(const nlohmann::json& params) const
     {
         throw ParameterError("cannot switch to scene " + std::to_string(sceneId));
     }
-    return {{"scene", sceneId}, {"name", show.scenes[static_cast<size_t>(index)].name}};
+    return {{"scene", sceneId},
+            {"name", show.scenes[static_cast<size_t>(index)].name},
+            {"activeScenes", idArray(m_Engine.activeScenesAt(m_Engine.time()))}};
+}
+
+nlohmann::json CommandServer::handleSceneToggle(const nlohmann::json& params) const
+{
+    const int index = requireInt(params, "index");
+    const Show& show = m_Engine.show();
+    if (index < 0 || index >= static_cast<int>(show.scenes.size()))
+    {
+        throw ParameterError("scene index out of range: " + std::to_string(index));
+    }
+    const Id sceneId = show.scenes[static_cast<size_t>(index)].id;
+    if (!m_Engine.toggleSceneNow(sceneId))
+    {
+        throw ParameterError("cannot toggle scene " + std::to_string(sceneId));
+    }
+    const std::vector<Id> active = m_Engine.activeScenesAt(m_Engine.time());
+    return {
+        {"scene", sceneId},
+        {"name", show.scenes[static_cast<size_t>(index)].name},
+        {"active", std::find(active.begin(), active.end(), sceneId) != active.end()},
+        {"activeScenes", idArray(active)},
+    };
 }
 
 nlohmann::json CommandServer::handleSceneList() const
 {
     nlohmann::json arr = nlohmann::json::array();
     const Show& show = m_Engine.show();
-    const Id activeId = m_Engine.activeSceneAt(m_Engine.time());
-    // Resolved state of the active scene at the current time (tracks, cues
+    const std::vector<Id> activeIds = m_Engine.activeScenesAt(m_Engine.time());
+    // Resolved state of the active scenes at the current time (tracks, cues
     // and manual overrides applied): per-layer effective positions are only
-    // reported for that scene, where they are well-defined.
+    // reported for those scenes, where they are well-defined.
     std::map<Id, const LayerFrame*> resolved;
     for (const auto& layerFrame : m_Engine.frameState().layers)
     {
@@ -513,11 +553,13 @@ nlohmann::json CommandServer::handleSceneList() const
     }
     for (const auto& scene : show.scenes)
     {
+        const bool sceneActive =
+            std::find(activeIds.begin(), activeIds.end(), scene.id) != activeIds.end();
         nlohmann::json layerArr = nlohmann::json::array();
         for (const auto& layer : scene.layers)
         {
             nlohmann::json layerJson = {{"id", layer.id}, {"name", layer.name}};
-            if (scene.id == activeId)
+            if (sceneActive)
             {
                 if (const auto it = resolved.find(layer.id); it != resolved.end())
                 {
@@ -531,7 +573,7 @@ nlohmann::json CommandServer::handleSceneList() const
         arr.push_back({
             {"id", scene.id},
             {"name", scene.name},
-            {"active", m_Engine.activeSceneAt(m_Engine.time()) == scene.id},
+            {"active", sceneActive},
             {"layers", layerArr},
         });
     }
@@ -540,18 +582,15 @@ nlohmann::json CommandServer::handleSceneList() const
 
 nlohmann::json CommandServer::handleSceneClear() const
 {
-    // Releases the operator's scene override (scene.set); scene selection
-    // returns to the timeline. The response reports the now-active scene so
-    // the caller does not need a follow-up status call.
-    bool cleared = false;
-    if (m_Engine.hasSceneOverride())
-    {
-        m_Engine.clearSceneNow();
-        cleared = true;
-    }
+    // Releases the operator's manual scene set (scene.set/scene.toggle);
+    // scene selection returns to the timeline. The response reports the
+    // now-active scenes so the caller does not need a follow-up status call.
+    const int cleared = m_Engine.clearSceneNow();
+    const std::vector<Id> active = m_Engine.activeScenesAt(m_Engine.time());
     return {
-        {"cleared", cleared ? 1 : 0},
-        {"scene", m_Engine.activeSceneAt(m_Engine.time())},
+        {"cleared", cleared},
+        {"scene", active.empty() ? kInvalidId : active.front()},
+        {"activeScenes", idArray(active)},
     };
 }
 
