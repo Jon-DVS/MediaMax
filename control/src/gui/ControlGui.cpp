@@ -1403,6 +1403,8 @@ void ControlGuiApp::renderShowEditorWindow()
         ImGui::End();
         return;
     }
+    // The editor lives in a narrow docked pane, so the toolbar is two rows
+    // (file actions, then system actions) instead of one row that wraps.
     if (ImGui::Button("New"))
     {
         m_Editor.newShow();
@@ -1435,7 +1437,6 @@ void ControlGuiApp::renderShowEditorWindow()
         m_SaveAsPath = m_Editor.filePath();
         ImGui::OpenPopup(modalPopupId("Save show as..."));
     }
-    ImGui::SameLine();
     SystemConnection* active = activeConnection();
     ImGui::BeginDisabled(!active);
     if (ImGui::Button("Push to system") && active)
@@ -1459,35 +1460,57 @@ void ControlGuiApp::renderShowEditorWindow()
     }
 
     ImGui::Spacing();
+    // The file path can exceed the pane width; wrap instead of clipping.
     const std::string where =
         m_Editor.filePath().empty() ? std::string("(unsaved)") : m_Editor.filePath();
-    ImGui::Text("%s%s", where.c_str(), m_Editor.dirty() ? "  *dirty" : "");
+    ImGui::TextWrapped("%s%s", where.c_str(), m_Editor.dirty() ? "  *dirty" : "");
     if (!m_EditorError.empty())
     {
-        ImGui::TextColored(kBadColor, "%s", m_EditorError.c_str());
+        ImGui::PushStyleColor(ImGuiCol_Text, kBadColor);
+        ImGui::TextWrapped("%s", m_EditorError.c_str());
+        ImGui::PopStyleColor();
     }
     ImGui::Separator();
 
+    // The pane is a fixed-size docking slot, so long tab content (many cues,
+    // layer details) scrolls instead of being clipped below the pane; the
+    // tab bar stays pinned above the scroll region.
     if (ImGui::BeginTabBar("editortabs"))
     {
         if (ImGui::BeginTabItem("Show"))
         {
-            renderShowTab();
+            if (ImGui::BeginChild("##showtab", ImVec2(0.0f, 0.0f), false))
+            {
+                renderShowTab();
+            }
+            ImGui::EndChild();
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("Media"))
         {
-            renderMediaTab();
+            if (ImGui::BeginChild("##mediatab", ImVec2(0.0f, 0.0f), false))
+            {
+                renderMediaTab();
+            }
+            ImGui::EndChild();
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("Scenes"))
         {
-            renderScenesTab();
+            if (ImGui::BeginChild("##scenestab", ImVec2(0.0f, 0.0f), false))
+            {
+                renderScenesTab();
+            }
+            ImGui::EndChild();
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("Cues"))
         {
-            renderCuesTab();
+            if (ImGui::BeginChild("##cuestab", ImVec2(0.0f, 0.0f), false))
+            {
+                renderCuesTab();
+            }
+            ImGui::EndChild();
             ImGui::EndTabItem();
         }
         ImGui::EndTabBar();
