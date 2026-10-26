@@ -104,6 +104,18 @@ private:
         bool playing = false;
     };
 
+    // A surface operation requested by display.add / display.remove. The
+    // command handler (client thread) only queues it; the frame loop
+    // executes it, because window, Vulkan surface and swapchain work is
+    // main-thread work.
+    struct SurfaceOp
+    {
+        bool add = true;
+        Id displayId = kInvalidId;
+        std::string name;
+        std::int32_t x = 0, y = 0, width = 0, height = 0;
+    };
+
     // --- Initialization / shutdown ------------------------------------------
 
     bool initWindowsAndDisplays();
@@ -126,6 +138,12 @@ private:
 
     protocol::Response handleCommand(const protocol::Command& cmd);
     Id loadMediaFile(const std::string& path, std::string& error);
+    // Executes queued display.add / display.remove surface ops (main thread).
+    void processPendingSurfaceOps();
+    void addSurfaceForDisplay(const SurfaceOp& op);
+    void removeSurfaceForDisplay(Id displayId);
+    // Undoes a display.add whose record was created but whose surface failed.
+    void removeDisplayRecord(Id displayId);
 
     // --- State (guarded by m_StateMutex) -----------------------------------------
 
@@ -134,6 +152,9 @@ private:
     MediaLibrary m_Library;
     PlaybackEngine m_Engine;
     DisplayManager m_Displays;
+    // display.add / display.remove work queued by the command handlers
+    // (client thread, under m_StateMutex) and executed by the frame loop.
+    std::vector<SurfaceOp> m_PendingSurfaceOps;
     std::unique_ptr<protocol::CommandServer> m_CommandServer;
     std::unique_ptr<ControlServer> m_ControlServer;
 

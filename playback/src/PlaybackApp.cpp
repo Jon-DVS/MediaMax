@@ -105,6 +105,7 @@ int PlaybackApp::run()
         {
             break;
         }
+        processPendingSurfaceOps();
 
         const auto now = std::chrono::steady_clock::now();
         Time dt = Time::fromSeconds(std::chrono::duration<double>(now - lastTime).count());
@@ -381,6 +382,144 @@ void PlaybackApp::handleWindowResizes()
         }
     }
     m_Scene.invalidateDisplayFramebufferCache();
+}
+
+// --- Runtime display add/remove (display.add / display.remove) ------------------
+
+void PlaybackApp::processPendingSurfaceOps()
+{
+    std::vector<SurfaceOp> ops;
+    {
+        std::lock_guard lock(m_StateMutex);
+        ops.swap(m_PendingSurfaceOps);
+    }
+    for (const SurfaceOp& op : ops)
+    {
+        if (op.add)
+        {
+            addSurfaceForDisplay(op);
+        }
+        else
+        {
+            removeSurfaceForDisplay(op.displayId);
+        }
+    }
+}
+
+void PlaybackApp::addSurfaceForDisplay(const SurfaceOp& op)
+{
+    auto& log = Logger::instance();
+
+    GLFWwindow* window =
+        glfwCreateWindow(op.width, op.height, ("MediaMax - " + op.name).c_str(), nullptr, nullptr);
+    if (window == nullptr)
+    {
+        log.error("display.add: window creation failed for display {} ({}x{} at {},{})", op.displayId,
+                  op.width, op.height, op.x, op.y);
+        removeDisplayRecord(op.displayId);
+        return;
+    }
+    glfwSetWindowPos(window, op.x, op.y);
+
+    auto sp = std::make_unique<DisplaySurface>();
+    sp->displayId = op.displayId;
+    sp->window = window;
+    sp->width = op.width;
+    sp->height = op.height;
+
+    std::string error;
+    if (!createWindowSurface(m_Vulkan->instance(), sp->window, sp->surface, error))
+    {
+        log.error("display.add: display {}: {}", op.displayId, error);
+        glfwDestroyWindow(sp->window);
+        removeDisplayRecord(op.displayId);
+        return;
+    }
+    if (!createSwapchainFor(*sp, error))
+    {
+        log.error("display.add: display {}: {}", op.displayId, error);
+        if (sp->surface != VK_NULL_HANDLE)
+        {
+            vkDestroySurfaceKHR(m_Vulkan->instance(), sp->surface, nullptr);
+        }
+        glfwDestroyWindow(sp->window);
+        removeDisplayRecord(op.displayId);
+        return;
+    }
+
+    // Adopt the window's actual state as the applied geometry (the window
+    // manager may have clamped the requested rect), so pollWindowEvents()
+    // treats the record and the window as in sync from the first frame.
+    {
+        int wx = 0, wy = 0, ww = 0, wh = 0;
+        glfwGetWindowPos(sp->window, &wx, &wy);
+        glfwGetWindowSize(sp->window, &ww, &wh);
+        sp->appliedX = wx;
+        sp->appliedY = wy;
+        sp->appliedW = ww;
+        sp->appliedH = wh;
+        std::lock_guard lock(m_StateMutex);
+        m_Displays.setDisplayGeometry(op.displayId, wx, wy, ww, wh);
+    }
+
+    m_Surfaces.push_back(std::move(sp));
+    log.info("display.add: display {} online", op.displayId);
+}
+
+void PlaybackApp::removeSurfaceForDisplay(Id displayId)
+{
+    auto it = std::find_if(m_Surfaces.begin(), m_Surfaces.end(),
+                           [displayId](const auto& sp) { return sp->displayId == displayId; });
+    if (it == m_Surfaces.end())
+    {
+        // No surface for this display (creation failed or already removed).
+        return;
+    }
+
+    // Destroying the swapchain requires a quiescent queue: the present
+    // fence must not be in flight.
+    if (m_Vulkan && m_Vulkan->nvrhiDevice())
+    {
+        m_Vulkan->nvrhiDevice()->waitForIdle();
+    }
+
+    DisplaySurface& ds = **it;
+    if (ds.swapchain.valid())
+    {
+        ds.swapchain.destroy();
+    }
+    if (ds.fence != VK_NULL_HANDLE && m_Vulkan)
+    {
+        vkDestroyFence(m_Vulkan->device(), ds.fence, nullptr);
+        ds.fence = VK_NULL_HANDLE;
+    }
+    if (ds.window != nullptr)
+    {
+        glfwDestroyWindow(ds.window);
+        ds.window = nullptr;
+    }
+    if (ds.surface != VK_NULL_HANDLE && m_Vulkan)
+    {
+        vkDestroySurfaceKHR(m_Vulkan->instance(), ds.surface, nullptr);
+        ds.surface = VK_NULL_HANDLE;
+    }
+    m_Surfaces.erase(it);
+
+    // The destroyed swapchain's images may still be cached as display
+    // framebuffers (keyed by texture pointer); drop the cache so a new
+    // display's images can never match a stale entry.
+    m_Scene.invalidateDisplayFramebufferCache();
+    m_Scene.removeWarpTexture(displayId);
+    Logger::instance().info("display.remove: display {} offline", displayId);
+}
+
+// display.add adds the record before the response goes out; if the surface
+// cannot be created, drop the record again so display.list does not
+// advertise a display without an output.
+void PlaybackApp::removeDisplayRecord(Id displayId)
+{
+    std::lock_guard lock(m_StateMutex);
+    m_Displays.removeDisplay(displayId);
 }
 
 // --- Frame loop ----------------------------------------------------------------
@@ -760,6 +899,28 @@ bool PlaybackApp::initEngine()
         m_Engine, m_Library, m_Displays, m_Args.systemName.empty() ? "MediaMax" : m_Args.systemName);
     m_CommandServer->setMediaLoadFunction(
         [this](const std::string& path, std::string& error) { return loadMediaFile(path, error); });
+
+    // display.add / display.remove: the handler updates the display record;
+    // the surface work (window + Vulkan surface + swapchain) is queued and
+    // executed by the frame loop. Both callbacks run under m_StateMutex, so
+    // they push directly without locking again.
+    m_CommandServer->setDisplayAddedFunction([this](const Display& d) {
+        SurfaceOp op;
+        op.add = true;
+        op.displayId = d.id;
+        op.name = d.name;
+        op.x = d.x;
+        op.y = d.y;
+        op.width = d.width;
+        op.height = d.height;
+        m_PendingSurfaceOps.push_back(std::move(op));
+    });
+    m_CommandServer->setDisplayRemovedFunction([this](Id displayId) {
+        SurfaceOp op;
+        op.add = false;
+        op.displayId = displayId;
+        m_PendingSurfaceOps.push_back(std::move(op));
+    });
 
     // Startup show: go through the same command handler as the network
     // protocol (media loading + id remapping + loadShow).

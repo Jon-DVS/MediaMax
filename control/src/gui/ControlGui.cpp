@@ -954,6 +954,16 @@ void ControlGuiApp::renderLayersBlock(const SystemConnection::Snapshot& snap)
 void ControlGuiApp::renderDisplaysBlock(const SystemConnection::Snapshot& snap)
 {
     ImGui::TextUnformatted("Displays");
+
+    // Multi-display: add a panel to this system (tiled right of the current
+    // wall at 1920x1080 by the server's defaults). Shown even when the
+    // system has no displays left, so it is possible to recover.
+    if (ImGui::Button("Add display"))
+    {
+        std::string error;
+        sendActive("display.add", json::object(), error);
+    }
+
     if (!snap.status.contains("displays") || snap.status["displays"].empty())
     {
         ImGui::TextDisabled("(none)");
@@ -972,7 +982,7 @@ void ControlGuiApp::renderDisplaysBlock(const SystemConnection::Snapshot& snap)
         ImGui::TableSetupColumn("w", ImGuiTableColumnFlags_WidthFixed, 60.0f);
         ImGui::TableSetupColumn("h", ImGuiTableColumnFlags_WidthFixed, 60.0f);
         ImGui::TableSetupColumn("brightness", ImGuiTableColumnFlags_WidthFixed, 90.0f);
-        ImGui::TableSetupColumn("##actions", ImGuiTableColumnFlags_WidthFixed, 56.0f);
+        ImGui::TableSetupColumn("##actions", ImGuiTableColumnFlags_WidthFixed, 120.0f);
         for (const auto& d : displays)
         {
             const Id id = static_cast<Id>(d.value("id", 0u));
@@ -1014,6 +1024,12 @@ void ControlGuiApp::renderDisplaysBlock(const SystemConnection::Snapshot& snap)
                             {"height", de.height}, {"brightness", de.brightness},
                             {"enabled", de.enabled}},
                            error);
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Remove##remove"))
+            {
+                std::string error;
+                sendActive("display.remove", {{"display", id}}, error);
             }
         }
         ImGui::EndTable();

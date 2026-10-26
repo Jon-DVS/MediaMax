@@ -95,7 +95,9 @@ std::vector<std::string> CommandServer::supportedMethods()
             "scene.clear",
             "layer.set",
             "layer.clear",
+            "display.add",
             "display.list",
+            "display.remove",
             "display.set",
             "display.warp.set"};
 }
@@ -181,9 +183,17 @@ Response CommandServer::handle(const Command& cmd) const
         {
             result = handleLayerClear(cmd.params);
         }
+        else if (cmd.method == "display.add")
+        {
+            result = handleDisplayAdd(cmd.params);
+        }
         else if (cmd.method == "display.list")
         {
             result = handleDisplayList();
+        }
+        else if (cmd.method == "display.remove")
+        {
+            result = handleDisplayRemove(cmd.params);
         }
         else if (cmd.method == "display.set")
         {
@@ -569,6 +579,46 @@ nlohmann::json CommandServer::handleLayerClear(const nlohmann::json& params) con
     return {{"cleared", cleared}};
 }
 
+nlohmann::json CommandServer::handleDisplayAdd(const nlohmann::json& params) const
+{
+    // Defaults: tile a full-HD panel to the right of the current wall (an
+    // empty wall starts at the origin).
+    const auto wall = m_Displays.outputBounds();
+    std::int32_t x =
+        params.contains("x") ? static_cast<std::int32_t>(params["x"].get<double>()) : wall.maxX();
+    std::int32_t y = params.contains("y") ? static_cast<std::int32_t>(params["y"].get<double>()) : 0;
+    std::int32_t width =
+        params.contains("width") ? static_cast<std::int32_t>(params["width"].get<double>()) : 1920;
+    std::int32_t height =
+        params.contains("height") ? static_cast<std::int32_t>(params["height"].get<double>()) : 1080;
+    if (width <= 0 || height <= 0)
+    {
+        throw ParameterError("invalid display geometry");
+    }
+
+    std::string name;
+    if (params.contains("name") && params["name"].is_string())
+    {
+        name = params["name"].get<std::string>();
+    }
+    Display display = m_Displays.addDisplay(name, x, y, width, height);
+    if (name.empty())
+    {
+        // Default name derived from the id the display got.
+        if (const auto updated = m_Displays.find(display.id))
+        {
+            (*updated)->name = "Display " + std::to_string(display.id);
+            display = **updated;
+        }
+    }
+
+    if (m_DisplayAdded)
+    {
+        m_DisplayAdded(display);
+    }
+    return displayToJson(display);
+}
+
 nlohmann::json CommandServer::handleDisplayList() const
 {
     nlohmann::json arr = nlohmann::json::array();
@@ -577,6 +627,21 @@ nlohmann::json CommandServer::handleDisplayList() const
         arr.push_back(displayToJson(d));
     }
     return {{"displays", arr}};
+}
+
+nlohmann::json CommandServer::handleDisplayRemove(const nlohmann::json& params) const
+{
+    const Id id = static_cast<Id>(requireInt(params, "display"));
+    if (!m_Displays.find(id))
+    {
+        throw ParameterError("no display with id " + std::to_string(id));
+    }
+    if (m_DisplayRemoved)
+    {
+        m_DisplayRemoved(id);
+    }
+    m_Displays.removeDisplay(id);
+    return {{"display", id}};
 }
 
 nlohmann::json CommandServer::handleDisplaySet(const nlohmann::json& params) const

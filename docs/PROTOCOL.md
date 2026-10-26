@@ -253,10 +253,37 @@ Display object shape (used by `display.list`, `display.set`, `status`):
 Geometry is in the shared output space (pixels, origin top-left). The union
 of enabled display rectangles defines the scene size.
 
+#### `display.add`
+
+Add a display to the system. The playback engine creates a window for it
+(titled `MediaMax - <name>`), builds its Vulkan surface and swapchain, and
+starts rendering the scene's share of the output wall onto it.
+
+- Params: all optional — `x`, `y` (ints, position in the output space),
+  `width`, `height` (ints, default 1920x1080), `name` (string, default
+  `"Display <id>"`).
+- Defaults: a missing `x` tiles the panel to the right of the current
+  output wall (`x` = the wall's right edge, `0` when the wall is empty);
+  a missing `y` is `0`.
+- Result: the new display object.
+- If the engine cannot create the display's window or swapchain, the
+  display record is removed again (the system logs the failure).
+
 #### `display.list`
 
 - Params: none.
 - Result: `{"displays":[ <display object>, ... ]}`
+
+#### `display.remove`
+
+Remove a display from the system: the engine destroys its window, Vulkan
+surface and swapchain, and the scene re-slices across the remaining
+displays. Removing the last display leaves the system running without
+outputs (audio and control keep working; `display.add` can bring an
+output back).
+
+- Params: `display` (int id, required).
+- Result: `{"display":<id>}`
 
 #### `display.set`
 

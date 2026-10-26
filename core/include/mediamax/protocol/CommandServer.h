@@ -25,6 +25,15 @@ namespace mediamax::protocol
 // (the app owns the source factory). Implemented by the playback engine.
 using MediaLoadFunction = std::function<Id(const std::string& path, std::string& error)>;
 
+// Host callbacks for display.add / display.remove: the protocol layer adds
+// or removes the display record, the app owns the window and swapchain
+// surfaces for it. The playback app queues the surface work and executes it
+// on its frame loop (window/surface creation is main-thread work). Tests
+// may record the calls instead. The callbacks run while handle() executes
+// (under the caller's lock) and must not block.
+using DisplayAddedFunction = std::function<void(const Display& display)>;
+using DisplayRemovedFunction = std::function<void(Id displayId)>;
+
 class CommandServer
 {
 public:
@@ -39,6 +48,10 @@ public:
 
     // Sets the media-loading callback (see MediaLoadFunction).
     void setMediaLoadFunction(MediaLoadFunction fn) { m_LoadMedia = std::move(fn); }
+
+    // Sets the display add/remove callbacks (see above).
+    void setDisplayAddedFunction(DisplayAddedFunction fn) { m_DisplayAdded = std::move(fn); }
+    void setDisplayRemovedFunction(DisplayRemovedFunction fn) { m_DisplayRemoved = std::move(fn); }
 
     // Handles a decoded command. Never throws; all failures become responses
     // with ok=false.
@@ -69,7 +82,9 @@ private:
     nlohmann::json handleSceneClear() const;
     nlohmann::json handleLayerSet(const nlohmann::json& params) const;
     nlohmann::json handleLayerClear(const nlohmann::json& params) const;
+    nlohmann::json handleDisplayAdd(const nlohmann::json& params) const;
     nlohmann::json handleDisplayList() const;
+    nlohmann::json handleDisplayRemove(const nlohmann::json& params) const;
     nlohmann::json handleDisplaySet(const nlohmann::json& params) const;
     nlohmann::json handleDisplayWarpSet(const nlohmann::json& params) const;
 
@@ -89,6 +104,8 @@ private:
     DisplayManager& m_Displays;
     mutable std::string m_SystemName; // mutable: system.set mutates it under lock
     MediaLoadFunction m_LoadMedia;
+    DisplayAddedFunction m_DisplayAdded;
+    DisplayRemovedFunction m_DisplayRemoved;
 };
 
 // Thrown by parameter helpers; caught by handle() and turned into a failure

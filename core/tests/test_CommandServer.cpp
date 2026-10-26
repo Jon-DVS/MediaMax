@@ -1,6 +1,6 @@
 // The command server: the full control surface mapped onto a real engine,
 // media library and display set. This is the integration test for the
-// protocol layer - it exercises every one of the 22 commands.
+// protocol layer - it exercises every one of the 24 commands.
 
 #include <atomic>
 #include <chrono>
@@ -337,6 +337,97 @@ TEST_CASE("media.list and media.unload")
     const Response again = f.run("media.unload", {{"id", kMediaB}});
     CHECK_FALSE(again.ok);
     CHECK(again.error.find("no media") != std::string::npos);
+}
+
+TEST_CASE("display.add appends a display and grows the wall")
+{
+    Fixture f;
+    std::vector<Display> added;
+    f.server.setDisplayAddedFunction([&added](const Display& d) { added.push_back(d); });
+
+    const Response resp = f.run("display.add",
+                                {{"x", 3840}, {"y", 0}, {"width", 1280}, {"height", 720},
+                                 {"name", "right"}});
+    REQUIRE(resp.ok);
+    const Id id = resp.result.at("id").get<Id>();
+    CHECK(id == 3); // the fixture's displays are 1 and 2
+    CHECK(resp.result.at("name").get<std::string>() == "right");
+    CHECK(resp.result.at("x").get<std::int32_t>() == 3840);
+    CHECK(resp.result.at("width").get<std::int32_t>() == 1280);
+    CHECK(resp.result.at("height").get<std::int32_t>() == 720);
+
+    CHECK(f.displays.count() == 3);
+    CHECK(f.displays.outputBounds().size() == Size2i{5120, 1080});
+
+    // The host callback observed the new display (the app builds its
+    // window and swapchain from it).
+    REQUIRE(added.size() == 1);
+    CHECK(added[0].id == id);
+    CHECK(added[0].name == "right");
+    CHECK(added[0].width == 1280);
+
+    const Response list = f.run("display.list");
+    REQUIRE(list.ok);
+    CHECK(list.result.at("displays").size() == 3);
+}
+
+TEST_CASE("display.add without params tiles a 1920x1080 panel right of the wall")
+{
+    Fixture f;
+    const Response resp = f.run("display.add");
+    REQUIRE(resp.ok);
+    const Id id = resp.result.at("id").get<Id>();
+    CHECK(resp.result.at("x").get<std::int32_t>() == 3840); // the wall's right edge
+    CHECK(resp.result.at("y").get<std::int32_t>() == 0);
+    CHECK(resp.result.at("width").get<std::int32_t>() == 1920);
+    CHECK(resp.result.at("height").get<std::int32_t>() == 1080);
+    // The default name is derived from the assigned id.
+    CHECK(resp.result.at("name").get<std::string>() == "Display " + std::to_string(id));
+}
+
+TEST_CASE("display.add rejects non-positive sizes")
+{
+    Fixture f;
+    CHECK_FALSE(f.run("display.add", {{"width", 0}}).ok);
+    CHECK_FALSE(f.run("display.add", {{"height", -5}}).ok);
+    CHECK(f.displays.count() == 2); // nothing was added
+}
+
+TEST_CASE("display.remove drops the display and shrinks the wall")
+{
+    Fixture f;
+    std::vector<Id> removed;
+    f.server.setDisplayRemovedFunction([&removed](Id id) { removed.push_back(id); });
+
+    const Response resp = f.run("display.remove", {{"display", f.displayB}});
+    REQUIRE(resp.ok);
+    CHECK(resp.result.at("display").get<Id>() == f.displayB);
+    CHECK(removed == std::vector<Id>{f.displayB});
+
+    CHECK(f.displays.count() == 1);
+    CHECK_FALSE(f.displays.find(f.displayB).has_value());
+    CHECK(f.displays.outputBounds().size() == Size2i{1920, 1080});
+
+    // Removing an unknown display fails cleanly and changes nothing.
+    const Response bad = f.run("display.remove", {{"display", 99}});
+    CHECK_FALSE(bad.ok);
+    CHECK(bad.error.find("no display with id 99") != std::string::npos);
+    CHECK(f.displays.count() == 1);
+}
+
+TEST_CASE("display.add works after all displays were removed")
+{
+    Fixture f;
+    REQUIRE(f.run("display.remove", {{"display", f.displayA}}).ok);
+    REQUIRE(f.run("display.remove", {{"display", f.displayB}}).ok);
+    CHECK(f.displays.empty());
+
+    // Empty wall: the default x is the (zero) right edge.
+    const Response resp = f.run("display.add");
+    REQUIRE(resp.ok);
+    CHECK(resp.result.at("x").get<std::int32_t>() == 0);
+    CHECK(resp.result.at("width").get<std::int32_t>() == 1920);
+    CHECK(f.displays.outputBounds().size() == Size2i{1920, 1080});
 }
 
 TEST_CASE("display.list reports all displays")
