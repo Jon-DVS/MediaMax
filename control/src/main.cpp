@@ -1,10 +1,11 @@
 // MediaMax control interface.
 //
+//   mediamax_control                              (windowed control GUI)
 //   mediamax_control --list
 //   mediamax_control --system <name|idx> --command "method" [json-params]
 //   mediamax_control --system <name|idx>          (interactive REPL)
 //   mediamax_control --system <host:port>         (direct, no config file)
-//   mediamax_control --gui                        (windowed control GUI)
+//   mediamax_control --gui                        (explicit GUI; = no args)
 //   mediamax_control --gui-self-test [frames]     (headless GUI smoke test)
 //       [--gui-self-test-system host:port]        (also drive a live engine)
 //
@@ -159,10 +160,11 @@ void printUsage()
         "MediaMax control interface\n"
         "\n"
         "Usage:\n"
+        "  mediamax_control\n"
+        "  mediamax_control --gui\n"
         "  mediamax_control --list\n"
         "  mediamax_control --system <name|idx|host:port> --command \"method\" [json-params]\n"
         "  mediamax_control --system <name|idx|host:port>\n"
-        "  mediamax_control --gui\n"
         "  mediamax_control --gui-self-test [frames] [--gui-self-test-system host:port]\n"
         "\n"
         "Options:\n"
@@ -170,7 +172,8 @@ void printUsage()
         "  --list             List configured systems and exit\n"
         "  --system <spec>    Target system (config name, 1-based index or host:port)\n"
         "  --command <m>      One-shot command; optional json-params argument\n"
-        "  --gui              Open the windowed control GUI\n"
+        "  --gui              Open the windowed control GUI (also the default\n"
+        "                     when no other mode is given)\n"
         "  --gui-self-test    Headless GUI smoke test (renders [frames], default 90)\n"
         "  --gui-self-test-system <host:port>\n"
         "                     Also drive a running playback engine through the\n"
@@ -475,6 +478,12 @@ int main(int argc, char** argv)
 
     if (systemSpec.empty())
     {
+        if (command.empty())
+        {
+            // No CLI mode requested: the windowed GUI is the default mode.
+            return mediamax::gui::runGui(configPath);
+        }
+        std::cerr << "mediamax_control: --command requires --system" << std::endl;
         printUsage();
         return 2;
     }

@@ -251,12 +251,14 @@ render thread (main)   media pump thread      audio thread         control clien
 
 ## Control app (`control/`)
 
-Thin CLI: reads `systems.json` (`{"systems":[{"name","host","port"}]}`),
-resolves `--system <name|idx|host:port>`, then either sends one
+Thin CLI + the operator GUI. With **no mode given it opens the windowed GUI**
+(`--gui` is kept as the explicit form). The CLI reads `systems.json`
+(`{"systems":[{"name","host","port"}]}`), resolves
+`--system <name|idx|host:port>`, then either sends one
 `--command "method" [json-params]` (one-shot) or enters a REPL
-(`system <spec>`, `systems`, `<method> [json]`, `help`, `quit`). It links the
-core only — it can even validate command syntax offline against
-`CommandServer`.
+(`system <spec>`, `systems`, `<method> [json]`, `help`, `quit`). The CLI
+modes link the core only — they can even validate command syntax offline
+against `CommandServer`.
 
 `--gui` runs the operator interface (Dear ImGui docking on GLFW + a minimal
 raw-Vulkan surface): one dockspace with Systems (left), Show Editor (right),
