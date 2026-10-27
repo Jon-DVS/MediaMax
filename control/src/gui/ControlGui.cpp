@@ -45,6 +45,10 @@ const ImVec4 kBadColor = {0.9f, 0.35f, 0.35f, 1.0f};
 const ImVec4 kWarnColor = {1.0f, 0.8f, 0.3f, 1.0f};
 // The currently active scene's button (Scenes block).
 const ImVec4 kActiveSceneColor = {0.2f, 0.5f, 0.27f, 1.0f};
+// The scene buttons are the primary operator control on the Playback window;
+// a tall hit target is easier to press (especially on a touch panel) than the
+// default single-line button height.
+const float kSceneButtonHeight = 34.0f;
 
 // The modal dialogs are opened from several places (the menu bar, the show
 // editor) but must be Begun in one fixed context. In this Dear ImGui release
@@ -984,8 +988,25 @@ void ControlGuiApp::renderTransportBlock(const SystemConnection::Snapshot& snap)
     const std::string frameRate = st.value("frameRate", "?");
     const Id sceneId = static_cast<Id>(st.value("scene", 0u));
 
-    ImGui::Text("State: %s     %s     %s fps     scene %u", state.c_str(), timecode.c_str(),
-                frameRate.c_str(), sceneId);
+    // Current scene: the id plus its name (looked up from scene.list), so
+    // the operator sees what is playing, not just a number. With several
+    // scenes active at once this is the engine's primary scene; the full
+    // active set is visible (highlighted) in the Scenes block below.
+    std::string sceneLabel = "scene " + std::to_string(sceneId);
+    if (sceneId != kInvalidId && snap.scenes.contains("scenes") && snap.scenes["scenes"].is_array())
+    {
+        for (const auto& s : snap.scenes["scenes"])
+        {
+            if (s.is_object() && s.value("id", 0u) == sceneId)
+            {
+                sceneLabel += " " + s.value("name", std::string());
+                break;
+            }
+        }
+    }
+
+    ImGui::Text("State: %s     %s     %s fps     %s", state.c_str(), timecode.c_str(),
+                frameRate.c_str(), sceneLabel.c_str());
     if (duration < 0.0)
     {
         ImGui::SameLine();
@@ -1090,7 +1111,7 @@ void ControlGuiApp::renderScenesBlock(const SystemConnection::Snapshot& snap)
             {
                 ImGui::PushStyleColor(ImGuiCol_Button, kActiveSceneColor);
             }
-            if (ImGui::Button(label.c_str(), ImVec2(-FLT_MAX, 0.0f)))
+            if (ImGui::Button(label.c_str(), ImVec2(-FLT_MAX, kSceneButtonHeight)))
             {
                 std::string error;
                 sendActive("scene.toggle", {{"index", i}}, error);
@@ -1108,7 +1129,7 @@ void ControlGuiApp::renderScenesBlock(const SystemConnection::Snapshot& snap)
         }
         ImGui::EndTable();
     }
-    if (ImGui::Button("Return to timeline (scene.clear)", ImVec2(-FLT_MAX, 0.0f)))
+    if (ImGui::Button("Return to timeline (scene.clear)", ImVec2(-FLT_MAX, kSceneButtonHeight)))
     {
         std::string error;
         sendActive("scene.clear", json::object(), error);
