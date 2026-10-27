@@ -156,10 +156,21 @@ clamped to its in/out points, with loop/hold-at-end semantics.
 
 `DisplayManager` owns the display list: each display is a rectangle
 (`x, y, width, height`) in the shared **output space** (pixels, origin
-top-left) plus brightness and enabled flag. The union of display rectangles
-is the scene size the renderer targets. `WarpMap` converts a user grid of
-points into the dense RG8 warp texture the GPU display pass samples (see
-below).
+top-left) plus brightness, enabled flag and the `statusOverlay` toggle. The
+union of display rectangles is the scene size the renderer targets.
+`WarpMap` converts a user grid of points into the dense RG8 warp texture the
+GPU display pass samples (see below).
+
+### `overlay/` — status overlay text
+
+`overlay::renderText` rasterizes ASCII text (a built-in 5x7 bitmap font,
+ASCII 32..126) into a tightly packed RGBA8 buffer: white glyphs on
+transparent, straight alpha, integer pixel scale, `\n` lines. Pure data +
+CPU pixels (no GPU, no window), so the whole font + layout is unit-testable.
+The playback app calls it once per frame for each display with
+`statusOverlay` set, pastes the result into a fixed canvas and uploads it
+through the scene renderer's overlay texture pool; the display pass blends
+it on top (see above).
 
 ## Render library (`render/`)
 
@@ -186,10 +197,10 @@ The renderer is a **pure recorder**: `recordFrame(cmd, frame)` records one
 full frame into a caller-owned command list (it never submits; the host
 owns the queue). Per frame:
 
-1. **Flush queued texture uploads** — the texture pool (media + warp
-   textures) is updated by the media pump thread through a lock-guarded
-   queue; the render thread applies the pending uploads at the start of
-   recording.
+1. **Flush queued texture uploads** — the texture pool (media, warp and
+   status-overlay textures) is updated by the media pump thread and the
+   render thread through a lock-guarded queue; the render thread applies the
+   pending uploads at the start of recording.
 2. **Clear both ping-pong scene targets** to premultiplied `(0,0,0,1)`.
    (NVRHI render passes always use `loadOp = LOAD`, so anything a layer quad
    does not cover keeps the previous content — both targets must be
@@ -207,8 +218,11 @@ owns the queue). Per frame:
    offscreen target for the self-test): samples the final scene at the
    display's output-space rectangle, applies the dense warp texture when
    present (`useWarp`), brightness, and **unpremultiplies** for the window
-   (`display.frag`, push constants `DisplayPush`). Swapchain images are
-   transitioned back to `Present` before submit.
+   (`display.frag`, push constants `DisplayPush`). When the display has a
+   status overlay texture (`useOverlay`), the same draw also src-over
+   blends it screen-aligned on top (display-local UV, no warp: it is display
+   UI, not scene content). Swapchain images are transitioned back to
+   `Present` before submit.
 
 Ping-pong invariant: after N layers, the final scene is in
 `m_SceneRT[N % 2]` (`m_FinalSceneIndex`); `readBackScene` (offscreen

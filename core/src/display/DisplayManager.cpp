@@ -91,6 +91,17 @@ bool DisplayManager::setDisplayEnabled(Id id, bool enabled)
     return true;
 }
 
+bool DisplayManager::setDisplayStatusOverlay(Id id, bool statusOverlay)
+{
+    auto display = find(id);
+    if (!display)
+    {
+        return false;
+    }
+    (*display)->statusOverlay = statusOverlay;
+    return true;
+}
+
 Rect2i DisplayManager::outputBounds() const
 {
     Rect2i bounds;

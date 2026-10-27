@@ -1299,7 +1299,7 @@ void ControlGuiApp::renderDisplaysBlock(const SystemConnection::Snapshot& snap)
     // snapshot (always the engine's current state). Editing happens in the
     // "Display settings" dialog (Edit...) and the warp in its own dialog
     // (Warp...).
-    if (ImGui::BeginTable("displays", 9,
+    if (ImGui::BeginTable("displays", 10,
                           ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_BordersOuter))
     {
         ImGui::TableSetupColumn("##id", ImGuiTableColumnFlags_WidthFixed, 34.0f);
@@ -1310,6 +1310,7 @@ void ControlGuiApp::renderDisplaysBlock(const SystemConnection::Snapshot& snap)
         ImGui::TableSetupColumn("h", ImGuiTableColumnFlags_WidthFixed, 56.0f);
         ImGui::TableSetupColumn("brightness", ImGuiTableColumnFlags_WidthFixed, 64.0f);
         ImGui::TableSetupColumn("##enabled", ImGuiTableColumnFlags_WidthFixed, 48.0f);
+        ImGui::TableSetupColumn("overlay", ImGuiTableColumnFlags_WidthFixed, 62.0f);
         ImGui::TableSetupColumn("##actions", ImGuiTableColumnFlags_WidthFixed, 196.0f);
         for (const auto& d : displays)
         {
@@ -1339,6 +1340,17 @@ void ControlGuiApp::renderDisplaysBlock(const SystemConnection::Snapshot& snap)
             else
             {
                 ImGui::TextDisabled("off");
+            }
+            ImGui::TableNextColumn();
+            // Per-display status overlay (system IP, display name/number,
+            // measured fps, resolution and frame timing drawn by the engine;
+            // core overlay/StatusOverlay). State comes from the snapshot, so
+            // a failed command simply snaps back on the next poll.
+            bool overlayOn = d.value("statusOverlay", false);
+            if (ImGui::Checkbox(("##overlaydisp" + std::to_string(id)).c_str(), &overlayOn))
+            {
+                std::string error;
+                sendActive("display.set", {{"display", id}, {"statusOverlay", overlayOn}}, error);
             }
             ImGui::TableNextColumn();
             if (ImGui::Button(("Edit##editdisp" + std::to_string(id)).c_str()))

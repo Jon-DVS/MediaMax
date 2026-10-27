@@ -2,11 +2,14 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <fstream>
 
+#include "LocalAddress.h"
 #include "WindowSurface.h"
 #include "mediamax/media/FFmpegSupport.h"
+#include "mediamax/overlay/StatusOverlay.h"
 #include "mediamax/show/Show.h"
 #include "mediamax/util/Logger.h"
 
@@ -88,6 +91,10 @@ int PlaybackApp::run()
         std::lock_guard lock(m_StateMutex);
         m_Scene.setSceneSize(m_Displays.outputBounds().size());
     }
+
+    // System IP for the status overlay (and future system-info UI).
+    m_SystemIp = localIpAddress();
+    log.info("system IP: {}", m_SystemIp);
 
     // Auto-play the startup show (under the state mutex: the control server
     // is already serving commands by this point).
@@ -248,6 +255,13 @@ bool PlaybackApp::initVulkan()
         {
             log.error("scene renderer creation failed: {}", error);
             return false;
+        }
+        // Frame timing for the status overlay (GPU ms). Optional: without a
+        // timer query the overlay simply reports 0.
+        m_FrameQuery = m_Vulkan->nvrhiDevice()->createTimerQuery();
+        if (!m_FrameQuery)
+        {
+            log.warning("timer query unavailable: the status overlay will report 0 ms GPU time");
         }
     }
 
@@ -517,6 +531,7 @@ void PlaybackApp::removeSurfaceForDisplay(Id displayId)
     // display's images can never match a stale entry.
     m_Scene.invalidateDisplayFramebufferCache();
     m_Scene.removeWarpTexture(displayId);
+    m_Scene.removeOverlayTexture(displayId);
     Logger::instance().info("display.remove: display {} offline", displayId);
 }
 
@@ -645,6 +660,21 @@ void PlaybackApp::renderFrame(const FrameSnapshot& snap)
         return;
     }
 
+    // Measured frame rate (EMA of the renderFrame cadence) for the status
+    // overlay; 0 until the second frame.
+    const auto frameNow = std::chrono::steady_clock::now();
+    if (m_HaveLastFrameTime)
+    {
+        const double period = std::chrono::duration<double>(frameNow - m_LastFrameTime).count();
+        if (period > 1e-4)
+        {
+            const double inst = 1.0 / period;
+            m_FrameFps = m_FrameFps == 0.0 ? inst : 0.9 * m_FrameFps + 0.1 * inst;
+        }
+    }
+    m_LastFrameTime = frameNow;
+    m_HaveLastFrameTime = true;
+
     handleWindowResizes();
     if (snap.sceneSize.valid() && snap.sceneSize != m_Scene.sceneSize())
     {
@@ -672,6 +702,14 @@ void PlaybackApp::renderFrame(const FrameSnapshot& snap)
             }
             ds.fencePending = false;
         }
+    }
+
+    // The previous frame's GPU work is done now (step 1): its timer result
+    // is readable, and the query can be re-armed for the current frame
+    // (single-flight model, see the m_FrameQuery comment in PlaybackApp.h).
+    if (m_FrameQuery && device->pollTimerQuery(m_FrameQuery.Get()))
+    {
+        m_GpuFrameMs = device->getTimerQueryTime(m_FrameQuery.Get());
     }
 
     // 2. Acquire back buffers synchronously and start state tracking.
@@ -731,10 +769,30 @@ void PlaybackApp::renderFrame(const FrameSnapshot& snap)
             updateWarpTexture(*ds, *display);
             target.warp = m_Scene.warpTexture(display->id).Get();
         }
+        if (display->statusOverlay)
+        {
+            updateStatusOverlay(*ds, *display);
+            target.overlay = m_Scene.overlayTexture(display->id).Get();
+        }
         frame.displays.push_back(std::move(target));
     }
 
+    // The timer query brackets the whole render (layer + display passes), so
+    // its result is the GPU "ms to draw the frame" shown by the overlay.
+    // Begin after the empty-present early return: an un-ended query would
+    // leave the pool reset and its next result invalid.
+    const auto cpuStart = std::chrono::steady_clock::now();
+    if (m_FrameQuery)
+    {
+        cmdList->beginTimerQuery(m_FrameQuery.Get());
+    }
     m_Scene.recordFrame(cmdList.Get(), frame);
+    if (m_FrameQuery)
+    {
+        cmdList->endTimerQuery(m_FrameQuery.Get());
+    }
+    m_CpuFrameMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - cpuStart)
+                       .count();
     cmdList->close();
 
     // 4. Submit the render, then an empty submit per display that signals the
@@ -773,6 +831,59 @@ void PlaybackApp::updateWarpTexture(DisplaySurface& ds, const Display& display)
     std::vector<unsigned char> data;
     display.warp.buildDenseTexture(data, static_cast<int>(kWarpTextureSize));
     m_Scene.updateWarpTexture(display.id, data);
+}
+
+void PlaybackApp::updateStatusOverlay(DisplaySurface& ds, const Display& display)
+{
+    // Canvas: 512 px wide; the height follows the display aspect so the
+    // display pass's stretch to the whole window scales the glyphs
+    // uniformly (no distortion). The text is left/top aligned within the
+    // canvas (see overlay::renderText).
+    constexpr std::uint32_t kOverlayWidth = 512;
+    constexpr std::uint32_t kOverlayMaxHeight = 512;
+    std::uint32_t ch = 128;
+    if (ds.width > 0 && ds.height > 0)
+    {
+        ch = static_cast<std::uint32_t>(
+            std::llround(static_cast<double>(kOverlayWidth) * ds.height / ds.width));
+        // At least four lines at scale 2 (64 px), at most a square canvas.
+        ch = std::min<std::uint32_t>(std::max<std::uint32_t>(ch, 96), kOverlayMaxHeight);
+    }
+    // Four lines are 4 * (7 + 1) * scale px tall: 96 px at scale 3, 64 px
+    // at scale 2.
+    const int scale = (ch < 100) ? 2 : 3;
+
+    char line3[80];
+    char line4[80];
+    std::snprintf(line3, sizeof(line3), "%.1f fps  %dx%d", m_FrameFps, ds.width, ds.height);
+    std::snprintf(line4, sizeof(line4), "frame %.2f ms  gpu %.2f ms", m_CpuFrameMs, m_GpuFrameMs);
+
+    std::string text;
+    text.reserve(192);
+    text += "System " + m_SystemIp + "\n";
+    text += "Display " + display.name + " (" + std::to_string(display.id) + ")\n";
+    text += std::string(line3) + "\n";
+    text += line4;
+
+    std::vector<std::uint8_t> glyphRgba;
+    std::uint32_t gw = 0, gh = 0;
+    std::string error;
+    if (!overlay::renderText(text, scale, glyphRgba, gw, gh, error) || gw == 0 || gh == 0)
+    {
+        return;
+    }
+
+    m_Scene.ensureOverlayTexture(display.id, kOverlayWidth, ch);
+    // Paste the tight text bitmap into a transparent canvas (the pool
+    // texture keeps one fixed size per display; the text length changes
+    // with the numbers, not the canvas).
+    std::vector<std::uint8_t> canvas(static_cast<size_t>(kOverlayWidth) * ch * 4, 0);
+    for (std::uint32_t y = 0; y < gh && y < ch; ++y)
+    {
+        std::copy_n(glyphRgba.data() + static_cast<size_t>(y) * gw * 4, gw * 4,
+                    canvas.data() + static_cast<size_t>(y) * kOverlayWidth * 4);
+    }
+    m_Scene.updateOverlayTexture(display.id, canvas);
 }
 
 void PlaybackApp::pollWindowEvents()

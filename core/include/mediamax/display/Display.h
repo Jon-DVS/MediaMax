@@ -31,6 +31,11 @@ struct Display
 
     bool enabled = true;
 
+    // When true the playback engine draws a status overlay (system IP,
+    // display name/number, measured frame rate, resolution and frame
+    // timing) over this output. Off by default; see overlay/StatusOverlay.
+    bool statusOverlay = false;
+
     Rect2i rect() const { return Rect2i(x, y, width, height); }
     bool valid() const { return width > 0 && height > 0; }
 };

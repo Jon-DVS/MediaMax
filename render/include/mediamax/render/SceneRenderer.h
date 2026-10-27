@@ -14,7 +14,9 @@
 //   - The display pass draws one full-window quad per display: it samples
 //     the final scene at the display's output-space rectangle, applies the
 //     projection warp (dense RG8 warp texture) and brightness, and
-//     unpremultiplies for the window.
+//     unpremultiplies for the window. When the display carries a status
+//     overlay texture (straight-alpha RGBA8, see core overlay/StatusOverlay),
+//     the pass src-over blends it screen-aligned on top (no warp).
 //
 // The renderer is a pure recorder: it only records commands into a command
 // list owned by the host (and flushes queued texture uploads into it). The
@@ -85,6 +87,13 @@ public:
     void removeWarpTexture(Id displayId);
     nvrhi::TextureHandle warpTexture(Id displayId) const;
 
+    // Same pool for per-display status overlay textures (RGBA8, straight
+    // alpha; the text is rasterized by core/src/overlay/StatusOverlay.cpp).
+    void ensureOverlayTexture(Id displayId, std::uint32_t width, std::uint32_t height);
+    void updateOverlayTexture(Id displayId, const std::vector<std::uint8_t>& rgbaData);
+    void removeOverlayTexture(Id displayId);
+    nvrhi::TextureHandle overlayTexture(Id displayId) const;
+
     // --- Display pass --------------------------------------------------------
 
     // (Re)creates the display pipeline for the given target format (the
@@ -117,6 +126,9 @@ public:
         nvrhi::ITexture* image = nullptr; // swapchain image (or offscreen RT)
         Rect2i rect; // the display's rectangle in output space
         nvrhi::ITexture* warp = nullptr; // null for identity warp
+        // Status overlay texture (straight-alpha RGBA8); null = no overlay.
+        // Drawn screen-aligned on top of the unwarped scene output.
+        nvrhi::ITexture* overlay = nullptr;
         float brightness = 1.f;
         // True for swapchain images: transitions the image back to the
         // Present state at the end of the pass (required for the present).
@@ -160,7 +172,7 @@ public:
         float sceneSizeX, sceneSizeY;
         float brightness;
         int useWarp;
-        float pad;
+        int useOverlay;
     };
     static_assert(sizeof(DisplayPush) == 36);
 
@@ -200,6 +212,7 @@ private:
     nvrhi::ShaderHandle m_DisplayVS;
     nvrhi::ShaderHandle m_DisplayFS;
     nvrhi::TextureHandle m_WhiteTexture; // 1x1 white (color layers, null warp)
+    nvrhi::TextureHandle m_TransparentTexture; // 1x1 transparent (null overlay)
     nvrhi::BufferHandle m_VertexBuffer;
     std::vector<float> m_VertexData; // current frame's vertices (vec2 pos, vec2 uv)
 
@@ -215,14 +228,21 @@ private:
     };
     std::map<Id, PooledTexture> m_MediaTextures;
     std::map<Id, PooledTexture> m_WarpTextures;
+    std::map<Id, PooledTexture> m_OverlayTextures;
 
     // Queued uploads (applied inside recordFrame on the render thread).
     // The pixel data is shared (multiple queued entries for the same frame
     // size can alias one allocation) and const: the GPU upload only reads it.
     struct PendingUpload
     {
+        enum class Kind : std::uint8_t
+        {
+            Media,
+            Warp,
+            Overlay,
+        };
         Id id;
-        bool isWarp;
+        Kind kind = Kind::Media;
         std::shared_ptr<const std::vector<std::uint8_t>> data;
     };
     mutable std::mutex m_UploadMutex;

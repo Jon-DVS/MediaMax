@@ -30,6 +30,20 @@ TEST_CASE("Output bounds cover the whole wall")
     CHECK(bounds == Rect2i(0, 0, 3840, 2160));
 }
 
+TEST_CASE("The status overlay flag is per display, off by default")
+{
+    DisplayManager mgr;
+    const auto a = mgr.addDisplay("a", 0, 0, 100, 100);
+    const auto b = mgr.addDisplay("b", 500, 0, 100, 100);
+    CHECK((*mgr.find(a.id))->statusOverlay == false);
+    CHECK((*mgr.find(b.id))->statusOverlay == false);
+
+    CHECK(mgr.setDisplayStatusOverlay(a.id, true));
+    CHECK((*mgr.find(a.id))->statusOverlay == true);
+    CHECK((*mgr.find(b.id))->statusOverlay == false);
+    CHECK_FALSE(mgr.setDisplayStatusOverlay(42, true));
+}
+
 TEST_CASE("Disabled displays do not contribute to bounds")
 {
     DisplayManager mgr;

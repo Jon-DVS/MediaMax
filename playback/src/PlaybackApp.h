@@ -26,6 +26,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -132,6 +133,11 @@ private:
     std::vector<render::SceneRenderer::LayerDraw> buildLayerDraws(const FrameSnapshot& snap);
     void renderFrame(const FrameSnapshot& snap);
     void updateWarpTexture(DisplaySurface& ds, const Display& display);
+    // Rasterizes the status text (system IP, display name/number, measured
+    // fps, resolution, CPU/GPU frame time) and uploads it to the scene
+    // renderer's per-display overlay pool (core overlay/StatusOverlay.h).
+    // Called once per frame for each display with statusOverlay set.
+    void updateStatusOverlay(DisplaySurface& ds, const Display& display);
     void pollWindowEvents();
 
     // --- Control protocol -------------------------------------------------------
@@ -164,6 +170,23 @@ private:
     render::SceneRenderer m_Scene;
     std::vector<std::unique_ptr<DisplaySurface>> m_Surfaces;
     std::vector<const char*> m_InstanceExtensions;
+
+    // --- Status overlay (render thread) ---------------------------------------------
+
+    // GPU time of the whole frame (NVRHI timer query recorded around
+    // recordFrame). The single-flight model (step 1 of renderFrame waits the
+    // previous frame's fence) makes the result readable before the query is
+    // re-armed for the current frame.
+    nvrhi::TimerQueryHandle m_FrameQuery;
+    double m_GpuFrameMs = 0.0;  // previous frame's GPU time
+    double m_CpuFrameMs = 0.0;  // previous frame's recordFrame wall time
+    // Exponential moving average of the measured frame period (renderFrame
+    // cadence); 0 until the second frame.
+    double m_FrameFps = 0.0;
+    std::chrono::steady_clock::time_point m_LastFrameTime{};
+    bool m_HaveLastFrameTime = false;
+    // This system's IPv4 (gethostname/getaddrinfo, computed once in run()).
+    std::string m_SystemIp;
 
     // --- Pump / audio (own locks) -------------------------------------------------
 

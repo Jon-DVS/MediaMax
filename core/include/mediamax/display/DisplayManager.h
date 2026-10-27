@@ -38,6 +38,7 @@ public:
                             std::int32_t height);
     bool setDisplayBrightness(Id id, float brightness);
     bool setDisplayEnabled(Id id, bool enabled);
+    bool setDisplayStatusOverlay(Id id, bool statusOverlay);
 
     // Union of all enabled display rectangles. Zero rect when no displays are
     // enabled.

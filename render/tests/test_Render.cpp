@@ -462,7 +462,7 @@ TEST_CASE("Display pass copies the scene to a target")
         SceneRenderer::FrameInput frame;
         frame.layers.push_back(colorLayer(Color4{0.2f, 0.4f, 0.8f, 1.f}));
         frame.displays.push_back(SceneRenderer::DisplayTarget{
-            target.Get(), Rect2i{0, 0, 256, 256}, nullptr, 1.f, false});
+            target.Get(), Rect2i{0, 0, 256, 256}, nullptr, nullptr, 1.f, false});
 
         renderOneFrame(g.renderer, frame);
 
@@ -486,7 +486,7 @@ TEST_CASE("Display brightness scales the output")
         SceneRenderer::FrameInput frame;
         frame.layers.push_back(colorLayer(Color4{1.f, 1.f, 1.f, 1.f}));
         frame.displays.push_back(SceneRenderer::DisplayTarget{
-            target.Get(), Rect2i{0, 0, 256, 256}, nullptr, 0.5f, false});
+            target.Get(), Rect2i{0, 0, 256, 256}, nullptr, nullptr, 0.5f, false});
 
         renderOneFrame(g.renderer, frame);
 
@@ -519,7 +519,7 @@ TEST_CASE("Display pass with identity warp texture")
         SceneRenderer::FrameInput frame;
         frame.layers.push_back(colorLayer(Color4{0.3f, 0.6f, 0.9f, 1.f}));
         frame.displays.push_back(SceneRenderer::DisplayTarget{
-            target.Get(), Rect2i{0, 0, 256, 256}, warpTex.Get(), 1.f, false});
+            target.Get(), Rect2i{0, 0, 256, 256}, warpTex.Get(), nullptr, 1.f, false});
 
         renderOneFrame(g.renderer, frame);
 
@@ -530,6 +530,56 @@ TEST_CASE("Display pass with identity warp texture")
         checkClose("r", p.r, 0.3f, 2);
         checkClose("g", p.g, 0.6f, 2);
         checkClose("b", p.b, 0.9f, 2);
+    });
+}
+
+TEST_CASE("Display pass blends the status overlay on top")
+{
+    runGpuTest("overlay", [](Gpu& g) {
+        auto target = makeOffscreenTarget(g.context.nvrhiDevice(), 256, 256);
+        std::string error;
+        REQUIRE(g.renderer.ensureDisplayPipeline(nvrhi::Format::RGBA8_UNORM, error));
+
+        // 64x32 overlay: opaque red block in the top-left quarter (uv
+        // 0..0.5 x 0..0.5 => screen pixels 0..128), transparent elsewhere.
+        const std::uint32_t ow = 64, oh = 32;
+        std::vector<std::uint8_t> ovData(ow * oh * 4, 0);
+        for (std::uint32_t y = 0; y < oh / 2; ++y)
+        {
+            for (std::uint32_t x = 0; x < ow / 2; ++x)
+            {
+                std::uint8_t* px = ovData.data() + (static_cast<size_t>(y) * ow + x) * 4;
+                px[0] = 255;
+                px[3] = 255;
+            }
+        }
+        const Id displayId = 42;
+        g.renderer.ensureOverlayTexture(displayId, ow, oh);
+        g.renderer.updateOverlayTexture(displayId, ovData);
+        auto overlayTex = g.renderer.overlayTexture(displayId);
+        REQUIRE(overlayTex != nullptr);
+
+        SceneRenderer::FrameInput frame;
+        frame.layers.push_back(colorLayer(Color4{0.2f, 0.4f, 0.8f, 1.f}));
+        frame.displays.push_back(SceneRenderer::DisplayTarget{
+            target.Get(), Rect2i{0, 0, 256, 256}, nullptr, overlayTex.Get(), 1.f, false});
+
+        renderOneFrame(g.renderer, frame);
+
+        std::vector<std::uint8_t> rgba;
+        REQUIRE(readBackTexture(g.context.nvrhiDevice(), target, rgba));
+        // Under the opaque overlay block: the overlay color, not the scene.
+        const Pixel under = pixelAt(rgba, 256, 32, 32);
+        checkClose("r under", under.r, 1.f, 2);
+        checkClose("g under", under.g, 0.f, 2);
+        checkClose("b under", under.b, 0.f, 2);
+        // Outside the inked block (right of the overlay's 0.5 uv edge):
+        // the scene shows through the transparent overlay.
+        const Pixel through = pixelAt(rgba, 256, 200, 50);
+        checkClose("r through", through.r, 0.2f);
+        checkClose("g through", through.g, 0.4f);
+        checkClose("b through", through.b, 0.8f);
+        CHECK(through.a == 255);
     });
 }
 

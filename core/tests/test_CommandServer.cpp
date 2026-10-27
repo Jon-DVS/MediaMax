@@ -599,6 +599,26 @@ TEST_CASE("display.set updates geometry, brightness and enabled state")
     CHECK_FALSE(f.run("display.set", {{"display", 999}, {"brightness", 1.0}}).ok);
 }
 
+TEST_CASE("display.set toggles the status overlay")
+{
+    Fixture f;
+    // Off by default; the field is present in display records (additive).
+    const Response list = f.run("display.list", {});
+    REQUIRE(list.ok);
+    CHECK(list.result.at("displays").at(0).at("statusOverlay").get<bool>() == false);
+
+    const Response on = f.run("display.set", {{"display", f.displayA}, {"statusOverlay", true}});
+    REQUIRE(on.ok);
+    CHECK(on.result.at("statusOverlay").get<bool>() == true);
+    const auto updated = f.displays.find(f.displayA);
+    REQUIRE(updated.has_value());
+    CHECK((*updated)->statusOverlay == true);
+
+    const Response off = f.run("display.set", {{"display", f.displayA}, {"statusOverlay", false}});
+    REQUIRE(off.ok);
+    CHECK(off.result.at("statusOverlay").get<bool>() == false);
+}
+
 TEST_CASE("display.warp.set installs a warp grid")
 {
     Fixture f;

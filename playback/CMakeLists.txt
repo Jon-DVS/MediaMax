@@ -7,6 +7,7 @@
 set(MEDIAMAX_PLAYBACK_SOURCES
     src/main.cpp
     src/Arguments.cpp
+    src/LocalAddress.cpp
     src/MediaPump.cpp
     src/AudioSink.cpp
     src/PlaybackApp.cpp
