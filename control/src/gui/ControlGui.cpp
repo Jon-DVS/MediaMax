@@ -61,6 +61,17 @@ const ImVec4 kActiveSceneColor = {0.2f, 0.5f, 0.27f, 1.0f};
 //   popup id = ImHashStr(name, 0, host id)      (window->GetID(name))
 constexpr const char* kModalHostName = "##modalhost";
 
+// Modal dialogs open at a comfortable size: BeginPopupModal() would
+// otherwise size the window to the content's *ideal* width, which for
+// wrapped text and input fields leaves the dialog barely usable (the
+// "dialogs open too small" complaint). The caller passes the width that
+// fits the dialog's content; the height stays ideal (0) and the window
+// remains user-resizable, so this only fixes the starting size.
+void modalStartSize(float width)
+{
+    ImGui::SetNextWindowSize(ImVec2(width, 0.0f), ImGuiCond_Appearing);
+}
+
 // Keys of the two ImGuiFileDialog dialogs (one shared instance, two
 // independent keys; only one is ever open at a time).
 constexpr const char* kOpenDialogKey = "OpenShow";
@@ -2369,6 +2380,7 @@ void ControlGuiApp::renderModals()
 {
     if (m_PullModal)
     {
+        modalStartSize(460.0f);
         if (ImGui::BeginPopupModal("Pull show from system", &m_PullModal))
         {
             ImGui::TextWrapped(
@@ -2394,6 +2406,7 @@ void ControlGuiApp::renderModals()
     }
     if (m_AboutModal)
     {
+        modalStartSize(460.0f);
         if (ImGui::BeginPopupModal("About MediaMax Control", &m_AboutModal))
         {
             ImGui::Text("MediaMax control interface  (version %s)", MEDIAMAX_VERSION);
@@ -2414,6 +2427,7 @@ void ControlGuiApp::renderModals()
     }
     if (m_MoveModal)
     {
+        modalStartSize(500.0f);
         if (ImGui::BeginPopupModal("Move display to system...", &m_MoveModal))
         {
             const std::string sourceName =
@@ -2518,6 +2532,7 @@ void ControlGuiApp::renderModals()
     }
     if (m_EditModal)
     {
+        modalStartSize(420.0f);
         if (ImGui::BeginPopupModal("Display settings", &m_EditModal))
         {
             if (m_EditTarget && m_EditDisplayId != kInvalidId)
@@ -2585,6 +2600,7 @@ void ControlGuiApp::renderModals()
     }
     if (m_WarpModal)
     {
+        modalStartSize(560.0f);
         if (ImGui::BeginPopupModal("Projection warp", &m_WarpModal))
         {
             if (m_WarpTarget && m_WarpDisplayId != kInvalidId)
