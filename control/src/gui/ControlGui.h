@@ -99,6 +99,15 @@ public:
     // dialog (issue 14): a freshly connected system's first status poll
     // lands ~500 ms after connect and can still be in flight.
     bool testActiveHasDisplay() const;
+    // Sets the Display settings dialog's name field (the same state the
+    // dialog's Name input edits) - the live self-test's rename checks
+    // (issue 15).
+    void testSetDisplayEditName(const std::string& name);
+    // True when the active system's snapshot reports a display with the
+    // given id - the live self-test waits for the moved display to show
+    // up before reopening the dialog (the snapshot polls every 500 ms, so
+    // right after a move it can still list the removed record).
+    bool testActiveSnapshotHasDisplay(Id displayId) const;
     // The Display settings dialog's current error line (empty when healthy);
     // the live self-test's move check reports it on failure.
     std::string testGetDisplayEditError() const { return m_EditError; }
@@ -337,6 +346,7 @@ private:
         float brightness = 1.0f;
         bool enabled = true;
         std::string name; // carried through a move (display.add takes a name)
+        std::string monitor; // physical output (read-only in the dialog)
     };
     std::map<Id, DisplayEdit> m_DisplayEdits;
 

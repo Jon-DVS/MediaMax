@@ -920,14 +920,16 @@ void ControlGuiApp::renderDisplaysWindow()
         ImGui::End();
         return;
     }
-    // Every display of every online system, with the system it is linked to.
-    // A display's settings dialog (Edit...) can relink it to another system
-    // (issue 14).
+    // Every display of every online system, with the system it is linked to
+    // and the physical output its window is on (issue 15). A display's
+    // settings dialog (Edit...) can relink it to another system (issue 14)
+    // and rename it.
     int shown = 0;
-    if (ImGui::BeginTable("alldisplays", 7,
+    if (ImGui::BeginTable("alldisplays", 8,
                           ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_BordersOuter))
     {
         ImGui::TableSetupColumn("system");
+        ImGui::TableSetupColumn("output");
         ImGui::TableSetupColumn("display");
         ImGui::TableSetupColumn("##id", ImGuiTableColumnFlags_WidthFixed, 32.0f);
         ImGui::TableSetupColumn("x", ImGuiTableColumnFlags_WidthFixed, 52.0f);
@@ -945,9 +947,12 @@ void ControlGuiApp::renderDisplaysWindow()
             for (const auto& d : snap.status["displays"])
             {
                 const std::string name = d.value("name", "display");
+                const std::string output = d.value("monitor", "");
                 ImGui::TableNextRow();
                 ImGui::TableNextColumn();
                 ImGui::TextUnformatted(m_Systems[i]->name().c_str());
+                ImGui::TableNextColumn();
+                ImGui::TextUnformatted(output.empty() ? "off-screen" : output.c_str());
                 ImGui::TableNextColumn();
                 ImGui::TextUnformatted(name.c_str());
                 ImGui::TableNextColumn();
@@ -1314,6 +1319,7 @@ void ControlGuiApp::openDisplayEdit(const json& display, SystemConnection* targe
     de.brightness = static_cast<float>(display.value("brightness", 1.0));
     de.enabled = display.value("enabled", true);
     de.name = display.value("name", "");
+    de.monitor = display.value("monitor", "");
     m_EditTarget = target;
     m_EditDisplayId = id;
     // The System dropdown starts on the system the display is linked to.
@@ -1397,7 +1403,8 @@ bool ControlGuiApp::applyDisplayEdit()
     }
 
     if (!target->send("display.set",
-                      {{"display", m_EditDisplayId}, {"x", de.x}, {"y", de.y},
+                      {{"display", m_EditDisplayId}, {"name", de.name},
+                       {"x", de.x}, {"y", de.y},
                        {"width", de.width}, {"height", de.height},
                        {"brightness", de.brightness}, {"enabled", de.enabled}},
                       result, error))
@@ -2694,7 +2701,13 @@ void ControlGuiApp::renderModals()
             if (m_EditTarget && m_EditDisplayId != kInvalidId)
             {
                 DisplayEdit& de = m_DisplayEdits[m_EditDisplayId];
+                // Where this display lives: the system it is linked to and
+                // the physical output its window is on (issue 15).
                 ImGui::Text("Display %u on %s", m_EditDisplayId, m_EditTarget->name().c_str());
+                ImGui::TextDisabled("Physical output: %s",
+                                     de.monitor.empty() ? "unknown" : de.monitor.c_str());
+                ImGui::Spacing();
+                ImGui::InputText("Name##editname", &de.name);
                 ImGui::Spacing();
                 // The system this display is linked to (issue 14): picking
                 // a different system and pressing Apply moves the display
@@ -3265,6 +3278,39 @@ bool ControlGuiApp::testActiveHasDisplay() const
     }
     const auto snap = active->snapshot();
     return snap.haveStatus && snap.status.contains("displays") && !snap.status["displays"].empty();
+}
+
+void ControlGuiApp::testSetDisplayEditName(const std::string& name)
+{
+    // The dialog's Name input edits this field; guard the stale-target case
+    // (no display selected).
+    if (m_EditDisplayId != kInvalidId)
+    {
+        m_DisplayEdits[m_EditDisplayId].name = name;
+    }
+}
+
+bool ControlGuiApp::testActiveSnapshotHasDisplay(Id displayId) const
+{
+    const SystemConnection* active = activeConnection();
+    if (active == nullptr)
+    {
+        return false;
+    }
+    const auto snap = active->snapshot();
+    if (!snap.haveStatus || !snap.status.contains("displays") ||
+        !snap.status["displays"].is_array())
+    {
+        return false;
+    }
+    for (const auto& d : snap.status["displays"])
+    {
+        if (d.value("id", 0u) == displayId)
+        {
+            return true;
+        }
+    }
+    return false;
 }
 
 // --- self test ---------------------------------------------------------------------------

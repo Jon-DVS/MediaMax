@@ -91,6 +91,11 @@ private:
         std::int32_t appliedX = 0, appliedY = 0, appliedW = 0, appliedH = 0;
         int applyGraceFrames = 0;
 
+        // The monitor the window is on (the record's physical output), for
+        // cheap change detection when the window is dragged to another
+        // output. GLFW owns the monitor.
+        GLFWmonitor* lastMonitor = nullptr;
+
         // Last warp offsets uploaded (cheap change detection).
         std::vector<std::array<float, 2>> lastWarpOffsets;
     };

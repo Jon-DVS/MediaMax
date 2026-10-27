@@ -536,16 +536,21 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
         liveOk = liveOk && clearArrived;
     }
 
-    // 4c) Display system dropdown (issue 14): the Display settings dialog
-    //     relinks a display to another system - Apply with a different
-    //     selection moves it (display.add + display.set on the target,
-    //     display.remove on the source). Open the dialog on the engine's
-    //     first display (it opened on the active system, self-test-2 after
-    //     4b), point the System dropdown at the other system, Apply, and
-    //     verify the engine holds the display under a fresh id (display
-    //     ids never repeat) with the same name, geometry and brightness.
+    // 4c) Display settings dialog (issues 14 + 15): the dialog's System
+    //     dropdown relinks a display to another system - Apply with a
+    //     different selection moves it (display.add + display.set on the
+    //     target, display.remove on the source) - and its Name field
+    //     renames it (display.set carries the name). Open the dialog on
+    //     the engine's first display (it opened on the active system,
+    //     self-test-2 after 4b), rename it, point the System dropdown at
+    //     the other system and Apply: verify the engine holds the display
+    //     under a fresh id (display ids never repeat) with the new name
+    //     and the same geometry and brightness. Then reopen the dialog on
+    //     the moved display, rename it back and Apply on its own system:
+    //     a plain display.set, no move.
     if (haveLiveSystem && !autoPushName.empty() && liveOk)
     {
+        const std::string movedName = "Self-test moved";
         SystemConnection listConn("self-test-displays", liveHost, livePort);
         nlohmann::json before;
         std::string listError;
@@ -556,8 +561,6 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
         const int beforeCount = haveDisplay ? static_cast<int>(before["displays"].size()) : 0;
         const std::uint64_t oldId =
             haveDisplay ? before["displays"][0].value("id", 0u) : 0u;
-        const std::string oldName =
-            haveDisplay ? before["displays"][0].value("name", "") : "";
         const int oldX = haveDisplay ? before["displays"][0].value("x", 0) : 0;
         const int oldY = haveDisplay ? before["displays"][0].value("y", 0) : 0;
         const int oldW = haveDisplay ? before["displays"][0].value("width", 0) : 0;
@@ -601,13 +604,17 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
         if (opened)
         {
             // The dialog opened on the active system (index 1, self-test-2);
-            // select the other one so Apply is a move, then press the
-            // dialog's Apply button (the exact action the UI runs).
+            // rename the display (issue 15) and select the other system so
+            // Apply is a move that carries the new name (display.add takes
+            // it), then press the dialog's Apply button (the exact action
+            // the UI runs).
+            app.testSetDisplayEditName(movedName);
             app.testSelectDisplayEditSystem(0);
             applied = app.testApplyDisplayEdit();
         }
 
         bool movedOk = false;
+        std::uint64_t newId = 0;
         nlohmann::json after;
         if (applied)
         {
@@ -624,12 +631,13 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
                     {
                         oldGone = false;
                     }
-                    if (d.value("id", 0u) != oldId && d.value("name", "") == oldName &&
+                    if (d.value("id", 0u) != oldId && d.value("name", "") == movedName &&
                         d.value("x", -1) == oldX && d.value("y", -1) == oldY &&
                         d.value("width", -1) == oldW && d.value("height", -1) == oldH &&
                         d.value("brightness", -1.0) == oldBrightness)
                     {
                         recreated = true;
+                        newId = d.value("id", 0u);
                     }
                 }
                 movedOk = oldGone && recreated;
@@ -637,7 +645,7 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
         }
         liveReport += std::string(movedOk ? "PASS " : "FAIL ") +
                       "display settings System dropdown moved the display (old id " +
-                      std::to_string(oldId) + " gone, name/geometry/brightness kept)" +
+                      std::to_string(oldId) + " gone, renamed, geometry/brightness kept)" +
                       (movedOk
                            ? std::string()
                            : "; " + app.testDescribeDisplayEdit() + " opened=" +
@@ -648,9 +656,106 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
                       "\n";
         liveOk = liveOk && movedOk;
 
-        // Close the dialog if the move path left it open (failure paths
-        // keep it open with the error line); a few frames let the popup
-        // tear down, as the modal loop above does.
+        // Same-system rename (issue 15): reopen the dialog - it opens on
+        // the active system's first display, now the moved one, with the
+        // dropdown on its owning system - rename it back and Apply: a
+        // plain display.set with the new name, no move.
+        bool renamedOk = false;
+        nlohmann::json after2;
+        if (movedOk)
+        {
+            // The active system's snapshot polls every 500 ms; wait until
+            // it reports the moved display, or the reopen could open on
+            // the stale (already removed) record.
+            bool snapHasNew = false;
+            const auto snap2Deadline =
+                std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            while (!snapHasNew && std::chrono::steady_clock::now() < snap2Deadline)
+            {
+                snapHasNew = app.testActiveSnapshotHasDisplay(static_cast<Id>(newId));
+                if (!snapHasNew)
+                {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+                }
+            }
+            if (snapHasNew)
+            {
+                app.testOpenModal("edit"); // deferred: the next frame opens it
+                bool opened2 = false;
+                for (int i = 0; i < 3 && !opened2; ++i)
+                {
+                    glfwPollEvents();
+                    if (runtime.renderFrame())
+                    {
+                        opened2 = app.testModalOpen("edit");
+                    }
+                }
+                if (opened2)
+                {
+                    app.testSetDisplayEditName("Display 1");
+                    const bool applied2 = app.testApplyDisplayEdit();
+                    std::string after2Error;
+                    if (applied2 &&
+                        listConn.send("display.list", nlohmann::json::object(), after2, after2Error) &&
+                        after2.contains("displays"))
+                    {
+                        for (const auto& d : after2["displays"])
+                        {
+                            if (d.value("id", 0u) == newId && d.value("name", "") == "Display 1")
+                            {
+                                renamedOk = true;
+                            }
+                        }
+                    }
+                }
+            }
+            liveReport += std::string(renamedOk ? "PASS " : "FAIL ") +
+                          "display settings Name field renamed the display in place (no move)" +
+                          (renamedOk
+                               ? std::string()
+                               : "; " + app.testDescribeDisplayEdit() +
+                                     " editError='" + app.testGetDisplayEditError() + "'") +
+                          "\n";
+            liveOk = liveOk && renamedOk;
+        }
+
+        // Physical output (issue 15): every display object carries the OS
+        // monitor its window is on. The record is filled in when the
+        // engine's queued surface op runs (after the display.add
+        // response), so assert the field's presence and report the value
+        // informationally - a headless engine legitimately reports none.
+        {
+            const nlohmann::json& list = renamedOk ? after2 : after;
+            bool monitorPresent =
+                list.contains("displays") && !list["displays"].empty();
+            std::string monitorValue;
+            if (monitorPresent)
+            {
+                for (const auto& d : list["displays"])
+                {
+                    if (!d.contains("monitor") || !d["monitor"].is_string())
+                    {
+                        monitorPresent = false;
+                        break;
+                    }
+                }
+                if (list["displays"][0].contains("monitor") &&
+                    list["displays"][0]["monitor"].is_string())
+                {
+                    monitorValue = list["displays"][0]["monitor"].get<std::string>();
+                }
+            }
+            liveReport += std::string(monitorPresent ? "PASS " : "FAIL ") +
+                          "display records report the physical output (monitor field)" +
+                          (monitorValue.empty() ? std::string()
+                                                : " monitor='" + monitorValue + "'") +
+                          "\n";
+            liveOk = liveOk && monitorPresent;
+        }
+
+        // Close the dialog if a failure path left it open (Apply closes
+        // it on success); a few frames let the popup tear down, as the
+        // modal loop above does.
         app.testCloseModal("edit");
         for (int i = 0; i < 3; ++i)
         {

@@ -326,18 +326,28 @@ Display object shape (used by `display.list`, `display.set`, `status`):
 ```json
 {"id":1, "name":"Wall A", "x":0, "y":0,
  "width":1920, "height":1080, "brightness":1.0, "enabled":true,
- "statusOverlay":false}
+ "statusOverlay":false, "monitor":"NVIDIA GeForce RTX 4090"}
 ```
 
 Geometry is in the shared output space (pixels, origin top-left). The union
 of enabled display rectangles defines the scene size.
 
-The control GUI's Display settings dialog (Edit... in the Displays pane)
-includes a **System** dropdown: the system a display is linked to. Applying
-settings to the current system is a plain `display.set`; applying them to a
-different system **moves** the display there — `display.add` + `display.set`
-(brightness/enabled, which `display.add` does not carry) on the target, then
-`display.remove` on the source.
+`name` is the display's label (shown in the control GUI and the status
+overlay); `display.set` can change it. `monitor` is the physical output the
+display's window is on (the OS monitor name, empty when the window is not on
+a monitor); the playback engine maintains it — it follows the window when
+the window manager moves it to another output — and clients treat it as
+read-only.
+
+The control GUI's Displays pane lists every display with the system it is
+linked to and the physical output its window is on. The Display settings
+dialog (Edit... in the pane) shows the same location - the system and the
+physical output - plus an editable **Name** field and a **System** dropdown:
+the system a display is linked to. Applying settings to the current system
+is a plain `display.set`; applying them to a different system **moves** the
+display there — `display.add` + `display.set` (brightness/enabled, which
+`display.add` does not carry) on the target, then `display.remove` on the
+source.
 
 #### `display.add`
 
@@ -376,16 +386,17 @@ output back).
 Update any subset of a display's properties.
 
 - Params: `display` (int id, required); any of `x`, `y`, `width`, `height`
-  (ints, applied as one geometry update), `brightness` (number, default 1.0),
-  `enabled` (bool), `statusOverlay` (bool, default false).
+  (ints, applied as one geometry update), `name` (string, the display's
+  label), `brightness` (number, default 1.0), `enabled` (bool),
+  `statusOverlay` (bool, default false).
 - Result: the updated display object.
 
 `statusOverlay` toggles the per-display status overlay: when true, the
 playback engine draws a small screen-aligned text block over that output
-(showing the system IP address, the display name and number, the measured
-frame rate and resolution, and the per-frame CPU/GPU render time in ms).
-The overlay is display UI — it is not part of the scene and is not affected
-by the display's warp.
+(showing the system IP address, the display name and number, the physical
+output, the measured frame rate and resolution, and the per-frame CPU/GPU
+render time in ms). The overlay is display UI — it is not part of the scene
+and is not affected by the display's warp.
 
 A geometry update reinitializes the playback engine's display for that
 record: the engine's window is moved/resized to the new geometry, the

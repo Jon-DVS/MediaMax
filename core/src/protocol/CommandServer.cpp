@@ -63,6 +63,7 @@ nlohmann::json displayToJson(const Display& d)
         {"brightness", d.brightness},
         {"enabled", d.enabled},
         {"statusOverlay", d.statusOverlay},
+        {"monitor", d.monitor},
     };
 }
 
@@ -774,6 +775,10 @@ nlohmann::json CommandServer::handleDisplaySet(const nlohmann::json& params) con
     if (params.contains("statusOverlay"))
     {
         m_Displays.setDisplayStatusOverlay(id, params["statusOverlay"].get<bool>());
+    }
+    if (params.contains("name") && params["name"].is_string())
+    {
+        m_Displays.setDisplayName(id, params["name"].get<std::string>());
     }
 
     const auto updated = m_Displays.find(id);

@@ -36,6 +36,12 @@ struct Display
     // timing) over this output. Off by default; see overlay/StatusOverlay.
     bool statusOverlay = false;
 
+    // The physical output (OS monitor name) the display's window is on,
+    // e.g. "NVIDIA GeForce RTX 4090". Empty when the window is not on a
+    // monitor (off-screen) or the name is unknown. Maintained by the
+    // playback engine, not the show author.
+    std::string monitor;
+
     Rect2i rect() const { return Rect2i(x, y, width, height); }
     bool valid() const { return width > 0 && height > 0; }
 };

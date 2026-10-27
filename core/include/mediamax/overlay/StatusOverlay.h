@@ -3,8 +3,8 @@
 // Status overlay text rasterizer.
 //
 // The playback engine draws a small status overlay (system IP, display
-// name/number, measured frame rate, resolution, frame timing) over a
-// display when that display's `statusOverlay` flag is set. This module is
+// name/number, physical output, measured frame rate, resolution and frame
+// timing) over a display when that display's `statusOverlay` flag is set. This module is
 // the headless half of that feature: it rasterizes ASCII text with a tiny
 // built-in 5x7 bitmap font into a tightly packed RGBA8 buffer (white
 // glyphs on a transparent background, straight alpha) that the render

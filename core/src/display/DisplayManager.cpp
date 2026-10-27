@@ -102,6 +102,28 @@ bool DisplayManager::setDisplayStatusOverlay(Id id, bool statusOverlay)
     return true;
 }
 
+bool DisplayManager::setDisplayName(Id id, std::string name)
+{
+    auto display = find(id);
+    if (!display)
+    {
+        return false;
+    }
+    (*display)->name = std::move(name);
+    return true;
+}
+
+bool DisplayManager::setDisplayMonitor(Id id, std::string monitor)
+{
+    auto display = find(id);
+    if (!display)
+    {
+        return false;
+    }
+    (*display)->monitor = std::move(monitor);
+    return true;
+}
+
 Rect2i DisplayManager::outputBounds() const
 {
     Rect2i bounds;

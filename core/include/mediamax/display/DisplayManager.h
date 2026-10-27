@@ -39,6 +39,11 @@ public:
     bool setDisplayBrightness(Id id, float brightness);
     bool setDisplayEnabled(Id id, bool enabled);
     bool setDisplayStatusOverlay(Id id, bool statusOverlay);
+    // The display name (shown in the UI and the status overlay).
+    bool setDisplayName(Id id, std::string name);
+    // The physical output the display's window is on (the playback engine
+    // reports it from the window manager; empty = not on a monitor).
+    bool setDisplayMonitor(Id id, std::string monitor);
 
     // Union of all enabled display rectangles. Zero rect when no displays are
     // enabled.

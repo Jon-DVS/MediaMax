@@ -44,6 +44,25 @@ TEST_CASE("The status overlay flag is per display, off by default")
     CHECK_FALSE(mgr.setDisplayStatusOverlay(42, true));
 }
 
+TEST_CASE("Display name and physical output are settable per display")
+{
+    DisplayManager mgr;
+    const auto a = mgr.addDisplay("a", 0, 0, 100, 100);
+    const auto b = mgr.addDisplay("b", 500, 0, 100, 100);
+    CHECK((*mgr.find(a.id))->name == "a");
+    CHECK((*mgr.find(a.id))->monitor.empty());
+
+    CHECK(mgr.setDisplayName(a.id, "Wall A"));
+    CHECK((*mgr.find(a.id))->name == "Wall A");
+    CHECK((*mgr.find(b.id))->name == "b");
+    CHECK_FALSE(mgr.setDisplayName(42, "nope"));
+
+    CHECK(mgr.setDisplayMonitor(a.id, "NVIDIA GeForce RTX 4090"));
+    CHECK((*mgr.find(a.id))->monitor == "NVIDIA GeForce RTX 4090");
+    CHECK((*mgr.find(b.id))->monitor.empty());
+    CHECK_FALSE(mgr.setDisplayMonitor(42, "nope"));
+}
+
 TEST_CASE("Disabled displays do not contribute to bounds")
 {
     DisplayManager mgr;

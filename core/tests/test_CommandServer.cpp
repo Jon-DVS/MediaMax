@@ -648,6 +648,27 @@ TEST_CASE("display.list reports all displays")
     CHECK(displays[0].at("x").get<std::int32_t>() == 0);
     CHECK(displays[1].at("name").get<std::string>() == "side");
     CHECK(displays[1].at("x").get<std::int32_t>() == 1920);
+    // The physical output is reported per display (additive field); the
+    // core fixture has no window manager, so it is empty by default.
+    CHECK(displays[0].at("monitor").get<std::string>().empty());
+}
+
+TEST_CASE("display.set renames the display")
+{
+    Fixture f;
+    const Response resp = f.run("display.set", {{"display", f.displayA}, {"name", "Wall A"}});
+    REQUIRE(resp.ok);
+    CHECK(resp.result.at("name").get<std::string>() == "Wall A");
+    const auto updated = f.displays.find(f.displayA);
+    REQUIRE(updated.has_value());
+    CHECK((*updated)->name == "Wall A");
+
+    // A non-string name is ignored (the record keeps its name).
+    const Response bad = f.run("display.set", {{"display", f.displayA}, {"name", 42}});
+    REQUIRE(bad.ok);
+    CHECK(bad.result.at("name").get<std::string>() == "Wall A");
+
+    CHECK_FALSE(f.run("display.set", {{"display", 999}, {"name", "nope"}}).ok);
 }
 
 TEST_CASE("display.set updates geometry, brightness and enabled state")

@@ -37,6 +37,57 @@ constexpr std::uint32_t kWarpTextureSize = 512;
 // not user input).
 constexpr int kApplyGraceFrames = 8;
 
+// The OS name of the monitor a window is primarily on (its physical
+// output); empty when the window is not on any monitor (off-screen). The
+// name pointer is owned by GLFW.
+std::string monitorName(GLFWmonitor* monitor)
+{
+    const char* name = monitor ? glfwGetMonitorName(monitor) : nullptr;
+    return name ? std::string(name) : std::string();
+}
+
+// The monitor a window is primarily on (its physical output).
+//
+// This GLFW snapshot's glfwGetWindowMonitor() only reports a window's
+// explicitly set monitor (fullscreen), so the classic heuristic for
+// windowed windows is done here: the monitor whose bounds cover the
+// largest area of the window's client rect (nullptr when none overlap,
+// i.e. the window is off-screen). Positions and sizes are in the same
+// screen coordinate space (content-scaled), so the math is consistent.
+GLFWmonitor* windowMonitor(GLFWwindow* window)
+{
+    int left = 0, top = 0, width = 0, height = 0;
+    glfwGetWindowPos(window, &left, &top);
+    glfwGetWindowSize(window, &width, &height);
+
+    int count = 0;
+    GLFWmonitor** monitors = glfwGetMonitors(&count);
+    GLFWmonitor* best = nullptr;
+    int bestArea = 0;
+    for (int i = 0; i < count; ++i)
+    {
+        GLFWmonitor* monitor = monitors[i];
+        int mx = 0, my = 0;
+        glfwGetMonitorPos(monitor, &mx, &my);
+        const GLFWvidmode* mode = glfwGetVideoMode(monitor);
+        if (mode == nullptr)
+        {
+            continue;
+        }
+        const int interLeft = std::max(left, mx);
+        const int interTop = std::max(top, my);
+        const int interRight = std::min(left + width, mx + mode->width);
+        const int interBottom = std::min(top + height, my + mode->height);
+        const int area = (interRight - interLeft) * (interBottom - interTop);
+        if (area > bestArea)
+        {
+            best = monitor;
+            bestArea = area;
+        }
+    }
+    return best;
+}
+
 } // namespace
 
 PlaybackApp::PlaybackApp(AppArgs args)
@@ -185,6 +236,7 @@ bool PlaybackApp::initWindowsAndDisplays()
         glfwSetWindowPos(ds->window, specs[i].x, specs[i].y);
         ds->width = specs[i].width;
         ds->height = specs[i].height;
+        ds->lastMonitor = windowMonitor(ds->window);
         m_Surfaces.push_back(std::move(ds));
     }
 
@@ -194,6 +246,9 @@ bool PlaybackApp::initWindowsAndDisplays()
         const Display& d = m_Displays.addDisplay("Display " + std::to_string(i + 1), specs[i].x, specs[i].y,
                                                  specs[i].width, specs[i].height);
         m_Surfaces[i]->displayId = d.id;
+        // The WM may still place the window; pollWindowEvents() keeps the
+        // physical output current from the first frames on.
+        m_Displays.setDisplayMonitor(d.id, monitorName(m_Surfaces[i]->lastMonitor));
     }
     return true;
 }
@@ -479,8 +534,10 @@ void PlaybackApp::addSurfaceForDisplay(const SurfaceOp& op)
         sp->appliedY = wy;
         sp->appliedW = ww;
         sp->appliedH = wh;
+        sp->lastMonitor = windowMonitor(sp->window);
         std::lock_guard lock(m_StateMutex);
         m_Displays.setDisplayGeometry(op.displayId, wx, wy, ww, wh);
+        m_Displays.setDisplayMonitor(op.displayId, monitorName(sp->lastMonitor));
     }
 
     m_Surfaces.push_back(std::move(sp));
@@ -849,8 +906,8 @@ void PlaybackApp::updateStatusOverlay(DisplaySurface& ds, const Display& display
         // At least four lines at scale 2 (64 px), at most a square canvas.
         ch = std::min<std::uint32_t>(std::max<std::uint32_t>(ch, 96), kOverlayMaxHeight);
     }
-    // Four lines are 4 * (7 + 1) * scale px tall: 96 px at scale 3, 64 px
-    // at scale 2.
+    // Five lines are 5 * (7 + 1) * scale px tall: 120 px at scale 3, 80 px
+    // at scale 2 - both fit the canvas minimum (96 px).
     const int scale = (ch < 100) ? 2 : 3;
 
     char line3[80];
@@ -859,9 +916,10 @@ void PlaybackApp::updateStatusOverlay(DisplaySurface& ds, const Display& display
     std::snprintf(line4, sizeof(line4), "frame %.2f ms  gpu %.2f ms", m_CpuFrameMs, m_GpuFrameMs);
 
     std::string text;
-    text.reserve(192);
+    text.reserve(256);
     text += "System " + m_SystemIp + "\n";
     text += "Display " + display.name + " (" + std::to_string(display.id) + ")\n";
+    text += (display.monitor.empty() ? "off-screen" : display.monitor) + "\n";
     text += std::string(line3) + "\n";
     text += line4;
 
@@ -981,6 +1039,17 @@ void PlaybackApp::pollWindowEvents()
                 ds.appliedY = wy;
                 ds.appliedW = ww;
                 ds.appliedH = wh;
+            }
+
+            // The window may now sit on another physical output (manual
+            // drag to a different monitor): the record's monitor follows,
+            // like its geometry does.
+            GLFWmonitor* monitor = windowMonitor(ds.window);
+            if (monitor != ds.lastMonitor)
+            {
+                ds.lastMonitor = monitor;
+                std::lock_guard lock(m_StateMutex);
+                m_Displays.setDisplayMonitor(ds.displayId, monitorName(monitor));
             }
         }
     }
