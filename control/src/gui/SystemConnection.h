@@ -43,6 +43,13 @@ public:
     // Stops the poll thread and drops both connections.
     void disconnect();
 
+    // Re-targets the entry: the identity (name) and the address
+    // (host:port). Stops the poll thread first (it reads m_Host/m_Port on
+    // every (re)connect, so the fields must not change under it), updates
+    // the fields, and restarts the thread when it was running (issue 16:
+    // the system settings dialog).
+    void retarget(std::string name, std::string host, std::uint16_t port);
+
     // True when the poll thread is running (a connect was requested).
     bool active() const { return m_Running; }
 

@@ -54,6 +54,12 @@ public:
     void setDisplayAddedFunction(DisplayAddedFunction fn) { m_DisplayAdded = std::move(fn); }
     void setDisplayRemovedFunction(DisplayRemovedFunction fn) { m_DisplayRemoved = std::move(fn); }
 
+    // The machine identity reported in "status": the computer name
+    // (`hostname`) and primary IPv4 address (`ip`) of the machine running
+    // the engine. The app fills these in (the core has no platform access).
+    void setSystemHost(const std::string& hostName) { m_HostName = hostName; }
+    void setSystemIp(const std::string& ip) { m_Ip = ip; }
+
     // Handles a decoded command. Never throws; all failures become responses
     // with ok=false.
     Response handle(const Command& cmd) const;
@@ -119,6 +125,8 @@ private:
     MediaLibrary& m_Media;
     DisplayManager& m_Displays;
     mutable std::string m_SystemName; // mutable: system.set mutates it under lock
+    std::string m_HostName;           // machine computer name (status "hostname")
+    std::string m_Ip;                 // machine primary IPv4 (status "ip")
     MediaLoadFunction m_LoadMedia;
     DisplayAddedFunction m_DisplayAdded;
     DisplayRemovedFunction m_DisplayRemoved;

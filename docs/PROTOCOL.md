@@ -68,6 +68,8 @@ Full snapshot of the system.
 | Field | Meaning |
 | --- | --- |
 | `system` | system name |
+| `hostname` | computer name of the machine running the engine (empty when unknown) |
+| `ip` | the machine's primary IPv4 address (`"127.0.0.1"` when it cannot be determined) |
 | `state` | `stopped` / `playing` / `paused` |
 | `time` | current show time (s) |
 | `timecode` | `HH:MM:SS:FF` at the show frame rate |
@@ -87,6 +89,12 @@ Rename the system (reflected in `status`/`ping`).
 
 - Params: `name` (string, required).
 - Result: `{"system":"<name>"}`
+
+The control GUI's Systems pane shows this system info per system: each row
+shows the computer name the engine reports (`hostname`) under the custom
+name, and a settings dialog (the `settings...` button on a row) edits the
+entry's name, IP address and port — the same fields the systems config
+stores — reconnecting the entry when the address changes.
 
 ### Shows
 

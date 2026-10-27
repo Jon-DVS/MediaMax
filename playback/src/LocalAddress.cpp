@@ -92,4 +92,14 @@ std::string localIpAddress()
     return ip.empty() ? std::string("127.0.0.1") : ip;
 }
 
+std::string localHostName()
+{
+    char host[256] = {0};
+    if (gethostname(host, sizeof(host) - 1) != 0)
+    {
+        return std::string();
+    }
+    return std::string(host);
+}
+
 } // namespace mediamax

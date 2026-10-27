@@ -47,7 +47,8 @@ public:
 
     // --- test hooks (driven by --gui-self-test; no effect in normal use) ----
     // Queues the given modal ("open", "saveas", "media", "pull", "about",
-    // "edit", "warp" or "mediadetails") to be opened by the next
+    // "edit", "warp", "mediadetails" or "syssettings") to be opened by the
+    // next
     // frame(): the same state the UI buttons set plus OpenPopup() (or, for
     // "open"/"saveas"/"media", the ImGuiFileDialog OpenDialog). Deferred
     // because OpenPopup() must run inside a frame (it dereferences the
@@ -108,6 +109,17 @@ public:
     // up before reopening the dialog (the snapshot polls every 500 ms, so
     // right after a move it can still list the removed record).
     bool testActiveSnapshotHasDisplay(Id displayId) const;
+    // System settings dialog hooks (live self-test, issue 16): set the
+    // dialog's Name / Port fields (the same state the inputs edit) and
+    // press its Apply button.
+    void testSetSystemSettingsName(const std::string& name);
+    void testSetSystemSettingsPort(int port);
+    bool testApplySystemSettings();
+    // The system entry's name at `index` (empty when out of range).
+    std::string testSystemNameAt(int index) const;
+    // The machine name the engine at `index` reports (status "hostname";
+    // empty when the snapshot has no status yet).
+    std::string testSystemHostname(int index) const;
     // The Display settings dialog's current error line (empty when healthy);
     // the live self-test's move check reports it on failure.
     std::string testGetDisplayEditError() const { return m_EditError; }
@@ -175,6 +187,13 @@ private:
     // (display.add + display.set on the target, display.remove on the
     // source; issue 14). Closes the dialog on success.
     bool applyDisplayEdit();
+    // Opens the "System settings" dialog for the system at `index`
+    // (issue 16).
+    void openSystemSettings(int index);
+    // The System settings Apply button: re-targets the entry (name /
+    // host / port) - the connection is restarted when it was running.
+    // Closes the dialog on success; marks the systems list dirty.
+    bool applySystemSettings();
     void openWarpEdit(const nlohmann::json& display, SystemConnection* target);
     // Opens the "Media details" dialog for the given media record (the
     // system it came from is shown in the dialog title; the details are
@@ -274,6 +293,21 @@ private:
     bool m_PullModal = false;
     std::string m_PullPath;
     bool m_AboutModal = false;
+    // "System settings" dialog (settings... in the Systems pane, issue 16):
+    // the entry's identity and address (name / host / port - the same
+    // fields "Add system" and systems.json use). m_SysSettingsIndex is the
+    // entry's slot in m_Systems; retargeting keeps the slot, so selections
+    // and stored pointers stay valid.
+    bool m_SysSettingsModal = false;
+    int m_SysSettingsIndex = -1;
+    struct SystemSettingsEdit
+    {
+        std::string name;
+        std::string host;
+        int port = 47600;
+        std::string error;
+    };
+    SystemSettingsEdit m_SysSettings;
     // "Display settings" dialog (Edit... in the Displays block): per-display
     // x/y/w/h/brightness/enabled. m_EditTarget is the system the dialog was
     // opened from; m_EditSystem is the System dropdown's selection (index

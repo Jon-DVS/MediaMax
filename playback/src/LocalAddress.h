@@ -12,4 +12,9 @@ namespace mediamax
 // getaddrinfo). Returns "127.0.0.1" when no IPv4 can be determined.
 std::string localIpAddress();
 
+// This machine's computer name (gethostname), for the system info the
+// control GUI shows per system (status "hostname"). Empty when it cannot
+// be determined.
+std::string localHostName();
+
 } // namespace mediamax

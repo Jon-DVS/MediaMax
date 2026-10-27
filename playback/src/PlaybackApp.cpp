@@ -143,9 +143,14 @@ int PlaybackApp::run()
         m_Scene.setSceneSize(m_Displays.outputBounds().size());
     }
 
-    // System IP for the status overlay (and future system-info UI).
+    // System IP + computer name for the status overlay and the status
+    // result's system info (the control GUI shows them per system).
     m_SystemIp = localIpAddress();
     log.info("system IP: {}", m_SystemIp);
+    m_SystemHost = localHostName();
+    log.info("system host: {}", m_SystemHost);
+    m_CommandServer->setSystemHost(m_SystemHost);
+    m_CommandServer->setSystemIp(m_SystemIp);
 
     // Auto-play the startup show (under the state mutex: the control server
     // is already serving commands by this point).

@@ -120,6 +120,10 @@ TEST_CASE("status reflects the full system state")
 
     CHECK(resp.result.at("system").get<std::string>() == "test-system");
     CHECK(resp.result.at("state").get<std::string>() == "stopped");
+    // The machine identity is reported too; the core fixture has no
+    // platform access, so the app-set values default to empty.
+    CHECK(resp.result.at("hostname").get<std::string>().empty());
+    CHECK(resp.result.at("ip").get<std::string>().empty());
     CHECK(resp.result.at("time").get<double>() == doctest::Approx(0.0));
     CHECK(resp.result.at("timecode").get<std::string>() == "00:00:00:00");
     CHECK(resp.result.at("duration").get<double>() == doctest::Approx(7.0));
@@ -135,6 +139,18 @@ TEST_CASE("status reflects the full system state")
     const auto& d0 = resp.result.at("displays")[0];
     CHECK(d0.at("name").get<std::string>() == "main");
     CHECK(d0.at("width").get<std::uint32_t>() == 1920);
+}
+
+TEST_CASE("status reports the machine identity set by the app")
+{
+    Fixture f;
+    f.server.setSystemHost("wall-pc-01");
+    f.server.setSystemIp("10.0.0.42");
+
+    const Response resp = f.run("status");
+    REQUIRE(resp.ok);
+    CHECK(resp.result.at("hostname").get<std::string>() == "wall-pc-01");
+    CHECK(resp.result.at("ip").get<std::string>() == "10.0.0.42");
 }
 
 TEST_CASE("unknown method fails with a descriptive error")

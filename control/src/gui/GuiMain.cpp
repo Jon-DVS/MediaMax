@@ -5,6 +5,7 @@
 #include <iostream>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "gui/ControlGui.h"
 #include "gui/GuiCrash.h"
@@ -346,9 +347,15 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
     //    kModalHostName in ControlGui.cpp).
     std::string modalReport;
     bool modalOk = true;
-    for (const char* which :
-         {"about", "open", "saveas", "media", "pull", "edit", "warp",
-          "mediadetails"})
+    std::vector<const char*> modalNames = {"about", "open", "saveas", "media", "pull", "edit",
+                                           "warp", "mediadetails"};
+    if (haveLiveSystem)
+    {
+        // The System settings dialog's button sits on a system row; the
+        // headless run has no systems, so it is not openable there.
+        modalNames.push_back("syssettings");
+    }
+    for (const char* which : modalNames)
     {
         if (!app.testOpenModal(which))
         {
@@ -761,6 +768,170 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
         {
             glfwPollEvents();
             runtime.renderFrame();
+        }
+    }
+
+    // 4d) System info + settings (issue 16): status reports the machine
+    //     the engine runs on (computer name + IP), and the per-system
+    //     settings dialog edits the entry's name / address / port. Verify
+    //     the machine identity on a fresh connection and in the app's
+    //     snapshot, rename the active system entry (index 1, self-test-2)
+    //     through the dialog (the entry reconnects), then re-target its
+    //     port (a closed port goes offline; switching back comes online).
+    if (haveLiveSystem && liveOk)
+    {
+        SystemConnection infoConn("self-test-sysinfo", liveHost, livePort);
+        nlohmann::json status;
+        std::string statusError;
+        std::string machine, machineIp;
+        bool haveInfo = infoConn.send("status", nlohmann::json::object(), status, statusError) &&
+                        status.contains("hostname") && status["hostname"].is_string() &&
+                        status.contains("ip") && status["ip"].is_string();
+        if (haveInfo)
+        {
+            machine = status["hostname"].get<std::string>();
+            machineIp = status["ip"].get<std::string>();
+        }
+        const bool infoOk = haveInfo && !machine.empty() && !machineIp.empty() &&
+                            !app.testSystemHostname(1).empty();
+        liveReport += std::string(infoOk ? "PASS " : "FAIL ") +
+                      "system info reports the computer name and IP (hostname='" + machine +
+                      "', ip='" + machineIp + "')\n";
+        liveOk = liveOk && infoOk;
+
+        // Rename through the settings dialog: the entry reconnects and
+        // keeps its slot (selections and stored pointers stay valid).
+        bool renamedOk = false;
+        if (infoOk)
+        {
+            app.testOpenModal("syssettings"); // deferred: the next frame opens it
+            bool opened = false;
+            for (int i = 0; i < 3 && !opened; ++i)
+            {
+                glfwPollEvents();
+                if (runtime.renderFrame())
+                {
+                    opened = app.testModalOpen("syssettings");
+                }
+            }
+            if (opened)
+            {
+                app.testSetSystemSettingsName("self-test-2-r");
+                const bool applied = app.testApplySystemSettings();
+                if (applied)
+                {
+                    const auto deadline =
+                        std::chrono::steady_clock::now() + std::chrono::seconds(5);
+                    while (!app.testSystemConnected("self-test-2-r") &&
+                           std::chrono::steady_clock::now() < deadline)
+                    {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    }
+                    renamedOk = app.testSystemNameAt(1) == "self-test-2-r" &&
+                                app.testSystemConnected("self-test-2-r");
+                }
+            }
+            app.testCloseModal("syssettings");
+            for (int i = 0; i < 3; ++i)
+            {
+                glfwPollEvents();
+                runtime.renderFrame();
+            }
+            liveReport += std::string(renamedOk ? "PASS " : "FAIL ") +
+                          "system settings renamed the system entry (reconnected)\n";
+            liveOk = liveOk && renamedOk;
+        }
+
+        // Re-target the entry's port: a closed port goes offline (the poll
+        // thread can no longer reach the engine), switching back comes
+        // online again with a fresh status - the dialog's address path.
+        bool retargetOk = false;
+        const int badPort = (livePort < 65535) ? livePort + 1 : livePort - 1;
+        if (renamedOk)
+        {
+            app.testOpenModal("syssettings");
+            bool opened = false;
+            for (int i = 0; i < 3 && !opened; ++i)
+            {
+                glfwPollEvents();
+                if (runtime.renderFrame())
+                {
+                    opened = app.testModalOpen("syssettings");
+                }
+            }
+            bool wentOffline = false;
+            if (opened)
+            {
+                app.testSetSystemSettingsPort(badPort);
+                const bool applied = app.testApplySystemSettings();
+                if (applied)
+                {
+                    const auto deadline =
+                        std::chrono::steady_clock::now() + std::chrono::seconds(6);
+                    while (!wentOffline && std::chrono::steady_clock::now() < deadline)
+                    {
+                        wentOffline = !app.testSystemConnected("self-test-2-r");
+                        if (!wentOffline)
+                        {
+                            std::this_thread::sleep_for(std::chrono::milliseconds(150));
+                        }
+                    }
+                }
+            }
+            app.testCloseModal("syssettings");
+            for (int i = 0; i < 3; ++i)
+            {
+                glfwPollEvents();
+                runtime.renderFrame();
+            }
+            bool backOnline = false;
+            if (wentOffline)
+            {
+                app.testOpenModal("syssettings");
+                bool opened2 = false;
+                for (int i = 0; i < 3 && !opened2; ++i)
+                {
+                    glfwPollEvents();
+                    if (runtime.renderFrame())
+                    {
+                        opened2 = app.testModalOpen("syssettings");
+                    }
+                }
+                if (opened2)
+                {
+                    app.testSetSystemSettingsPort(static_cast<int>(livePort));
+                    const bool applied = app.testApplySystemSettings();
+                    if (applied)
+                    {
+                        const auto deadline =
+                            std::chrono::steady_clock::now() + std::chrono::seconds(6);
+                        // Wait for a fresh status too: pollConnected goes up
+                        // at connect, the hostname a poll later.
+                        std::string host;
+                        while (!backOnline && std::chrono::steady_clock::now() < deadline)
+                        {
+                            host = app.testSystemHostname(1);
+                            backOnline = app.testSystemConnected("self-test-2-r") && !host.empty();
+                            if (!backOnline)
+                            {
+                                std::this_thread::sleep_for(std::chrono::milliseconds(150));
+                            }
+                        }
+                    }
+                }
+                retargetOk = backOnline && app.testSystemNameAt(1) == "self-test-2-r";
+            }
+            app.testCloseModal("syssettings");
+            for (int i = 0; i < 3; ++i)
+            {
+                glfwPollEvents();
+                runtime.renderFrame();
+            }
+            liveReport += std::string(retargetOk ? "PASS " : "FAIL ") +
+                          "system settings re-targeted the address (" +
+                          std::to_string(livePort) + " -> " + std::to_string(badPort) +
+                          " offline -> " + std::to_string(livePort) + " back online)\n";
+            liveOk = liveOk && retargetOk;
         }
     }
 

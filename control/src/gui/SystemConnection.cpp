@@ -56,6 +56,19 @@ void SystemConnection::disconnect()
     }
 }
 
+void SystemConnection::retarget(std::string name, std::string host, std::uint16_t port)
+{
+    const bool wasRunning = m_Running;
+    disconnect(); // stops the poll thread, which reads m_Host/m_Port
+    m_Name = std::move(name);
+    m_Host = std::move(host);
+    m_Port = port;
+    if (wasRunning)
+    {
+        connect();
+    }
+}
+
 SystemConnection::Snapshot SystemConnection::snapshot() const
 {
     std::lock_guard lock(m_SnapMutex);

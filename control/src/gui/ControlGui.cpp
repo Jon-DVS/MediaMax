@@ -114,6 +114,10 @@ const char* modalPopupName(const std::string& which)
     {
         return "Display settings";
     }
+    if (which == "syssettings")
+    {
+        return "System settings";
+    }
     if (which == "warp")
     {
         return "Projection warp";
@@ -836,7 +840,7 @@ void ControlGuiApp::renderSystemsWindow()
             ImGui::TableSetupColumn("status", ImGuiTableColumnFlags_WidthFixed, 64.0f);
             ImGui::TableSetupColumn("name");
             ImGui::TableSetupColumn("address");
-            ImGui::TableSetupColumn("##action", ImGuiTableColumnFlags_WidthFixed, 118.0f);
+            ImGui::TableSetupColumn("##action", ImGuiTableColumnFlags_WidthFixed, 186.0f);
             for (size_t i = 0; i < m_Systems.size(); ++i)
             {
                 auto& conn = *m_Systems[i];
@@ -857,6 +861,17 @@ void ControlGuiApp::renderSystemsWindow()
                     m_Active = static_cast<int>(i);
                 }
                 ImGui::PopID();
+                // The computer the engine runs on (status "hostname") under
+                // the custom name (issue 16).
+                const SystemConnection::Snapshot sysSnap = conn.snapshot();
+                if (sysSnap.haveStatus)
+                {
+                    const std::string machine = sysSnap.status.value("hostname", "");
+                    if (!machine.empty())
+                    {
+                        ImGui::TextDisabled("on %s", machine.c_str());
+                    }
+                }
                 ImGui::TableNextColumn();
                 ImGui::TextUnformatted((conn.host() + ":" + std::to_string(conn.port())).c_str());
                 ImGui::TableNextColumn();
@@ -872,6 +887,11 @@ void ControlGuiApp::renderSystemsWindow()
                         conn.connect();
                         log(conn.name() + " connecting...");
                     }
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("settings##sysset"))
+                {
+                    openSystemSettings(static_cast<int>(i));
                 }
                 ImGui::SameLine();
                 if (ImGui::Button("x##rm"))
@@ -1414,6 +1434,47 @@ bool ControlGuiApp::applyDisplayEdit()
     }
     log("display " + std::to_string(m_EditDisplayId) + " settings applied on " + target->name());
     m_EditModal = false;
+    return true;
+}
+
+void ControlGuiApp::openSystemSettings(int index)
+{
+    if (index < 0 || index >= static_cast<int>(m_Systems.size()))
+    {
+        return;
+    }
+    // The same fields "Add system" and systems.json use (issue 16): the
+    // entry's identity and address.
+    const SystemConnection& conn = *m_Systems[static_cast<size_t>(index)];
+    m_SysSettings.name = conn.name();
+    m_SysSettings.host = conn.host();
+    m_SysSettings.port = static_cast<int>(conn.port());
+    m_SysSettings.error.clear();
+    m_SysSettingsIndex = index;
+    m_SysSettingsModal = true;
+    ImGui::OpenPopup(modalPopupId("System settings"));
+}
+
+bool ControlGuiApp::applySystemSettings()
+{
+    if (m_SysSettingsIndex < 0 || m_SysSettingsIndex >= static_cast<int>(m_Systems.size()))
+    {
+        return false;
+    }
+    if (m_SysSettings.name.empty() || m_SysSettings.host.empty() || m_SysSettings.port < 1 ||
+        m_SysSettings.port > 65535)
+    {
+        m_SysSettings.error = "needs a name, a host and a port (1-65535)";
+        return false;
+    }
+    auto& conn = *m_Systems[static_cast<size_t>(m_SysSettingsIndex)];
+    const bool wasActive = conn.active();
+    conn.retarget(m_SysSettings.name, m_SysSettings.host,
+                  static_cast<std::uint16_t>(m_SysSettings.port));
+    m_ConfigDirty = true;
+    log("system settings applied: " + m_SysSettings.name + " (" + m_SysSettings.host + ":" +
+        std::to_string(m_SysSettings.port) + ")" + (wasActive ? "; reconnecting" : ""));
+    m_SysSettingsModal = false;
     return true;
 }
 
@@ -2693,6 +2754,71 @@ void ControlGuiApp::renderModals()
             ImGui::EndPopup();
         }
     }
+    if (m_SysSettingsModal)
+    {
+        modalStartSize(440.0f);
+        if (ImGui::BeginPopupModal("System settings", &m_SysSettingsModal))
+        {
+            // The entry this dialog edits (issue 16). The index can go
+            // stale if the system is removed while the dialog is open.
+            if (m_SysSettingsIndex >= 0 && m_SysSettingsIndex < static_cast<int>(m_Systems.size()))
+            {
+                auto& conn = *m_Systems[static_cast<size_t>(m_SysSettingsIndex)];
+                // System info: the machine the engine runs on, as the
+                // engine reports it (status "hostname"/"ip") - the computer
+                // name alongside the custom name entered here (issue 16).
+                const SystemConnection::Snapshot snap = conn.snapshot();
+                if (snap.haveStatus)
+                {
+                    const std::string machine = snap.status.value("hostname", "");
+                    const std::string ip = snap.status.value("ip", "");
+                    if (!machine.empty() || !ip.empty())
+                    {
+                        ImGui::TextDisabled("System info: computer %s, IP %s",
+                                            machine.empty() ? "unknown" : machine.c_str(),
+                                            ip.empty() ? "unknown" : ip.c_str());
+                        ImGui::Separator();
+                    }
+                }
+                ImGui::InputText("Name##sysname2", &m_SysSettings.name);
+                ImGui::InputText("IP address##syshost", &m_SysSettings.host);
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(90.0f);
+                ImGui::InputInt("Port##sysport", &m_SysSettings.port);
+                if (!m_SysSettings.error.empty())
+                {
+                    ImGui::TextColored(kBadColor, "%s", m_SysSettings.error.c_str());
+                }
+                // Changing the address reconnects the system (the entry
+                // keeps its slot, so selections and pointers stay valid).
+                if (m_SysSettings.host != conn.host() ||
+                    m_SysSettings.port != static_cast<int>(conn.port()))
+                {
+                    ImGui::TextDisabled("(changing the address reconnects this system)");
+                }
+                ImGui::Spacing();
+                if (ImGui::Button("Apply##sysapply"))
+                {
+                    applySystemSettings();
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Cancel##syscancel"))
+                {
+                    m_SysSettingsModal = false;
+                }
+            }
+            else
+            {
+                ImGui::TextDisabled("The system no longer exists.");
+                if (ImGui::Button("Close##sysclose"))
+                {
+                    m_SysSettingsModal = false;
+                    m_SysSettingsIndex = -1;
+                }
+            }
+            ImGui::EndPopup();
+        }
+    }
     if (m_EditModal)
     {
         modalStartSize(420.0f);
@@ -3122,6 +3248,20 @@ void ControlGuiApp::openModal(const std::string& which)
         }
         return;
     }
+    else if (which == "syssettings")
+    {
+        // The real button fills the state from a row; the test hook opens
+        // it for the active system (headless runs have no systems, and the
+        // pane shows no rows then - nothing to open).
+        if (m_Systems.empty())
+        {
+            return;
+        }
+        const int index =
+            (m_Active >= 0 && m_Active < static_cast<int>(m_Systems.size())) ? m_Active : 0;
+        openSystemSettings(index);
+        return;
+    }
     else
     {
         m_AboutModal = true;
@@ -3184,6 +3324,12 @@ bool ControlGuiApp::testCloseModal(const std::string& which)
     if (which == "warp")
     {
         m_WarpModal = false;
+        return true;
+    }
+    if (which == "syssettings")
+    {
+        m_SysSettingsModal = false;
+        m_SysSettingsIndex = -1;
         return true;
     }
     if (which == "about")
@@ -3311,6 +3457,52 @@ bool ControlGuiApp::testActiveSnapshotHasDisplay(Id displayId) const
         }
     }
     return false;
+}
+
+void ControlGuiApp::testSetSystemSettingsName(const std::string& name)
+{
+    // The dialog's Name input edits this field.
+    m_SysSettings.name = name;
+}
+
+void ControlGuiApp::testSetSystemSettingsPort(int port)
+{
+    // The dialog's Port input edits this field.
+    m_SysSettings.port = port;
+}
+
+bool ControlGuiApp::testApplySystemSettings()
+{
+    // The exact action of the dialog's Apply button (no ImGui involved).
+    const bool ok = applySystemSettings();
+    if (ok)
+    {
+        m_ConfigDirty = false; // the self-test never writes a config file
+    }
+    return ok;
+}
+
+std::string ControlGuiApp::testSystemNameAt(int index) const
+{
+    if (index < 0 || index >= static_cast<int>(m_Systems.size()))
+    {
+        return std::string();
+    }
+    return m_Systems[static_cast<size_t>(index)]->name();
+}
+
+std::string ControlGuiApp::testSystemHostname(int index) const
+{
+    if (index < 0 || index >= static_cast<int>(m_Systems.size()))
+    {
+        return std::string();
+    }
+    const auto snap = m_Systems[static_cast<size_t>(index)]->snapshot();
+    if (!snap.haveStatus)
+    {
+        return std::string();
+    }
+    return snap.status.value("hostname", std::string());
 }
 
 // --- self test ---------------------------------------------------------------------------

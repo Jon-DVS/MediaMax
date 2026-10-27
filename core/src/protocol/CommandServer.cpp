@@ -286,6 +286,8 @@ nlohmann::json CommandServer::handleStatus() const
 
     return {
         {"system", m_SystemName},
+        {"hostname", m_HostName},
+        {"ip", m_Ip},
         {"state", PlaybackEngine::stateToString(m_Engine.state())},
         {"time", state.showTime.toSeconds()},
         {"timecode", state.showTime.toTimecode(show.frameRate)},

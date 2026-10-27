@@ -192,6 +192,9 @@ private:
     bool m_HaveLastFrameTime = false;
     // This system's IPv4 (gethostname/getaddrinfo, computed once in run()).
     std::string m_SystemIp;
+    // This machine's computer name (gethostname, computed once in run());
+    // reported in the status result's "hostname".
+    std::string m_SystemHost;
 
     // --- Pump / audio (own locks) -------------------------------------------------
 
