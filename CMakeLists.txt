@@ -46,6 +46,10 @@ add_subdirectory(render)
 add_subdirectory(playback)
 add_subdirectory(control)
 
+# Single-output deployment: collects both executables, their runtime DLLs
+# and the example shows into build/dist/ (issue 17).
+include(Deploy)
+
 if(MEDIAMAX_BUILD_TESTS)
     enable_testing()
     add_subdirectory(core/tests)

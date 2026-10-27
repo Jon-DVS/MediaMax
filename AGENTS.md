@@ -60,6 +60,15 @@ cmake --build build --config Release -j
 cmake --build build --config Release --target mediamax_render_tests
 ```
 
+Collect the final output into a single folder — `build/dist/` with both
+executables, their runtime DLLs (FFmpeg, the Vulkan loader when the SDK
+ships one) and the example shows, ready to copy to another machine
+(`cmake/Deploy.cmake`):
+
+```sh
+cmake --build build --config Release --target mediamax_dist
+```
+
 Run the full suite:
 
 ```sh
