@@ -65,6 +65,12 @@ public:
     // auto-push (see autoPushEditedShow) something to push during the frame
     // phase of the self-test, which then verifies the system received it.
     void testTouchEditor(const std::string& name);
+    // Simulates an "Add cue" button press (the same code path the UI uses)
+    // and returns the timeline's cue count afterwards. The self-test presses
+    // it twice on the fresh editor: each press must add a cue (before the
+    // fix the second press replaced the first, since the new cue's default
+    // time equaled the last cue's and Show::addCue replaces on collision).
+    std::size_t testAddCue();
 
 private:
     // --- systems -----------------------------------------------------------
@@ -115,6 +121,11 @@ private:
     void renderLayerDetails(Layer& layer);
     void renderLayerTracks(Layer& layer);
     void renderCueAction(Cue& cue);
+    // The "Add cue" button's action: appends a new timeline cue with
+    // defaults (PlayScene for the first scene, name "cue", one second after
+    // the last cue so it never collides with an existing time -
+    // Show::addCue replaces a cue at an existing time).
+    void addCueDefault();
     void renderConsoleWindow();
     void renderModals();
     // --- Open/Save As file dialogs (ImGuiFileDialog) -------------------------

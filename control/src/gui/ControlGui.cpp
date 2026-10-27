@@ -2075,6 +2075,21 @@ void ControlGuiApp::renderLayerTracks(Layer& layer)
     }
 }
 
+void ControlGuiApp::addCueDefault()
+{
+    Show& show = m_Editor.show();
+    Cue cue;
+    // One second after the last cue (or t=0 on an empty timeline):
+    // Show::addCue replaces a cue at an existing time, so a default equal
+    // to the last cue's time would silently overwrite it instead of adding
+    // a row (the button stopped adding cues after the first press).
+    cue.time = show.cues.empty() ? Time::zero() : show.cues.back().time + Time::fromSeconds(1.0);
+    cue.name = "cue";
+    const Id sceneId = show.scenes.empty() ? 1 : show.scenes.front().id;
+    cue.action = PlayScene{sceneId};
+    show.addCue(std::move(cue));
+}
+
 void ControlGuiApp::renderCuesTab()
 {
     Show& show = m_Editor.show();
@@ -2160,12 +2175,7 @@ void ControlGuiApp::renderCuesTab()
     }
     if (ImGui::Button("Add cue"))
     {
-        Cue cue;
-        cue.time = show.cues.empty() ? Time::zero() : show.cues.back().time;
-        cue.name = "cue";
-        const Id sceneId = show.scenes.empty() ? 1 : show.scenes.front().id;
-        cue.action = PlayScene{sceneId};
-        show.addCue(std::move(cue));
+        addCueDefault();
         m_Editor.touch();
     }
 }
@@ -3166,6 +3176,14 @@ void ControlGuiApp::testTouchEditor(const std::string& name)
 {
     m_Editor.show().name = name;
     m_Editor.touch();
+}
+
+std::size_t ControlGuiApp::testAddCue()
+{
+    // The exact action of the "Add cue" button (no ImGui involved).
+    addCueDefault();
+    m_Editor.touch();
+    return m_Editor.show().cues.size();
 }
 
 // --- self test ---------------------------------------------------------------------------

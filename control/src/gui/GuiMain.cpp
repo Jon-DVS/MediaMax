@@ -383,6 +383,19 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
         modalReport += "\n";
     }
 
+    // 3b) Show editor "Add cue" (issue 12): each press must add a cue. The
+    //     self-test editor starts with an empty timeline, so the first press
+    //     adds one cue (at t=0) and the second must add another - before the
+    //     fix the new cue's default time equalled the last cue's, so
+    //     Show::addCue replaced it and the timeline never grew past one.
+    const std::size_t cuesAfter1 = app.testAddCue();
+    const std::size_t cuesAfter2 = app.testAddCue();
+    const bool addCueOk = cuesAfter1 == 1 && cuesAfter2 == 2;
+    modalOk = modalOk && addCueOk;
+    modalReport += std::string(addCueOk ? "PASS " : "FAIL ") +
+                   "editor Add cue adds on every press (cues: " + std::to_string(cuesAfter1) + ", " +
+                   std::to_string(cuesAfter2) + ")\n";
+
     // 4) Auto-push (issue 8): the editor edit from step 1 must have reached
     //    the system via the debounced auto-push during the frame phases.
     //    Keep rendering frames (the push happens in frame()) while polling
