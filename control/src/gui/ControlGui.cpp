@@ -1682,35 +1682,9 @@ void ControlGuiApp::renderShowEditorWindow()
         ImGui::End();
         return;
     }
-    // The editor lives in a narrow docked pane, so the toolbar is two rows
-    // (file actions, then system actions) instead of one row that wraps.
-    if (ImGui::Button("New"))
-    {
-        m_Editor.newShow();
-        m_EditorError.clear();
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Open..."))
-    {
-        openFileDialog();
-    }
-    ImGui::SameLine();
-    const bool canSave = !m_Editor.filePath().empty();
-    ImGui::BeginDisabled(!canSave);
-    if (ImGui::Button("Save") && canSave)
-    {
-        std::string error;
-        if (!saveEditorFile(m_Editor.filePath(), error))
-        {
-            m_EditorError = error;
-        }
-    }
-    ImGui::EndDisabled();
-    ImGui::SameLine();
-    if (ImGui::Button("Save As..."))
-    {
-        saveAsFileDialog();
-    }
+    // The editor lives in a narrow docked pane; the file actions (New /
+    // Open / Save / Save As) live in the File menu only (issue 19), so the
+    // toolbar is just the system actions row.
     SystemConnection* active = activeConnection();
     ImGui::BeginDisabled(!active);
     if (ImGui::Button("Push to system") && active)
