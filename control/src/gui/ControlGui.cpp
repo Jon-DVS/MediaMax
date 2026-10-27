@@ -13,6 +13,8 @@
 #include <imgui_internal.h>
 // std::string overloads for the text input widgets.
 #include <imgui_stdlib.h>
+// Open / Save As file dialogs (vendored, MIT - third_party/ImGuiFileDialog).
+#include "ImGuiFileDialog.h"
 
 #include "gui/GuiCrash.h"
 #include "mediamax/net/ControlClient.h"
@@ -59,23 +61,30 @@ const ImVec4 kActiveSceneColor = {0.2f, 0.5f, 0.27f, 1.0f};
 //   popup id = ImHashStr(name, 0, host id)      (window->GetID(name))
 constexpr const char* kModalHostName = "##modalhost";
 
+// Keys of the two ImGuiFileDialog dialogs (one shared instance, two
+// independent keys; only one is ever open at a time).
+constexpr const char* kOpenDialogKey = "OpenShow";
+constexpr const char* kSaveAsDialogKey = "SaveAsShow";
+// The show files the dialogs accept (filter syntax: dot-prefixed
+// extensions, comma separated).
+constexpr const char* kShowFilter = ".json";
+// Reasonable minimum size for the file dialog windows (the user can still
+// enlarge them).
+const ImVec2 kFileDialogMinSize(640.0f, 440.0f);
+const ImGuiWindowFlags kFileDialogFlags = ImGuiWindowFlags_NoDocking |
+                                           ImGuiWindowFlags_NoSavedSettings |
+                                           ImGuiWindowFlags_NoCollapse;
+
 ImGuiID modalPopupId(const char* name)
 {
     return ImHashStr(name, 0, ImHashStr(kModalHostName));
 }
 
 // Maps a test-hook name to the popup's display name (the string used in the
-// BeginPopupModal() calls); null for unknown names.
+// BeginPopupModal() calls); null for unknown names and for the file dialogs
+// (which are not popups - see fileDialogKey()).
 const char* modalPopupName(const std::string& which)
 {
-    if (which == "open")
-    {
-        return "Open show...";
-    }
-    if (which == "saveas")
-    {
-        return "Save show as...";
-    }
     if (which == "pull")
     {
         return "Pull show from system";
@@ -157,6 +166,9 @@ void ControlGuiApp::frame()
     renderConsoleWindow();
     renderModals();
     ImGui::End();
+    // The Open / Save As file dialogs own their windows; render them
+    // top-level, outside the modal host. No-op while none is open.
+    renderFileDialogs();
     if (m_FirstFrame)
     {
         m_FirstFrame = false;
@@ -389,10 +401,7 @@ void ControlGuiApp::renderMenuBar()
         }
         if (ImGui::MenuItem("Open..."))
         {
-            m_OpenModal = true;
-            m_OpenSelection = -1;
-            refreshOpenFiles();
-            ImGui::OpenPopup(modalPopupId("Open show..."));
+            openFileDialog();
         }
         const bool canSave = !m_Editor.filePath().empty();
         if (ImGui::MenuItem("Save", nullptr, nullptr, canSave) && canSave)
@@ -405,9 +414,7 @@ void ControlGuiApp::renderMenuBar()
         }
         if (ImGui::MenuItem("Save As..."))
         {
-            m_SaveAsModal = true;
-            m_SaveAsPath = m_Editor.filePath();
-            ImGui::OpenPopup(modalPopupId("Save show as..."));
+            saveAsFileDialog();
         }
         ImGui::Separator();
         if (ImGui::MenuItem("Exit"))
@@ -1413,10 +1420,7 @@ void ControlGuiApp::renderShowEditorWindow()
     ImGui::SameLine();
     if (ImGui::Button("Open..."))
     {
-        m_OpenModal = true;
-        m_OpenSelection = -1;
-        refreshOpenFiles();
-        ImGui::OpenPopup(modalPopupId("Open show..."));
+        openFileDialog();
     }
     ImGui::SameLine();
     const bool canSave = !m_Editor.filePath().empty();
@@ -1433,9 +1437,7 @@ void ControlGuiApp::renderShowEditorWindow()
     ImGui::SameLine();
     if (ImGui::Button("Save As..."))
     {
-        m_SaveAsModal = true;
-        m_SaveAsPath = m_Editor.filePath();
-        ImGui::OpenPopup(modalPopupId("Save show as..."));
+        saveAsFileDialog();
     }
     SystemConnection* active = activeConnection();
     ImGui::BeginDisabled(!active);
@@ -2265,94 +2267,106 @@ void ControlGuiApp::renderConsoleWindow()
     ImGui::End();
 }
 
-// --- modals ---------------------------------------------------------------------------
+// --- Open / Save As file dialogs (ImGuiFileDialog) --------------------------------------
 
-void ControlGuiApp::refreshOpenFiles()
+const char* ControlGuiApp::fileDialogKey(const std::string& which)
 {
-    m_OpenFiles.clear();
-    std::error_code ec;
-    auto it = std::filesystem::directory_iterator(m_OpenDir, ec);
-    if (ec)
+    if (which == "open")
     {
-        return;
+        return kOpenDialogKey;
     }
-    for (; it != std::filesystem::directory_iterator(); it.increment(ec))
+    if (which == "saveas")
     {
-        std::error_code fec;
-        if (it->is_regular_file(fec) && it->path().extension() == ".json")
+        return kSaveAsDialogKey;
+    }
+    return nullptr;
+}
+
+std::string ControlGuiApp::showDir() const
+{
+    if (!m_Editor.filePath().empty())
+    {
+        const std::filesystem::path p(m_Editor.filePath());
+        if (p.has_parent_path())
         {
-            m_OpenFiles.push_back(it->path().string());
+            return p.parent_path().string();
         }
     }
-    std::sort(m_OpenFiles.begin(), m_OpenFiles.end());
+    return ".";
 }
+
+void ControlGuiApp::openFileDialog()
+{
+    IGFD::FileDialogConfig config;
+    config.path = showDir();
+    IGFD::FileDialog::Instance()->OpenDialog(kOpenDialogKey, "Open show...", kShowFilter, config);
+}
+
+void ControlGuiApp::saveAsFileDialog()
+{
+    IGFD::FileDialogConfig config;
+    config.path = showDir();
+    config.fileName =
+        m_Editor.filePath().empty() ? std::string("show.json")
+                                    : std::filesystem::path(m_Editor.filePath()).filename().string();
+    IGFD::FileDialog::Instance()->OpenDialog(kSaveAsDialogKey, "Save show as...", kShowFilter,
+                                             config);
+}
+
+void ControlGuiApp::renderFileDialogs()
+{
+    // One shared instance, one dialog at a time. Display() returns true when
+    // a result was obtained (OK or Cancel); the result is read, then the
+    // dialog is closed.
+    IGFD::FileDialog* dlg = IGFD::FileDialog::Instance();
+
+    if (dlg->Display(kOpenDialogKey, kFileDialogFlags, kFileDialogMinSize))
+    {
+        if (dlg->IsOk())
+        {
+            const auto selection = dlg->GetSelection();
+            if (!selection.empty())
+            {
+                std::string error;
+                if (m_Editor.loadFile(selection.begin()->second, error))
+                {
+                    m_EditorError.clear();
+                }
+                else
+                {
+                    m_EditorError = error;
+                }
+            }
+        }
+        dlg->Close();
+    }
+
+    if (dlg->Display(kSaveAsDialogKey, kFileDialogFlags, kFileDialogMinSize))
+    {
+        if (dlg->IsOk())
+        {
+            const std::string path = dlg->GetFilePathName();
+            if (!path.empty())
+            {
+                std::string error;
+                if (m_Editor.saveFile(path, error))
+                {
+                    m_EditorError.clear();
+                }
+                else
+                {
+                    m_EditorError = error;
+                }
+            }
+        }
+        dlg->Close();
+    }
+}
+
+// --- modals ---------------------------------------------------------------------------
 
 void ControlGuiApp::renderModals()
 {
-    if (m_OpenModal)
-    {
-        if (ImGui::BeginPopupModal("Open show...", &m_OpenModal))
-        {
-            ImGui::InputTextWithHint("##opendir", "directory", &m_OpenDir);
-            ImGui::SameLine();
-            if (ImGui::Button("Refresh##open"))
-            {
-                refreshOpenFiles();
-            }
-            if (ImGui::BeginChild("openfiles", ImVec2(-FLT_MAX, 220.0f), true))
-            {
-                for (size_t i = 0; i < m_OpenFiles.size(); ++i)
-                {
-                    if (ImGui::Selectable(m_OpenFiles[i].c_str(),
-                                          m_OpenSelection == static_cast<int>(i)))
-                    {
-                        m_OpenSelection = static_cast<int>(i);
-                    }
-                }
-                if (m_OpenFiles.empty())
-                {
-                    ImGui::TextDisabled("(no .json files)");
-                }
-            }
-            ImGui::EndChild();
-            if (ImGui::Button("Open##do") && m_OpenSelection >= 0 &&
-                m_OpenSelection < static_cast<int>(m_OpenFiles.size()))
-            {
-                std::string error;
-                if (m_Editor.loadFile(m_OpenFiles[static_cast<size_t>(m_OpenSelection)], error))
-                {
-                    m_EditorError.clear();
-                    m_OpenModal = false;
-                }
-                else
-                {
-                    m_EditorError = error;
-                }
-            }
-            ImGui::EndPopup();
-        }
-    }
-    if (m_SaveAsModal)
-    {
-        if (ImGui::BeginPopupModal("Save show as...", &m_SaveAsModal))
-        {
-            ImGui::InputText("Path", &m_SaveAsPath);
-            if (ImGui::Button("Save##saveas") && !m_SaveAsPath.empty())
-            {
-                std::string error;
-                if (m_Editor.saveFile(m_SaveAsPath, error))
-                {
-                    m_EditorError.clear();
-                    m_SaveAsModal = false;
-                }
-                else
-                {
-                    m_EditorError = error;
-                }
-            }
-            ImGui::EndPopup();
-        }
-    }
     if (m_PullModal)
     {
         if (ImGui::BeginPopupModal("Pull show from system", &m_PullModal))
@@ -2691,7 +2705,7 @@ void ControlGuiApp::renderModals()
 
 bool ControlGuiApp::testOpenModal(const std::string& which)
 {
-    if (modalPopupName(which) == nullptr)
+    if (fileDialogKey(which) == nullptr && modalPopupName(which) == nullptr)
     {
         return false;
     }
@@ -2703,25 +2717,25 @@ bool ControlGuiApp::testOpenModal(const std::string& which)
 
 void ControlGuiApp::openModal(const std::string& which)
 {
-    // The same state the UI buttons/menus set before calling OpenPopup().
-    // Must run inside frame() (the modal host window is current).
+    // The same state the UI buttons/menus set. Must run inside frame()
+    // (the modal host window is current for the popups; the file dialogs
+    // only need a valid ImGui context).
+    if (which == "open")
+    {
+        openFileDialog();
+        return;
+    }
+    if (which == "saveas")
+    {
+        saveAsFileDialog();
+        return;
+    }
     const char* name = modalPopupName(which);
     if (name == nullptr)
     {
         return;
     }
-    if (which == "open")
-    {
-        m_OpenModal = true;
-        m_OpenSelection = -1;
-        refreshOpenFiles();
-    }
-    else if (which == "saveas")
-    {
-        m_SaveAsModal = true;
-        m_SaveAsPath = m_Editor.filePath();
-    }
-    else if (which == "pull")
+    if (which == "pull")
     {
         m_PullModal = true;
     }
@@ -2780,6 +2794,10 @@ void ControlGuiApp::openModal(const std::string& which)
 
 bool ControlGuiApp::testModalOpen(const std::string& which) const
 {
+    if (const char* key = fileDialogKey(which))
+    {
+        return IGFD::FileDialog::Instance()->IsOpened(key);
+    }
     const char* name = modalPopupName(which);
     if (name == nullptr)
     {
@@ -2801,18 +2819,15 @@ bool ControlGuiApp::testModalOpen(const std::string& which) const
 
 bool ControlGuiApp::testCloseModal(const std::string& which)
 {
+    if (fileDialogKey(which) != nullptr)
+    {
+        // Close() is immediate (clears the open key); the window stops
+        // rendering on the next frame.
+        IGFD::FileDialog::Instance()->Close();
+        return true;
+    }
     // Clearing the app-side flag is the documented close path: BeginPopupModal
     // sees *p_open == false and calls ClosePopupToLevel() itself.
-    if (which == "open")
-    {
-        m_OpenModal = false;
-        return true;
-    }
-    if (which == "saveas")
-    {
-        m_SaveAsModal = false;
-        return true;
-    }
     if (which == "pull")
     {
         m_PullModal = false;

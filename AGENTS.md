@@ -29,6 +29,8 @@ render/    Vulkan/NVRHI renderer (static lib `mediamax_render`) + GPU tests
 playback/  `mediamax_playback` executable
 control/   `mediamax_control` executable (CLI/REPL + gui/ Dear ImGui app)
 examples/  self-contained example shows + generated media (see examples/README.md)
+third_party/ vendored third-party sources (ImGuiFileDialog, MIT - used only
+             by the control GUI, compiled as its own lib at default /W3)
 cmake/     build helpers; docs/ for the reference docs; skills/ for playbooks
 ```
 
@@ -88,7 +90,8 @@ MSVC workflow notes:
 - Build large logs to a file and read the tail, e.g.
   `cmake --build build --config Release 2>&1 | Tee-Object build.log | Select-Object -Last 20`.
 - The third-party doctest/miniaudio C5285/C4244 warnings are known-accepted;
-  do not "fix" warnings inside `build/_deps`.
+  do not "fix" warnings inside `build/_deps` or `third_party/` (the
+  vendored code compiles at the default warning level on purpose).
 
 ## Coding conventions
 

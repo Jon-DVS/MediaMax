@@ -286,7 +286,14 @@ Dear ImGui pipeline compiled against it stays valid across recreates. On
 Windows the window frame opts into dark mode (`DwmSetWindowAttribute`) so a
 light Windows theme does not put a white title bar over the dark UI.
 
-Modal dialogs (Open/Save As/Pull/About) are Begun inside a small invisible
+The Open / Save As dialogs are not popups at all: they are windows owned by
+the vendored [ImGuiFileDialog](https://github.com/aiekick/ImGuiFileDialog)
+(v0.6.8, `third_party/ImGuiFileDialog/`, built as the `imguifiledialog`
+static library). `ControlGuiApp::renderFileDialogs()` runs them top-level
+after the rest of the UI (their `Display()` is a no-op while closed) and
+applies the result on OK (editor `loadFile`/`saveFile`, errors on the
+error line). The remaining modal dialogs (Pull/About/Move/Edit/Warp) are
+Begun inside a small invisible
 `##modalhost` window that `ControlGuiApp::frame()` keeps open for the whole
 frame, and every `OpenPopup()` call passes the explicit id
 `ImHashStr(name, 0, ImHashStr("##modalhost"))`. This is required, not a
