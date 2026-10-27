@@ -95,7 +95,9 @@ Rename the system (reflected in `status`/`ping`).
 Load a show file (see [SHOW_FORMAT.md](SHOW_FORMAT.md)) and make it active.
 Referenced media files are loaded into the library automatically (file-local
 media ids are remapped to library ids); missing media files are logged and
-skipped, not fatal.
+skipped, not fatal. Relative media paths resolve against the show file's
+directory (a show is a self-contained folder), not the engine process's
+working directory; absolute media paths are used as written.
 
 - Params: `path` (string, required) — path readable by the engine process;
   `preserveState` (bool, optional, default `false`) — see `show.loadJson`.
@@ -109,6 +111,11 @@ show editor) push an edited show to a system without a shared filesystem.
 
 - Params: `show` (object, required) — the complete show document (see
   [SHOW_FORMAT.md](SHOW_FORMAT.md)), as `Show::toJson` produces it;
+  `mediaDir` (string, optional) — the directory that relative media paths
+  in the document resolve against. The control GUI sends the directory of
+  the show file it has open, so a push behaves like a `show.load` of that
+  file; when omitted, relative paths are used as written (engine working
+  directory);
   `preserveState` (bool, optional, default `false`).
 - Result: `{"name","scenes":<n>,"media":<n>}` (same as `show.load`).
 - Errors: missing/non-object `show` parameter, an invalid document, or a

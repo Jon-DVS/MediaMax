@@ -9,6 +9,7 @@
 // lets the control interface validate commands before sending.
 
 #include <exception>
+#include <filesystem>
 #include <functional>
 #include <string>
 #include <vector>
@@ -60,6 +61,12 @@ public:
     // Static helpers used by both the command implementations and tests.
     static std::vector<std::string> supportedMethods();
 
+    // Resolves a media path from a show document against `mediaBase`:
+    // absolute paths pass through unchanged, relative paths are qualified
+    // with the base directory (an empty base leaves the path as written).
+    static std::string resolveMediaPath(const std::string& path,
+                                        const std::filesystem::path& mediaBase);
+
 private:
     // --- Individual command handlers (all return a result JSON) -------------
 
@@ -93,9 +100,13 @@ private:
     // active. Shared by show.load (after the file read) and show.loadJson.
     // `context` is only used in error messages ("show file" / "show JSON").
     // `preserveState` keeps the live playback state across the load (see
-    // PlaybackEngine::loadShow).
+    // PlaybackEngine::loadShow). `mediaBase` is the directory that relative
+    // media paths in the document resolve against - the show file's
+    // directory for show.load, the `mediaDir` parameter for show.loadJson;
+    // empty leaves the paths as written.
     nlohmann::json applyShowDocument(const nlohmann::json& parsed, const char* context,
-                                     bool preserveState) const;
+                                     bool preserveState,
+                                     const std::filesystem::path& mediaBase) const;
 
     // Parameter extraction helpers (throw protocol::ParameterError).
     static std::string requireString(const nlohmann::json& params, const char* key);

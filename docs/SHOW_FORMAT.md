@@ -55,8 +55,11 @@ rationals afterwards.
 - `id` — unsigned int, unique within the file. **File-local**: when the
   engine loads the show it loads each file and remaps these ids to its own
   media-library ids (layers referring to the same id are remapped too).
-- `path` — path relative to (or absolute for) the engine process's working
-  directory, readable by the engine.
+- `path` — path relative to (or absolute for) the show file's directory,
+  readable by the engine. A show is a self-contained folder: the show file
+  plus the media it references, so a relative `path` resolves against the
+  directory the show file was loaded from — the engine's working directory
+  is irrelevant.
 
 Supported media: video containers (mp4/mov/...), images (png/jpg/bmp/tiff/
 webp/gif — still images, or GIF as animation), audio.

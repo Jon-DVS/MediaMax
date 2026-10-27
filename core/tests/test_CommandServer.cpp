@@ -37,6 +37,7 @@ struct Fixture
     CommandServer server;
     Id displayA = kInvalidId;
     Id displayB = kInvalidId;
+    std::string lastLoadedPath; // the (resolved) path the last media load used
 
     Fixture()
         : engine(media)
@@ -47,7 +48,17 @@ struct Fixture
         engine.loadShow(mediamax::test::makeTestShow());
         mediamax::test::loadShowMedia(media, mediamax::test::makeTestShow());
         server.setMediaLoadFunction([this](const std::string& path, std::string& error) {
-            return media.load(path, error);
+            lastLoadedPath = path;
+            // The synthetic media factory keys on the bare relative paths
+            // the fixtures load with. show.load resolves media against the
+            // show file's directory, so canonicalize base-qualified variants
+            // of the same file onto that string (the library dedups by path).
+            const std::string leaf = std::filesystem::path(path).filename().string();
+            const std::string canonical =
+                leaf == "video-a.mp4" ? "media/video-a.mp4"
+                : leaf == "video-b.mp4" ? "media/video-b.mp4"
+                                        : path;
+            return media.load(canonical, error);
         });
     }
 
@@ -784,6 +795,94 @@ TEST_CASE("show.load tolerates missing media files")
     std::filesystem::remove(path);
 }
 
+TEST_CASE("show.load resolves relative media against the show file's directory")
+{
+    Fixture f;
+    // The show file lives in the temp directory, not in the process CWD:
+    // its relative media path must resolve against the file's parent.
+    const nlohmann::json show = R"({
+        "app": "mediamax-show",
+        "version": 1,
+        "name": "Basedir",
+        "frameRate": {"num": 30, "den": 1},
+        "media": [{"id": 1, "path": "media/video-a.mp4"}],
+        "scenes": [
+            {"id": 1, "name": "S", "layers": [
+                {"id": 10, "name": "vid", "mediaId": 1}
+            ]}
+        ]
+    })"_json;
+    const auto path = tempFile("basedir", show.dump());
+    const Response resp = f.run("show.load", {{"path", path.string()}});
+    REQUIRE(resp.ok);
+
+    // The load was attempted at the show file's directory, not the CWD.
+    const auto expected = std::filesystem::path(path).parent_path() / "media/video-a.mp4";
+    CHECK(f.lastLoadedPath == expected.string());
+
+    // And it succeeded: the layer was remapped onto the library asset.
+    const Scene* scene = f.engine.show().findScene(1);
+    REQUIRE(scene);
+    CHECK(scene->layers[0].mediaId == kMediaA);
+
+    std::filesystem::remove(path);
+}
+
+TEST_CASE("show.load leaves absolute media paths untouched")
+{
+    Fixture f;
+    const auto absolute =
+        (std::filesystem::temp_directory_path() / "mediamax-abs" / "video-a.mp4").string();
+    nlohmann::json show = R"({
+        "app": "mediamax-show",
+        "version": 1,
+        "name": "AbsMedia",
+        "frameRate": {"num": 30, "den": 1},
+        "media": [{"id": 1, "path": "media/video-a.mp4"}],
+        "scenes": [
+            {"id": 1, "name": "S", "layers": [
+                {"id": 10, "name": "vid", "mediaId": 1}
+            ]}
+        ]
+    })"_json;
+    show["media"][0]["path"] = absolute;
+    const auto path = tempFile("absmedia", show.dump());
+    const Response resp = f.run("show.load", {{"path", path.string()}});
+    REQUIRE(resp.ok);
+
+    CHECK(f.lastLoadedPath == absolute);
+    const Scene* scene = f.engine.show().findScene(1);
+    REQUIRE(scene);
+    CHECK(scene->layers[0].mediaId == kMediaA);
+
+    std::filesystem::remove(path);
+}
+
+TEST_CASE("show.loadJson resolves relative media against the mediaDir parameter")
+{
+    Fixture f;
+    const nlohmann::json doc = R"({
+        "app": "mediamax-show",
+        "version": 1,
+        "name": "DirJson",
+        "frameRate": {"num": 30, "den": 1},
+        "media": [{"id": 1, "path": "media/video-b.mp4"}],
+        "scenes": [
+            {"id": 1, "name": "S", "layers": [
+                {"id": 10, "name": "vid", "mediaId": 1}
+            ]}
+        ]
+    })"_json;
+    const std::string dir = (std::filesystem::temp_directory_path() / "mediamax-dir").string();
+    const Response resp = f.run("show.loadJson", {{"show", doc}, {"mediaDir", dir}});
+    REQUIRE(resp.ok);
+
+    CHECK(f.lastLoadedPath == (std::filesystem::path(dir) / "media/video-b.mp4").string());
+    const Scene* scene = f.engine.show().findScene(1);
+    REQUIRE(scene);
+    CHECK(scene->layers[0].mediaId == kMediaB);
+}
+
 TEST_CASE("show.loadJson loads an inline show document")
 {
     Fixture f;
@@ -801,6 +900,9 @@ TEST_CASE("show.loadJson loads an inline show document")
     // The show's media ids remap onto library assets; the fixture already
     // had both files, so the deduped remap lands on the existing assets.
     CHECK(f.media.count() == 2);
+    // No mediaDir given: the document's relative media paths are used as
+    // written (the last one loaded, in show order).
+    CHECK(f.lastLoadedPath == "media/video-b.mp4");
     for (const auto& ref : f.engine.show().media)
     {
         CHECK(ref.id != kInvalidId);

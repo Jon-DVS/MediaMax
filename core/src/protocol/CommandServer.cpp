@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <filesystem>
 #include <map>
 
 #include "mediamax/blend/Blend.h"
@@ -324,14 +325,18 @@ nlohmann::json CommandServer::handleShowLoad(const nlohmann::json& params) const
     {
         throw ParameterError("invalid JSON in show file: " + std::string(e.what()));
     }
-    return applyShowDocument(parsed, "show file", optionalBool(params, "preserveState"));
+    // A show is a self-contained folder: resolve its media against the show
+    // file's directory, not the engine process's working directory.
+    return applyShowDocument(parsed, "show file", optionalBool(params, "preserveState"),
+                             std::filesystem::path(path).parent_path());
 }
 
 // Parses a show document (a parsed JSON object), loads and remaps the media it
 // references, and makes the show active. Shared by show.load and show.loadJson.
 nlohmann::json CommandServer::applyShowDocument(const nlohmann::json& parsed,
                                                 const char* context,
-                                                bool preserveState) const
+                                                bool preserveState,
+                                                const std::filesystem::path& mediaBase) const
 {
     std::string error;
     auto show = Show::fromJson(parsed, error);
@@ -343,17 +348,19 @@ nlohmann::json CommandServer::applyShowDocument(const nlohmann::json& parsed,
     // Load the media the show references. Show-file media ids are local to
     // the file, so each loaded asset is remapped to its library id. Missing
     // files are logged and skipped so partially missing media does not block
-    // the show.
+    // the show. Relative paths resolve against mediaBase (the show file's
+    // directory for show.load; see resolveMediaPath).
     if (m_LoadMedia)
     {
         std::map<Id, Id> remap;
         for (const auto& ref : show->media)
         {
             std::string loadError;
-            const Id libraryId = m_LoadMedia(ref.path, loadError);
+            const std::string mediaPath = resolveMediaPath(ref.path, mediaBase);
+            const Id libraryId = m_LoadMedia(mediaPath, loadError);
             if (libraryId == kInvalidId)
             {
-                Logger::instance().warning("Show references missing media '{}': {}", ref.path,
+                Logger::instance().warning("Show references missing media '{}': {}", mediaPath,
                                            loadError);
                 continue;
             }
@@ -395,7 +402,28 @@ nlohmann::json CommandServer::handleShowLoadJson(const nlohmann::json& params) c
     {
         throw ParameterError("show.loadJson requires a 'show' object parameter");
     }
-    return applyShowDocument(params.at("show"), "show JSON", optionalBool(params, "preserveState"));
+    // mediaDir: the directory the document's relative media paths resolve
+    // against - an authoring tool sends the directory of the show file it
+    // has open, so a push behaves like a show.load of that file. Omitted:
+    // relative paths are used as written (process working directory).
+    std::filesystem::path mediaBase;
+    if (const auto mediaDir = optionalString(params, "mediaDir"); mediaDir && !mediaDir->empty())
+    {
+        mediaBase = std::filesystem::path(*mediaDir);
+    }
+    return applyShowDocument(params.at("show"), "show JSON", optionalBool(params, "preserveState"),
+                             mediaBase);
+}
+
+std::string CommandServer::resolveMediaPath(const std::string& path,
+                                            const std::filesystem::path& mediaBase)
+{
+    std::filesystem::path p(path);
+    if (!p.is_absolute() && !mediaBase.empty())
+    {
+        p = mediaBase / p;
+    }
+    return p.string();
 }
 
 nlohmann::json CommandServer::handleShowSave(const nlohmann::json& params) const

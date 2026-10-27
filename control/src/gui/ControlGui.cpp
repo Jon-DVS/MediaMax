@@ -319,6 +319,25 @@ void ControlGuiApp::consoleSubmit()
     sendActive(method, params, error);
 }
 
+nlohmann::json ControlGuiApp::showPushParams()
+{
+    nlohmann::json params = {{"show", m_Editor.documentJson()}, {"preserveState", true}};
+    // Relative media paths in the document resolve against the directory of
+    // the file the editor has open (mediaDir), so a push behaves like a
+    // show.load of that file on the system. An unsaved document has no
+    // directory; the system then uses its own working directory.
+    const std::string& file = m_Editor.filePath();
+    if (!file.empty())
+    {
+        const std::filesystem::path dir = std::filesystem::path(file).parent_path();
+        if (!dir.empty())
+        {
+            params["mediaDir"] = dir.string();
+        }
+    }
+    return params;
+}
+
 void ControlGuiApp::pushToActiveSystem()
 {
     SystemConnection* active = activeConnection();
@@ -331,8 +350,7 @@ void ControlGuiApp::pushToActiveSystem()
     std::string error;
     // preserveState: a running system keeps playing (state, time, overrides)
     // instead of restarting at 0.
-    if (sendActive("show.loadJson", {{"show", m_Editor.documentJson()}, {"preserveState", true}},
-                   error))
+    if (sendActive("show.loadJson", showPushParams(), error))
     {
         m_EditorError.clear();
     }
@@ -381,13 +399,13 @@ void ControlGuiApp::autoPushEditedShow()
     }
     m_NextAutoPushAttempt = now + kAutoPushDelay;
 
-    json doc = m_Editor.documentJson();
+    json params = showPushParams();
     bool allOk = true;
     for (SystemConnection* target : targets)
     {
         json result;
         std::string error;
-        if (target->send("show.loadJson", {{"show", doc}, {"preserveState", true}}, result, error))
+        if (target->send("show.loadJson", params, result, error))
         {
             log("auto-pushed show '" + m_Editor.show().name + "' to " + target->name());
         }

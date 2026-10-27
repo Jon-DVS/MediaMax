@@ -146,6 +146,11 @@ private:
     bool sendActive(const std::string& method, const nlohmann::json& params, std::string& error,
                     nlohmann::json* outResult = nullptr);
     void consoleSubmit();
+    // Builds the show.loadJson params for pushing the editor's document to a
+    // system: the document plus the directory of the file it was opened
+    // from (mediaDir), so relative media paths resolve the same way a
+    // show.load of that file would. An unsaved document carries no mediaDir.
+    nlohmann::json showPushParams();
     void pushToActiveSystem();
     // Debounced auto-push of edited shows to every connected system
     // (show.loadJson with preserveState, so live edits do not restart
