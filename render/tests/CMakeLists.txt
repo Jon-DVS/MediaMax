@@ -15,6 +15,13 @@ target_link_libraries(mediamax_render_tests
         mediamax::render
         doctest::doctest)
 
+# Directory holding the ffmpeg CLI, used by the media tests to generate a
+# real video file (empty -> that part of the test reports "skipping").
+if(MEDIAMAX_HAS_FFMPEG)
+    target_compile_definitions(mediamax_render_tests PRIVATE
+        MEDIAMAX_FFMPEG_TOOLS_DIR="${MEDIAMAX_FFMPEG_TOOLS_DIR}")
+endif()
+
 mediamax_apply_compiler_settings(mediamax_render_tests)
 
 # Deploy the Vulkan loader next to the test executable so it resolves without

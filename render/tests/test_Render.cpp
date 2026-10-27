@@ -9,12 +9,35 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <functional>
 #include <memory>
+#include <system_error>
+#include <vector>
+
+// Included at file scope (not inside a namespace) so the Win32 process API
+// stays in the global namespace; only the media tests use it.
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 #include "mediamax/blend/Blend.h"
 #include "mediamax/display/WarpMap.h"
 #include "mediamax/render/SceneRenderer.h"
 #include "mediamax/render/VulkanContext.h"
+
+#ifdef MEDIAMAX_HAS_FFMPEG
+#include "mediamax/media/FFmpegSupport.h"
+#endif
 
 using namespace mediamax;
 using namespace mediamax::render;
@@ -185,6 +208,110 @@ nvrhi::TextureHandle makeOffscreenTarget(nvrhi::DeviceHandle device, int w, int 
         .enableAutomaticStateTracking(nvrhi::ResourceStates::RenderTarget);
     return device->createTexture(td);
 }
+
+#ifdef MEDIAMAX_HAS_FFMPEG
+
+// --- Media generation (issue 20: final video + image rendering) ------------
+
+// Locates the ffmpeg CLI that ships with the fetched FFmpeg build (used to
+// generate a real video file). Returns an empty path when it is not present.
+std::filesystem::path findFfmpegCli()
+{
+    const std::filesystem::path dir(MEDIAMAX_FFMPEG_TOOLS_DIR);
+    for (const char* name : {"ffmpeg.exe", "ffmpeg"})
+    {
+        const std::filesystem::path candidate = dir / name;
+        if (std::filesystem::exists(candidate))
+        {
+            return candidate;
+        }
+    }
+    return {};
+}
+
+// Runs a command line synchronously and returns the process exit code (-1 if
+// it could not be started). On Windows this bypasses cmd.exe entirely:
+// std::system routes through the shell, whose quote handling mangles the
+// quoted executable/output paths.
+int runCommandLine(const std::string& commandLine)
+{
+#if defined(_WIN32)
+    // The test paths are ASCII; a byte-for-byte widening is correct here.
+    std::wstring wide(commandLine.begin(), commandLine.end());
+    STARTUPINFOW si{};
+    si.cb = static_cast<DWORD>(sizeof(si));
+    PROCESS_INFORMATION pi{};
+    if (!::CreateProcessW(nullptr, wide.data(), nullptr, nullptr, FALSE, 0, nullptr,
+                          nullptr, &si, &pi))
+    {
+        return -1;
+    }
+    ::WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD exitCode = 0;
+    ::GetExitCodeProcess(pi.hProcess, &exitCode);
+    ::CloseHandle(pi.hProcess);
+    ::CloseHandle(pi.hThread);
+    return static_cast<int>(exitCode);
+#else
+    return std::system(commandLine.c_str());
+#endif
+}
+
+// Writes a minimal 24-bit BMP (rows bottom-up, padded to 4 bytes).
+bool writeTestBmp(const std::filesystem::path& path, int width, int height,
+                  const std::function<void(int x, int y, std::uint8_t& r, std::uint8_t& g,
+                                           std::uint8_t& b)>& pixel)
+{
+    const int rowBytes = width * 3;
+    const int paddedRow = (rowBytes + 3) & ~3;
+    const int pixelDataSize = paddedRow * height;
+
+    std::ofstream out(path, std::ios::binary);
+    if (!out)
+    {
+        return false;
+    }
+
+    // 14-byte file header.
+    unsigned char header[14] = {'B', 'M'};
+    const std::uint32_t fileSize = 14 + 40 + pixelDataSize;
+    std::memcpy(header + 2, &fileSize, 4);
+    std::uint32_t offset = 54;
+    std::memcpy(header + 10, &offset, 4);
+
+    // 40-byte DIB header.
+    unsigned char dib[40] = {};
+    std::uint32_t dibSize = 40;
+    std::memcpy(dib, &dibSize, 4);
+    std::int32_t w = width, h = height;
+    std::memcpy(dib + 4, &w, 4);
+    std::memcpy(dib + 8, &h, 4);
+    std::uint16_t planes = 1, bpp = 24;
+    std::memcpy(dib + 12, &planes, 2);
+    std::memcpy(dib + 14, &bpp, 2);
+    std::uint32_t imgSize = pixelDataSize;
+    std::memcpy(dib + 20, &imgSize, 4);
+
+    out.write(reinterpret_cast<const char*>(header), 14);
+    out.write(reinterpret_cast<const char*>(dib), 40);
+
+    std::vector<unsigned char> row(paddedRow, 0);
+    for (int y = height - 1; y >= 0; --y) // bottom-up
+    {
+        for (int x = 0; x < width; ++x)
+        {
+            unsigned char r = 0, g = 0, b = 0;
+            pixel(x, y, r, g, b);
+            row[x * 3 + 0] = b;
+            row[x * 3 + 1] = g;
+            row[x * 3 + 2] = r;
+        }
+        out.write(reinterpret_cast<const char*>(row.data()), paddedRow);
+    }
+    return static_cast<bool>(out);
+}
+
+#endif // MEDIAMAX_HAS_FFMPEG
 
 } // namespace
 
@@ -632,6 +759,154 @@ TEST_CASE("Rotated layer keeps covering its center")
         const Pixel p = pixelAt(rgba, 256, 128, 128);
         checkClose("g", p.g, 1.f, 2);
     });
+}
+
+TEST_CASE("Final render: decoded video and image media reach the display")
+{
+    // Issue 20: the end-to-end media path on the GPU. A real video file
+    // (generated with the ffmpeg CLI) and a real image file (hand-written
+    // BMP) are decoded through the same FFmpeg source factory the playback
+    // app installs, uploaded as media textures exactly like the media pump
+    // (straight RGBA8), composited over a background color layer, and
+    // verified in the display target - the final output.
+#ifdef MEDIAMAX_HAS_FFMPEG
+    runGpuTest("video+image media", [](Gpu& g) {
+        const std::filesystem::path dir =
+            std::filesystem::temp_directory_path() / "mediamax_render_media";
+        std::error_code ec;
+        std::filesystem::create_directories(dir, ec);
+        const auto videoPath = dir / "final_render_video.mp4";
+        const auto imagePath = dir / "final_render_image.bmp";
+
+        // --- Video: one second of solid 0x204060, 64x64, h264/yuv420p.
+        const auto ffmpegCli = findFfmpegCli();
+        if (ffmpegCli.empty())
+        {
+            std::filesystem::remove(videoPath, ec);
+            DOCTEST_MESSAGE("skipping: ffmpeg CLI not available (cannot generate the video)");
+            return;
+        }
+        const std::string cmd = "\"" + ffmpegCli.string() + "\" -hide_banner -loglevel error -y "
+            "-f lavfi -i color=c=0x204060:s=64x64:d=1:r=10 "
+            "-c:v libx264 -preset ultrafast -pix_fmt yuv420p " +
+            "\"" + videoPath.string() + "\"";
+        if (runCommandLine(cmd) != 0)
+        {
+            std::filesystem::remove(videoPath, ec);
+            DOCTEST_MESSAGE("skipping: ffmpeg failed to generate the video");
+            return;
+        }
+
+        // --- Image: a 64x64 BMP, left half orange, right half yellow.
+        REQUIRE(writeTestBmp(imagePath, 64, 64, [](int x, int, std::uint8_t& r, std::uint8_t& g,
+                                                   std::uint8_t& b) {
+            if (x < 32)
+            {
+                r = 192;
+                g = 48;
+                b = 0;
+            }
+            else
+            {
+                r = 192;
+                g = 192;
+                b = 48;
+            }
+        }));
+
+        std::string error;
+
+        // --- Decode (the same source factory the playback engine installs).
+        auto videoSource = ffmpeg::createSource(videoPath.string(), error);
+        REQUIRE(videoSource != nullptr);
+        VideoFrame videoFrame;
+        REQUIRE(videoSource->seek(Time::zero()));
+        REQUIRE(videoSource->nextVideoFrame(videoFrame, 2000));
+        CHECK(videoFrame.width == 64);
+        CHECK(videoFrame.height == 64);
+        videoSource.reset(); // release the file handle (Windows keeps it open)
+
+        auto imageSource = ffmpeg::createSource(imagePath.string(), error);
+        REQUIRE(imageSource != nullptr);
+        VideoFrame imageFrame;
+        REQUIRE(imageSource->nextVideoFrame(imageFrame, 2000));
+        CHECK(imageFrame.width == 64);
+        CHECK(imageFrame.height == 64);
+        imageSource.reset();
+        std::filesystem::remove(videoPath, ec);
+        std::filesystem::remove(imagePath, ec);
+
+        // --- Upload as media textures (straight RGBA8, like the media pump).
+        const Id videoLayerId = 100;
+        const Id imageLayerId = 101;
+        g.renderer.ensureMediaTexture(videoLayerId, 64, 64);
+        g.renderer.updateMediaTexture(videoLayerId, videoFrame.rgba);
+        g.renderer.ensureMediaTexture(imageLayerId, 64, 64);
+        g.renderer.updateMediaTexture(imageLayerId, imageFrame.rgba);
+
+        // --- Compose: background color, the video quad (left half of the
+        //     scene), the image quad (right half); read back the display
+        //     target (the final output).
+        const Color4 bg{128.f / 255.f, 128.f / 255.f, 128.f / 255.f, 1.f};
+        auto target = makeOffscreenTarget(g.context.nvrhiDevice(), 256, 256);
+        REQUIRE(target != nullptr);
+        REQUIRE(g.renderer.ensureDisplayPipeline(nvrhi::Format::RGBA8_UNORM, error));
+
+        SceneRenderer::FrameInput frame;
+        frame.layers.push_back(colorLayer(bg));
+        auto videoDraw = colorLayer(Color4{});
+        videoDraw.texture = g.renderer.mediaTexture(videoLayerId);
+        videoDraw.mediaSize = Size2i{128, 128};
+        videoDraw.transform.x = 64.f; // covers (0..128, 64..192)
+        videoDraw.transform.y = 128.f;
+        REQUIRE(videoDraw.texture != nullptr);
+        frame.layers.push_back(videoDraw);
+        auto imageDraw = colorLayer(Color4{});
+        imageDraw.texture = g.renderer.mediaTexture(imageLayerId);
+        imageDraw.mediaSize = Size2i{128, 128};
+        imageDraw.transform.x = 192.f; // covers (128..256, 64..192)
+        imageDraw.transform.y = 128.f;
+        REQUIRE(imageDraw.texture != nullptr);
+        frame.layers.push_back(imageDraw);
+        frame.displays.push_back(SceneRenderer::DisplayTarget{
+            target.Get(), Rect2i{0, 0, 256, 256}, nullptr, nullptr, 1.f, false});
+
+        renderOneFrame(g.renderer, frame);
+
+        std::vector<std::uint8_t> rgba;
+        REQUIRE(readBackTexture(g.context.nvrhiDevice(), target, rgba));
+
+        // Video region: the decoded clip's color (h264/yuv420p may shift a
+        // solid color by a couple of levels).
+        const Pixel video = pixelAt(rgba, 256, 64, 128);
+        checkClose("video r", video.r, 32.f / 255.f, 3);
+        checkClose("video g", video.g, 64.f / 255.f, 3);
+        checkClose("video b", video.b, 96.f / 255.f, 3);
+        CHECK(video.a == 255);
+
+        // Image region: both halves of the split BMP (proves the decoded
+        // content, not a flat fill, reached the sampler).
+        const Pixel imgLeft = pixelAt(rgba, 256, 160, 128);
+        checkClose("img L r", imgLeft.r, 192.f / 255.f, 2);
+        checkClose("img L g", imgLeft.g, 48.f / 255.f, 2);
+        checkClose("img L b", imgLeft.b, 0.f / 255.f, 2);
+        const Pixel imgRight = pixelAt(rgba, 256, 224, 128);
+        checkClose("img R r", imgRight.r, 192.f / 255.f, 2);
+        checkClose("img R g", imgRight.g, 192.f / 255.f, 2);
+        checkClose("img R b", imgRight.b, 48.f / 255.f, 2);
+        CHECK(imgRight.a == 255);
+
+        // Background above the quads (y=20 < 64): the color layer survives
+        // the final composite.
+        const Pixel bgPixel = pixelAt(rgba, 256, 128, 20);
+        checkClose("bg r", bgPixel.r, 128.f / 255.f, 2);
+        checkClose("bg g", bgPixel.g, 128.f / 255.f, 2);
+        checkClose("bg b", bgPixel.b, 128.f / 255.f, 2);
+        CHECK(bgPixel.a == 255);
+    });
+#else
+    DOCTEST_MESSAGE("skipping: built without FFmpeg");
+#endif
 }
 
 } // TEST_SUITE("Render")

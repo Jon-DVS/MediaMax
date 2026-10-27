@@ -75,7 +75,7 @@ Run the full suite:
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-- 138+ core cases and 12 GPU cases. The GPU cases self-skip (with a message)
+- 180+ core cases and 16 GPU cases. The GPU cases self-skip (with a message)
   when no usable Vulkan device exists; a green ctest on a GPU machine is the
   bar before committing render changes.
 - doctest note: the `--test-case` filter in `mediamax_render_tests` is
