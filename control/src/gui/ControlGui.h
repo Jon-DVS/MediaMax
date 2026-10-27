@@ -47,11 +47,12 @@ public:
 
     // --- test hooks (driven by --gui-self-test; no effect in normal use) ----
     // Queues the given modal ("open", "saveas", "media", "pull", "about",
-    // "move", "edit" or "warp") to be opened by the next frame(): the same
-    // state the UI buttons set plus OpenPopup() (or, for "open"/"saveas"/
-    // "media", the ImGuiFileDialog OpenDialog). Deferred because OpenPopup()
-    // must run inside a frame (it dereferences the current ImGui window,
-    // which is NULL between frames). Returns false for an unknown name.
+    // "move", "edit", "warp" or "mediadetails") to be opened by the next
+    // frame(): the same state the UI buttons set plus OpenPopup() (or, for
+    // "open"/"saveas"/"media", the ImGuiFileDialog OpenDialog). Deferred
+    // because OpenPopup() must run inside a frame (it dereferences the
+    // current ImGui window, which is NULL between frames). Returns false
+    // for an unknown name.
     bool testOpenModal(const std::string& which);
     // True while the given modal is open: in Dear ImGui's popup stack, or
     // (for "open"/"saveas"/"media") in the ImGuiFileDialog instance.
@@ -100,6 +101,11 @@ private:
     // (the system the record came from).
     void openDisplayEdit(const nlohmann::json& display, SystemConnection* target);
     void openWarpEdit(const nlohmann::json& display, SystemConnection* target);
+    // Opens the "Media details" dialog for the given media record (the
+    // system it came from is shown in the dialog title; the details are
+    // re-read from that system's snapshot every frame, so an unloaded
+    // entry degrades gracefully).
+    void openMediaDetails(const nlohmann::json& media, SystemConnection* target);
     void renderMediaBlock(const SystemConnection::Snapshot& snap);
     void renderShowEditorWindow();
     void renderShowTab();
@@ -197,6 +203,13 @@ private:
     SystemConnection* m_WarpTarget = nullptr;
     Id m_WarpDisplayId = kInvalidId;
     std::string m_WarpError;
+    // "Media details" dialog (Details... in the Media block): read-only
+    // probe information for one media entry (codec, colorspace, bit depth,
+    // scan type, bit rate). The entry is re-read from the target system's
+    // snapshot while the dialog is open.
+    bool m_MediaDetailsModal = false;
+    SystemConnection* m_MediaDetailsTarget = nullptr;
+    Id m_MediaDetailsId = kInvalidId;
     // Test hook: modal queued by testOpenModal(), opened by the next frame().
     std::string m_PendingTestOpenModal;
 

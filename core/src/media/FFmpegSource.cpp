@@ -23,6 +23,7 @@ extern "C" {
 #include <libavutil/channel_layout.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/opt.h>
+#include <libavutil/pixdesc.h>
 #include <libswresample/swresample.h>
 #include <libswscale/swscale.h>
 }
@@ -116,6 +117,59 @@ bool isSingleFrameImageStream(const AVFormatContext* ctx, const AVStream* video,
     const bool singleFrame = video->nb_frames == 1 ||
         (duration > Time::zero() && duration < Time::fromFrames(2, frameRate));
     return singleFrame || singleFileImageDemuxer;
+}
+
+// Fills the codec-level details (codec name, colorspace, bit depth, scan
+// type, bit rate) from the probed streams. Called by both open() and
+// probeFile() so the two paths stay in sync (see also
+// isSingleFrameImageStream).
+void fillCodecDetails(MediaMetadata& metadata, const AVFormatContext* ctx,
+                      const AVStream* video, const AVStream* audio)
+{
+    if (video != nullptr)
+    {
+        const AVCodecParameters* par = video->codecpar;
+        metadata.videoCodec = avcodec_get_name(par->codec_id);
+        metadata.videoColorspace = av_color_space_name(par->color_space);
+        // Bit depth: the container's per-sample depth when it reports one,
+        // otherwise the depth of the pixel format's first component.
+        if (par->bits_per_raw_sample > 0)
+        {
+            metadata.videoBitDepth = static_cast<std::uint32_t>(par->bits_per_raw_sample);
+        }
+        else if (par->format != AV_PIX_FMT_NONE)
+        {
+            if (const AVPixFmtDescriptor* desc =
+                    av_pix_fmt_desc_get(static_cast<AVPixelFormat>(par->format)))
+            {
+                metadata.videoBitDepth = static_cast<std::uint32_t>(desc->comp[0].depth);
+            }
+        }
+        // field_order is set by the codec parser (e.g. the H.264 SPS) when
+        // the stream declares it; absent, the scan type stays unknown.
+        switch (par->field_order)
+        {
+            case AV_FIELD_PROGRESSIVE:
+                metadata.videoScanType = "progressive";
+                break;
+            case AV_FIELD_TT:
+            case AV_FIELD_BB:
+            case AV_FIELD_TB:
+            case AV_FIELD_BT:
+                metadata.videoScanType = "interlaced";
+                break;
+            default:
+                break; // AV_FIELD_UNKNOWN
+        }
+        // The stream's bit rate (codec parameters in FFmpeg 9; AVStream no
+        // longer carries it), then the container's overall rate.
+        metadata.videoBitRate = par->bit_rate > 0 ? par->bit_rate
+                              : (ctx != nullptr && ctx->bit_rate > 0 ? ctx->bit_rate : 0);
+    }
+    if (audio != nullptr)
+    {
+        metadata.audioCodec = avcodec_get_name(audio->codecpar->codec_id);
+    }
 }
 
 } // namespace
@@ -281,6 +335,7 @@ bool FFmpegSource::open(const std::string& path, std::string& error)
             static_cast<std::uint32_t>(m_AudioStream->codecpar->ch_layout.nb_channels);
         m_Metadata.audioSampleRate = m_AudioStream->codecpar->sample_rate;
     }
+    fillCodecDetails(m_Metadata, m_FormatCtx, m_VideoStream, m_AudioStream);
 
     // Duration: container first, then stream, then estimate.
     if (m_FormatCtx->duration != AV_NOPTS_VALUE)
@@ -856,6 +911,7 @@ MediaMetadata probeFile(const std::string& path, std::string& error)
             static_cast<std::uint32_t>(audio->codecpar->ch_layout.nb_channels);
         metadata.audioSampleRate = audio->codecpar->sample_rate;
     }
+    fillCodecDetails(metadata, ctx, video, audio);
 
     if (ctx->duration != AV_NOPTS_VALUE)
     {

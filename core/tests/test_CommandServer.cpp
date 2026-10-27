@@ -452,6 +452,15 @@ TEST_CASE("media.load registers an asset with its metadata")
     CHECK(resp.result.at("height").get<std::uint32_t>() == 360);
     CHECK(resp.result.at("duration").get<double>() == doctest::Approx(4.0));
     CHECK(resp.result.at("frameRate").get<std::string>() == "30");
+    // The codec-detail fields are always present (additive protocol shape);
+    // the synthetic test-pattern source reports none of them.
+    CHECK(resp.result.contains("codec"));
+    CHECK(resp.result.contains("colorspace"));
+    CHECK(resp.result.contains("bitDepth"));
+    CHECK(resp.result.contains("scanType"));
+    CHECK(resp.result.contains("bitRate"));
+    CHECK(resp.result.contains("audioCodec"));
+    CHECK(resp.result.at("codec").get<std::string>().empty());
 
     // Unknown file fails cleanly.
     const Response bad = f.run("media.load", {{"path", "nope.mp4"}});

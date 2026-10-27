@@ -144,10 +144,22 @@ Media object shape (used by `media.load`, `media.list`, `status`):
 
 ```json
 {"id":7, "path":"media/clip.mp4", "type":"video",
- "width":1920, "height":1080, "duration":12.34, "frameRate":"30/1"}
+ "width":1920, "height":1080, "duration":12.34, "frameRate":"30/1",
+ "codec":"h264", "colorspace":"bt709", "bitDepth":8,
+ "scanType":"progressive", "bitRate":8000000, "audioCodec":"aac"}
 ```
 
 `type` is one of `video`, `image`, `audio`, `unknown`.
+
+The codec-detail fields are probed from the container/codec and are
+additive (absent or zero/empty means "not reported" — e.g. an image has no
+bit rate, a stream without color metadata reports `colorspace` as
+`"unknown"`, a source that does not probe (test patterns) leaves them
+empty): `codec` / `audioCodec` are the video/audio codec names (e.g.
+`h264`, `png`, `aac`), `colorspace` is the video color space (e.g. `bt709`),
+`bitDepth` is the video bit depth in bits (e.g. `8`, `10`), `scanType` is
+`progressive` / `interlaced`, and `bitRate` is the video bit rate in
+bits/second.
 
 #### `media.load`
 

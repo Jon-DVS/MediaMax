@@ -343,7 +343,8 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
     std::string modalReport;
     bool modalOk = true;
     for (const char* which :
-         {"about", "open", "saveas", "media", "pull", "move", "edit", "warp"})
+         {"about", "open", "saveas", "media", "pull", "move", "edit", "warp",
+          "mediadetails"})
     {
         if (!app.testOpenModal(which))
         {

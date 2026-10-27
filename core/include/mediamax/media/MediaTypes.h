@@ -3,6 +3,7 @@
 // Media value types shared by all media sources.
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 #include "mediamax/time/FrameRate.h"
@@ -30,10 +31,20 @@ struct MediaMetadata
     Time duration;
     FrameRate frameRate = FrameRate::fps30();
 
+    // Codec-level video details, filled in from the container/codec probe.
+    // Empty strings and zero mean "not reported" (the FFmpeg source fills
+    // these; synthetic sources leave them default).
+    std::string videoCodec; // e.g. "h264", "png" (avcodec_get_name)
+    std::string videoColorspace; // e.g. "bt709" (av_color_space_name)
+    std::uint32_t videoBitDepth = 0; // e.g. 8, 10; 0 = unknown
+    std::string videoScanType; // "progressive" / "interlaced"; empty = unknown
+    std::int64_t videoBitRate = 0; // bits/s; 0 = unknown
+
     // Audio properties (zero when no audio).
     bool hasAudio = false;
     std::uint32_t audioChannels = 0;
     double audioSampleRate = 0.0;
+    std::string audioCodec; // e.g. "aac" (avcodec_get_name)
 
     bool valid() const { return hasVideo || hasAudio; }
 };

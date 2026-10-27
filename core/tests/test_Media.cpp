@@ -442,6 +442,10 @@ TEST_CASE("FFmpeg: probe and decode a generated BMP (image media)")
     CHECK_FALSE(meta.hasAudio);
     CHECK(meta.width == 8);
     CHECK(meta.height == 8);
+    // Codec details are reported for images too (the BMP pipe demuxer knows
+    // its codec).
+    CHECK(meta.videoCodec == "bmp");
+    CHECK(meta.videoBitDepth == 8);
 
     auto source = ffmpeg::createSource(path.string(), error);
     REQUIRE(source != nullptr);
@@ -483,6 +487,52 @@ TEST_CASE("FFmpeg: probe reports a clean error for missing files")
         ffmpeg::probeFile("/nonexistent/mediamax/missing.mp4", error);
     CHECK_FALSE(meta.valid());
     CHECK_FALSE(error.empty());
+}
+
+TEST_CASE("FFmpeg: probe reports codec details (codec, colorspace, depth, scan, rate)")
+{
+    const auto ffmpeg = findFfmpegCli();
+    if (ffmpeg.empty())
+    {
+        std::fprintf(stderr,
+                     "[skip] ffmpeg CLI not available; skipping codec details test\n");
+        return;
+    }
+
+    const auto dir = std::filesystem::temp_directory_path() / "mediamax-tests";
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    static std::atomic<std::uint64_t> counter{0};
+    const auto path =
+        dir / ("codec-details-" + std::to_string(counter.fetch_add(1)) + ".mp4");
+
+    // 1 s of 64x36@30 h264 (yuv420p, progressive) with an aac tone - the
+    // codec-level fields must come back filled from the container/codec.
+    const std::string cmd = "\"" + ffmpeg.string() + "\" -hide_banner -loglevel error -y "
+        "-f lavfi -i testsrc=duration=1:size=64x36:rate=30 "
+        "-f lavfi -i sine=frequency=440:sample_rate=48000:duration=1 "
+        "-c:v libx264 -preset ultrafast -pix_fmt yuv420p -c:a aac " +
+        "\"" + path.string() + "\"";
+    const int rc = runCommandLine(cmd);
+    if (rc != 0)
+    {
+        std::fprintf(stderr, "[skip] ffmpeg failed to generate the test file (rc=%d)\n", rc);
+        std::filesystem::remove(path);
+        return;
+    }
+
+    std::string error;
+    const MediaMetadata meta = ffmpeg::probeFile(path.string(), error);
+    REQUIRE(meta.valid());
+    CHECK(meta.type == MediaType::Video);
+    CHECK(meta.videoCodec == "h264");
+    CHECK(meta.audioCodec == "aac");
+    CHECK(meta.videoBitDepth == 8); // yuv420p
+    CHECK(!meta.videoColorspace.empty());
+    CHECK(meta.videoScanType == "progressive");
+    CHECK(meta.videoBitRate > 0);
+
+    std::filesystem::remove(path);
 }
 
 TEST_CASE("FFmpeg: alternating video/audio pulls keep the audio continuous (A/V sync)")

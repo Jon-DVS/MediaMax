@@ -38,6 +38,14 @@ nlohmann::json mediaToJson(const MediaAsset& asset)
         {"height", asset.metadata.height},
         {"duration", asset.metadata.duration.toSeconds()},
         {"frameRate", asset.metadata.frameRate.toString()},
+        // Codec-level probe details (additive; empty string / 0 when the
+        // container does not report them - see MediaMetadata).
+        {"codec", asset.metadata.videoCodec},
+        {"colorspace", asset.metadata.videoColorspace},
+        {"bitDepth", asset.metadata.videoBitDepth},
+        {"scanType", asset.metadata.videoScanType},
+        {"bitRate", asset.metadata.videoBitRate},
+        {"audioCodec", asset.metadata.audioCodec},
     };
 }
 

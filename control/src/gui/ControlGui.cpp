@@ -126,6 +126,10 @@ const char* modalPopupName(const std::string& which)
     {
         return "About MediaMax Control";
     }
+    if (which == "mediadetails")
+    {
+        return "Media details";
+    }
     return nullptr;
 }
 
@@ -1267,6 +1271,18 @@ void ControlGuiApp::openDisplayEdit(const json& display, SystemConnection* targe
     ImGui::OpenPopup(modalPopupId("Display settings"));
 }
 
+void ControlGuiApp::openMediaDetails(const json& media, SystemConnection* target)
+{
+    if (target == nullptr)
+    {
+        return;
+    }
+    m_MediaDetailsTarget = target;
+    m_MediaDetailsId = static_cast<Id>(media.value("id", 0u));
+    m_MediaDetailsModal = true;
+    ImGui::OpenPopup(modalPopupId("Media details"));
+}
+
 void ControlGuiApp::openWarpEdit(const json& display, SystemConnection* target)
 {
     if (target == nullptr)
@@ -1408,7 +1424,7 @@ void ControlGuiApp::renderMediaBlock(const SystemConnection::Snapshot& snap)
             ImGui::TableSetupColumn("size", ImGuiTableColumnFlags_WidthFixed, 80.0f);
             ImGui::TableSetupColumn("duration", ImGuiTableColumnFlags_WidthFixed, 70.0f);
             ImGui::TableSetupColumn("path");
-            ImGui::TableSetupColumn("##act", ImGuiTableColumnFlags_WidthFixed, 64.0f);
+            ImGui::TableSetupColumn("##act", ImGuiTableColumnFlags_WidthFixed, 122.0f);
             for (const auto& m : snap.status["media"])
             {
                 const Id id = static_cast<Id>(m.value("id", 0u));
@@ -1438,6 +1454,11 @@ void ControlGuiApp::renderMediaBlock(const SystemConnection::Snapshot& snap)
                 ImGui::TableNextColumn();
                 ImGui::TextUnformatted(truncate(m.value("path", ""), 80).c_str());
                 ImGui::TableNextColumn();
+                if (ImGui::Button("Details##det"))
+                {
+                    openMediaDetails(m, activeConnection());
+                }
+                ImGui::SameLine();
                 if (ImGui::Button("Unload##un"))
                 {
                     std::string error;
@@ -2806,6 +2827,117 @@ void ControlGuiApp::renderModals()
             m_WarpDisplayId = kInvalidId;
         }
     }
+    if (m_MediaDetailsModal)
+    {
+        modalStartSize(420.0f);
+        if (ImGui::BeginPopupModal("Media details", &m_MediaDetailsModal))
+        {
+            // A copy of the target system's live snapshot, kept alive for the
+            // whole block: the entry pointer below points into it (reading
+            // the snapshot fresh each frame also makes the dialog track the
+            // engine, and degrade cleanly if the entry is unloaded).
+            const auto snap = (m_MediaDetailsTarget != nullptr)
+                                  ? m_MediaDetailsTarget->snapshot()
+                                  : SystemConnection::Snapshot{};
+            const json* entry = nullptr;
+            if (snap.haveStatus && snap.status.contains("media") &&
+                snap.status["media"].is_array())
+            {
+                for (const auto& e : snap.status["media"])
+                {
+                    if (e.is_object() &&
+                        static_cast<Id>(e.value("id", 0u)) == m_MediaDetailsId)
+                    {
+                        entry = &e;
+                        break;
+                    }
+                }
+            }
+            if (entry == nullptr)
+            {
+                ImGui::TextWrapped("Media entry %u is not loaded on the system anymore.",
+                                   m_MediaDetailsId);
+            }
+            else
+            {
+                const json& m = *entry;
+                ImGui::TextWrapped("%u - %s", m_MediaDetailsId, m.value("path", "?").c_str());
+                if (m_MediaDetailsTarget != nullptr)
+                {
+                    ImGui::TextDisabled("on %s", m_MediaDetailsTarget->name().c_str());
+                }
+                if (ImGui::BeginTable("mediadetails", 2, ImGuiTableFlags_SizingFixedFit))
+                {
+                    // One label/value row; an empty value renders as "-"
+                    // (the container/codec does not report it).
+                    auto detailRow = [&m](const char* label, const std::string& value) {
+                        ImGui::TableNextRow();
+                        ImGui::TableNextColumn();
+                        ImGui::TextUnformatted(label);
+                        ImGui::TableNextColumn();
+                        if (value.empty())
+                        {
+                            ImGui::TextDisabled("-");
+                        }
+                        else
+                        {
+                            ImGui::TextUnformatted(value.c_str());
+                        }
+                    };
+                    detailRow("Type", m.value("type", std::string()));
+                    detailRow("Codec", m.value("codec", std::string()));
+                    detailRow("Color space", m.value("colorspace", std::string()));
+                    const std::uint32_t bitDepth = static_cast<std::uint32_t>(m.value("bitDepth", 0u));
+                    detailRow("Bit depth", bitDepth > 0 ? std::to_string(bitDepth) + " bit" : "");
+                    detailRow("Scan type", m.value("scanType", std::string()));
+                    std::string rate;
+                    const std::int64_t bitRate = m.value("bitRate", 0);
+                    if (bitRate > 0)
+                    {
+                        char buf[48];
+                        if (bitRate >= 1000000)
+                        {
+                            std::snprintf(buf, sizeof(buf), "%.2f Mbit/s",
+                                          static_cast<double>(bitRate) / 1e6);
+                        }
+                        else if (bitRate >= 1000)
+                        {
+                            std::snprintf(buf, sizeof(buf), "%.0f Kbit/s",
+                                          static_cast<double>(bitRate) / 1e3);
+                        }
+                        else
+                        {
+                            std::snprintf(buf, sizeof(buf), "%lld bit/s",
+                                          static_cast<long long>(bitRate));
+                        }
+                        rate = buf;
+                    }
+                    detailRow("Bit rate", rate);
+                    detailRow("Audio codec", m.value("audioCodec", std::string()));
+                    detailRow("Resolution", std::to_string(m.value("width", 0)) + "x" +
+                                               std::to_string(m.value("height", 0)));
+                    detailRow("Frame rate", m.value("frameRate", std::string()));
+                    char dur[32];
+                    std::snprintf(dur, sizeof(dur), "%.2f s", m.value("duration", 0.0));
+                    detailRow("Duration", dur);
+                    ImGui::EndTable();
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Close##mediadetails"))
+                {
+                    m_MediaDetailsModal = false;
+                }
+            }
+            ImGui::EndPopup();
+        }
+        if (!m_MediaDetailsModal)
+        {
+            // The modal went down (X or Close): drop the target so it can
+            // never dangle past the frame it was opened in.
+            m_MediaDetailsTarget = nullptr;
+            m_MediaDetailsId = kInvalidId;
+        }
+    }
 }
 
 // --- test hooks -----------------------------------------------------------------
@@ -2897,6 +3029,33 @@ void ControlGuiApp::openModal(const std::string& which)
         }
         return;
     }
+    else if (which == "mediadetails")
+    {
+        // The real button fills the state from a media table row; the test
+        // hook uses the active system's first media entry when it has one.
+        bool opened = false;
+        if (SystemConnection* active = activeConnection())
+        {
+            const auto snap = active->snapshot();
+            if (snap.haveStatus && snap.status.contains("media") &&
+                !snap.status["media"].empty())
+            {
+                openMediaDetails(snap.status["media"][0], active);
+                opened = true;
+            }
+        }
+        if (!opened)
+        {
+            // No media loaded: still open the dialog (it shows the
+            // "not loaded anymore" line); the hook only needs it to open
+            // and close.
+            m_MediaDetailsTarget = nullptr;
+            m_MediaDetailsId = kInvalidId;
+            m_MediaDetailsModal = true;
+            ImGui::OpenPopup(modalPopupId(name));
+        }
+        return;
+    }
     else
     {
         m_AboutModal = true;
@@ -2963,6 +3122,11 @@ bool ControlGuiApp::testCloseModal(const std::string& which)
     if (which == "about")
     {
         m_AboutModal = false;
+        return true;
+    }
+    if (which == "mediadetails")
+    {
+        m_MediaDetailsModal = false;
         return true;
     }
     return false;

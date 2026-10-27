@@ -212,6 +212,14 @@ MSVC workflow notes:
 ## FFmpeg notes
 
 - FFmpeg 9: wrap all FFmpeg headers in `extern "C"` in C++ translation units.
+- **FFmpeg 9 renamed/moved APIs the classic docs remember.** `AVCodecParameters`
+  uses `color_space` (not `colorspace`), `format` is a plain `int` (cast to
+  `AVPixelFormat` for `av_pix_fmt_desc_get`), the field-order enum values are
+  `AV_FIELD_*` (not `AVFIELD_*`, see `libavcodec/defs.h`), and `AVStream` no
+  longer carries `bit_rate` (it moved to `AVCodecParameters::bit_rate`; the
+  container's overall rate is `AVFormatContext::bit_rate`). `av_color_space_name`
+  lives in `libavutil/pixdesc.h`. Check the fetched headers
+  (`build/_deps/mediamax-ffmpeg/include`) before using any FFmpeg struct field.
 - MSVC link step chokes on `%3B`-encoded multi-lib dependency lists — the
   `cmake/FFmpeg.cmake` IMPORTED targets are one-per-library + an INTERFACE
   umbrella; keep it that way.
