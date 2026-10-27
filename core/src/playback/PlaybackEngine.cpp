@@ -560,6 +560,45 @@ bool PlaybackEngine::setLayerPosition(Id layerId, float x, float y)
     return true;
 }
 
+bool PlaybackEngine::layerControlPosition(Id layerId, float& x, float& y) const
+{
+    const Layer* layer = nullptr;
+    for (const auto& scene : m_Show.scenes)
+    {
+        if (const Layer* found = scene.findLayer(layerId))
+        {
+            layer = found;
+            break;
+        }
+    }
+    if (!layer)
+    {
+        return false;
+    }
+    // The same precedence as resolveLayer minus the keyframe-track step:
+    // the authored value, the last matching position cue, then the manual
+    // override. The track animates the layer on screen; it is not a position
+    // the operator has set, so it does not drive the control value.
+    LayerFrame frame;
+    frame.x = layer->transform.x;
+    frame.y = layer->transform.y;
+    applyLayerCues(layerId, m_Time, frame);
+    if (const auto it = m_Overrides.find(layerId); it != m_Overrides.end())
+    {
+        if (it->second.x)
+        {
+            frame.x = *it->second.x;
+        }
+        if (it->second.y)
+        {
+            frame.y = *it->second.y;
+        }
+    }
+    x = frame.x;
+    y = frame.y;
+    return true;
+}
+
 bool PlaybackEngine::hasLayerOverride(Id layerId) const
 {
     return m_Overrides.find(layerId) != m_Overrides.end();

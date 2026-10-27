@@ -202,6 +202,60 @@ TEST_CASE("Layer state resolves tracks and overrides")
     }
 }
 
+TEST_CASE("layerControlPosition is the authored value, not the animation")
+{
+    auto media = makeLoadedMediaLibrary();
+    auto engine = makeTestEngine(media);
+
+    // Give layer 10 an x track (100 -> 300 over 4 s); its static transform
+    // x stays at the default 0.
+    Layer* layer = engine.show().findScene(1)->findLayer(10);
+    REQUIRE(layer != nullptr);
+    layer->xTrack.setKey(Time::zero(), 100.f);
+    layer->xTrack.setKey(Time::fromSeconds(4.0), 300.f);
+
+    engine.play();
+    engine.seek(Time::fromSeconds(1.0)); // track value 150, scene 1 active
+
+    // The rendered position follows the track...
+    float rendered = -1.f;
+    for (const auto& l : engine.frameState().layers)
+    {
+        if (l.layerId == 10)
+        {
+            rendered = l.x;
+        }
+    }
+    CHECK(rendered == doctest::Approx(150.f));
+
+    // ...but the control position is the authored value (no animation).
+    float x = -1.f, y = -1.f;
+    CHECK(engine.layerControlPosition(10, x, y));
+    CHECK(x == 0.f);
+    CHECK(y == 0.f);
+
+    // A SetLayerPosition cue moves the control position (a step, stable)...
+    engine.show().addCue(Cue{Time::fromSeconds(3.0), "pos", SetLayerPosition{10, 500.f, 50.f}});
+    engine.seek(Time::fromSeconds(3.5));
+    CHECK(engine.layerControlPosition(10, x, y));
+    CHECK(x == doctest::Approx(500.f));
+    CHECK(y == doctest::Approx(50.f));
+
+    // ...and a manual override wins over both track and cue.
+    CHECK(engine.setLayerPosition(10, 777.f, 42.f));
+    CHECK(engine.layerControlPosition(10, x, y));
+    CHECK(x == doctest::Approx(777.f));
+    CHECK(y == doctest::Approx(42.f));
+
+    // Releasing the override returns to the cue value (still not the track).
+    CHECK(engine.clearLayerOverride(10));
+    CHECK(engine.layerControlPosition(10, x, y));
+    CHECK(x == doctest::Approx(500.f));
+
+    // Unknown layer.
+    CHECK_FALSE(engine.layerControlPosition(999, x, y));
+}
+
 TEST_CASE("Cue-driven layer opacity applies at the right time")
 {
     auto media = makeLoadedMediaLibrary();

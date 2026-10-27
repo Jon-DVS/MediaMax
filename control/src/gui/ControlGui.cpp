@@ -1257,8 +1257,10 @@ void ControlGuiApp::renderLayersBlock(const SystemConnection::Snapshot& snap)
         {
             commitPosition();
         }
-        // Resync from the engine's effective position (scene.list reports it
-        // for the active scene). Never while a field is being edited, and
+        // Resync from the engine's control position (scene.list reports it
+        // for the active scene): the authored value with cues and manual
+        // overrides applied, without keyframe-track animation - stable while
+        // a track plays. Never resync while a field is being edited, and
         // not while a just-sent value is still catching up in the polled
         // snapshot (which lags by up to one poll period).
         if (!xBusy && !yBusy && layer.contains("x") && layer.contains("y"))

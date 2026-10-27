@@ -176,6 +176,13 @@ public:
     bool setLayerBlend(Id layerId, BlendMode mode);
     bool setLayerPosition(Id layerId, float x, float y);
 
+    // The position the control surface should present for a layer: the
+    // authored (static) transform with timeline cues and manual overrides
+    // applied, but without keyframe-track animation - a track is what the
+    // show plays out, not a position the operator has set. Returns false
+    // when no layer with that id is in the show.
+    bool layerControlPosition(Id layerId, float& x, float& y) const;
+
     // True when any manual override (opacity/visibility/blend/position) is
     // set for the layer.
     bool hasLayerOverride(Id layerId) const;

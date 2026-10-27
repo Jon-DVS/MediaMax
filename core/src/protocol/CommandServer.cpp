@@ -5,6 +5,7 @@
 #include <cmath>
 #include <filesystem>
 #include <map>
+#include <unordered_set>
 
 #include "mediamax/blend/Blend.h"
 #include "mediamax/time/FrameRate.h"
@@ -580,13 +581,12 @@ nlohmann::json CommandServer::handleSceneList() const
     nlohmann::json arr = nlohmann::json::array();
     const Show& show = m_Engine.show();
     const std::vector<Id> activeIds = m_Engine.activeScenesAt(m_Engine.time());
-    // Resolved state of the active scenes at the current time (tracks, cues
-    // and manual overrides applied): per-layer effective positions are only
-    // reported for those scenes, where they are well-defined.
-    std::map<Id, const LayerFrame*> resolved;
+    // Layers visible in the current frame report their position; a hidden
+    // layer (visibility/opacity) reports none.
+    std::unordered_set<Id> visibleLayers;
     for (const auto& layerFrame : m_Engine.frameState().layers)
     {
-        resolved[layerFrame.layerId] = &layerFrame;
+        visibleLayers.insert(layerFrame.layerId);
     }
     for (const auto& scene : show.scenes)
     {
@@ -596,12 +596,17 @@ nlohmann::json CommandServer::handleSceneList() const
         for (const auto& layer : scene.layers)
         {
             nlohmann::json layerJson = {{"id", layer.id}, {"name", layer.name}};
-            if (sceneActive)
+            if (sceneActive && visibleLayers.count(layer.id) > 0)
             {
-                if (const auto it = resolved.find(layer.id); it != resolved.end())
+                // The control position: the authored value with timeline
+                // cues and manual overrides applied, without keyframe-track
+                // animation - stable while a track plays, so the control
+                // surface's position fields do not chase the animation.
+                float x = 0.f, y = 0.f;
+                if (m_Engine.layerControlPosition(layer.id, x, y))
                 {
-                    layerJson["x"] = it->second->x;
-                    layerJson["y"] = it->second->y;
+                    layerJson["x"] = x;
+                    layerJson["y"] = y;
                 }
             }
             layerJson["override"] = m_Engine.hasLayerOverride(layer.id);

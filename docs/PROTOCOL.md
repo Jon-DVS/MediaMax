@@ -276,13 +276,16 @@ no manual set succeeds and reports `cleared: 0`.
 ```
 
 `active` is true for every scene in the active set (several may be true at
-once). Per layer: `x`/`y` are the effective position at the current show
-time (static transform with keyframe tracks, cues and manual overrides
-resolved); they are only reported for layers of *active* scenes, where the
-position is well-defined (a hidden layer reports none). `override` is true
-when any manual override (opacity/visibility/blend/position) is set for the
-layer. The control GUI uses `x`/`y` to keep its position fields in sync with
-the engine and `override` to enable the per-layer Clear action.
+once). Per layer: `x`/`y` are the position the control surface should
+present: the authored (static) transform with timeline cues and manual
+overrides applied, but **without keyframe-track animation** — a track is
+what the show plays out on screen, not a position the operator has set, so
+the value is stable while an animation runs. They are only reported for
+layers of *active* scenes that are currently visible (a hidden layer
+reports none). `override` is true when any manual override
+(opacity/visibility/blend/position) is set for the layer. The control GUI
+uses `x`/`y` to keep its position fields in sync with the engine and
+`override` to enable the per-layer Clear action.
 
 ### Layers
 

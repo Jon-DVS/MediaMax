@@ -233,6 +233,48 @@ TEST_CASE("scene.list marks the active scene")
     CHECK(scenes2[1].at("active").get<bool>());
 }
 
+TEST_CASE("scene.list reports the control position, not the animation")
+{
+    Fixture f;
+    // A show whose only layer has an x track (0 -> 1000 over 4 s); the
+    // authored (static) position is x=123.
+    const nlohmann::json doc = R"({
+        "app": "mediamax-show",
+        "version": 1,
+        "name": "Tracked",
+        "frameRate": {"num": 30, "den": 1},
+        "scenes": [
+            {"id": 1, "name": "S", "layers": [
+                {"id": 10, "name": "vid",
+                 "transform": {"x": 123.0, "y": 45.0},
+                 "tracks": {"x": [
+                     {"time": 0.0, "value": 0.0, "interpolation": "linear"},
+                     {"time": 4.0, "value": 1000.0, "interpolation": "linear"}
+                 ]}}
+            ]}
+        ]
+    })"_json;
+    const Response load = f.run("show.loadJson", {{"show", doc}});
+    REQUIRE(load.ok);
+    f.engine.play();
+    f.engine.seek(Time::fromSeconds(2.0)); // track value: 500
+
+    // The reported position is the authored value - the animation does not
+    // drive it (stable while the show plays).
+    auto layerX = [&f]() {
+        return f.run("scene.list").result.at("scenes")[0].at("layers")[0].at("x").get<float>();
+    };
+    CHECK(layerX() == doctest::Approx(123.0f));
+    f.engine.tick(Time::fromSeconds(1.0)); // t=3: track value would be 750
+    CHECK(layerX() == doctest::Approx(123.0f));
+
+    // A manual override drives it instead (layer.set takes x and y as a
+    // pair).
+    const Response set = f.run("layer.set", {{"layer", 10}, {"x", 777.0}, {"y", 1.0}});
+    REQUIRE(set.ok);
+    CHECK(layerX() == doctest::Approx(777.0f));
+}
+
 TEST_CASE("scene.toggle composites multiple scenes in list order")
 {
     Fixture f;
