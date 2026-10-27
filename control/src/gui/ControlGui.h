@@ -46,15 +46,15 @@ public:
     bool selfTestSystem(const std::string& host, std::uint16_t port, std::string& report);
 
     // --- test hooks (driven by --gui-self-test; no effect in normal use) ----
-    // Queues the given modal ("open", "saveas", "pull", "about", "move",
-    // "edit" or "warp") to be opened by the next frame(): the same state the
-    // UI buttons set plus OpenPopup() (or, for "open"/"saveas", the
-    // ImGuiFileDialog OpenDialog). Deferred because OpenPopup() must run
-    // inside a frame (it dereferences the current ImGui window, which is
-    // NULL between frames). Returns false for an unknown name.
+    // Queues the given modal ("open", "saveas", "media", "pull", "about",
+    // "move", "edit" or "warp") to be opened by the next frame(): the same
+    // state the UI buttons set plus OpenPopup() (or, for "open"/"saveas"/
+    // "media", the ImGuiFileDialog OpenDialog). Deferred because OpenPopup()
+    // must run inside a frame (it dereferences the current ImGui window,
+    // which is NULL between frames). Returns false for an unknown name.
     bool testOpenModal(const std::string& which);
     // True while the given modal is open: in Dear ImGui's popup stack, or
-    // (for "open"/"saveas") in the ImGuiFileDialog instance.
+    // (for "open"/"saveas"/"media") in the ImGuiFileDialog instance.
     bool testModalOpen(const std::string& which) const;
     // Closes the given modal: clears its app-side flag (which makes
     // BeginPopupModal() tear the popup down on the next frame), or calls
@@ -118,6 +118,9 @@ private:
     // frame (Display() is a no-op while the key is not open).
     void openFileDialog();
     void saveAsFileDialog();
+    // Media Browse button (Show Editor > Media): multi-select file dialog
+    // that appends one MediaReference per selected file.
+    void addMediaFileDialog();
     void renderFileDialogs();
     // Maps a test-hook name to its ImGuiFileDialog key; null for the
     // popups (use modalPopupName() for those).

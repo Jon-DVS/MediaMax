@@ -72,13 +72,19 @@ void modalStartSize(float width)
     ImGui::SetNextWindowSize(ImVec2(width, 0.0f), ImGuiCond_Appearing);
 }
 
-// Keys of the two ImGuiFileDialog dialogs (one shared instance, two
-// independent keys; only one is ever open at a time).
+// Keys of the file dialogs (one shared instance, one dialog open at a
+// time; the keys keep them independent).
 constexpr const char* kOpenDialogKey = "OpenShow";
 constexpr const char* kSaveAsDialogKey = "SaveAsShow";
+constexpr const char* kMediaDialogKey = "AddMedia";
 // The show files the dialogs accept (filter syntax: dot-prefixed
 // extensions, comma separated).
 constexpr const char* kShowFilter = ".json";
+// Media the playback engine can load (FFmpeg sources: common video + still
+// image formats), as named filter collections for the dialog's filter
+// combo.
+constexpr const char* kMediaFilter =
+    "Video{.mp4,.mov,.avi,.mkv,.webm},Images{.png,.jpg,.jpeg,.bmp,.tga}";
 // Reasonable minimum size for the file dialog windows (the user can still
 // enlarge them).
 const ImVec2 kFileDialogMinSize(640.0f, 440.0f);
@@ -1624,6 +1630,14 @@ void ControlGuiApp::renderMediaTab()
         show.media.push_back(ref);
         m_Editor.touch();
     }
+    ImGui::SameLine();
+    // Pick existing files with the file dialog (multi-select); the selected
+    // paths are stored as-is (they must exist on the systems the show is
+    // pushed to).
+    if (ImGui::Button("Browse...##mediabrowse"))
+    {
+        addMediaFileDialog();
+    }
     if (!m_MediaProbeResult.empty())
     {
         ImGui::Spacing();
@@ -2290,6 +2304,10 @@ const char* ControlGuiApp::fileDialogKey(const std::string& which)
     {
         return kSaveAsDialogKey;
     }
+    if (which == "media")
+    {
+        return kMediaDialogKey;
+    }
     return nullptr;
 }
 
@@ -2321,6 +2339,15 @@ void ControlGuiApp::saveAsFileDialog()
         m_Editor.filePath().empty() ? std::string("show.json")
                                     : std::filesystem::path(m_Editor.filePath()).filename().string();
     IGFD::FileDialog::Instance()->OpenDialog(kSaveAsDialogKey, "Save show as...", kShowFilter,
+                                             config);
+}
+
+void ControlGuiApp::addMediaFileDialog()
+{
+    IGFD::FileDialogConfig config;
+    config.path = showDir();
+    config.countSelectionMax = 0; // multi-select: one MediaReference per file
+    IGFD::FileDialog::Instance()->OpenDialog(kMediaDialogKey, "Add media files...", kMediaFilter,
                                              config);
 }
 
@@ -2369,6 +2396,24 @@ void ControlGuiApp::renderFileDialogs()
                     m_EditorError = error;
                 }
             }
+        }
+        dlg->Close();
+    }
+
+    if (dlg->Display(kMediaDialogKey, kFileDialogFlags, kFileDialogMinSize))
+    {
+        if (dlg->IsOk())
+        {
+            Show& show = m_Editor.show();
+            for (const auto& [name, path] : dlg->GetSelection())
+            {
+                (void)name;
+                MediaReference ref;
+                ref.id = ShowEditor::nextMediaId(show);
+                ref.path = path;
+                show.media.push_back(ref);
+            }
+            m_Editor.touch();
         }
         dlg->Close();
     }
@@ -2744,6 +2789,11 @@ void ControlGuiApp::openModal(const std::string& which)
     if (which == "saveas")
     {
         saveAsFileDialog();
+        return;
+    }
+    if (which == "media")
+    {
+        addMediaFileDialog();
         return;
     }
     const char* name = modalPopupName(which);
