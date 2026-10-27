@@ -249,7 +249,10 @@ render thread (main)   media pump thread      audio thread         control clien
   audio sink. Decoding never blocks the render loop.
 - `AudioSink` — miniaudio output; mixes the show's audio (one sink per
   system; per-layer audio mixing is the current scope).
-- `WindowSurface` — the GLFW window + cursor/resize plumbing for one display.
+- `WindowSurface` — the borderless GLFW window + cursor/resize plumbing for
+  one display (position comes from `display.set`, so the OS decoration is
+  off; window hints are global, so `GLFW_DECORATED FALSE` is set at every
+  creation site).
 - `SelfTest` — the headless smoke test: a synthetic show (test patterns,
   two layers, a cue), a real render pipeline into an offscreen target,
   PPM frames written out, "self-test: OK" when content was rendered.

@@ -163,6 +163,11 @@ bool PlaybackApp::initWindowsAndDisplays()
     {
         auto ds = std::make_unique<DisplaySurface>();
         const std::string title = "MediaMax - Display " + std::to_string(i + 1);
+        // Borderless display window: the position is controlled
+        // programmatically (display x/y via display.set), not by dragging a
+        // title bar. Window hints are global state, so set it per creation
+        // site (see also addSurfaceForDisplay).
+        glfwWindowHint(GLFW_DECORATED, GLFW_FALSE);
         ds->window = glfwCreateWindow(specs[i].width, specs[i].height, title.c_str(), nullptr, nullptr);
         if (ds->window == nullptr)
         {
@@ -410,6 +415,8 @@ void PlaybackApp::addSurfaceForDisplay(const SurfaceOp& op)
 {
     auto& log = Logger::instance();
 
+    // Borderless like the startup windows (see initWindowsAndDisplays).
+    glfwWindowHint(GLFW_DECORATED, GLFW_FALSE);
     GLFWwindow* window =
         glfwCreateWindow(op.width, op.height, ("MediaMax - " + op.name).c_str(), nullptr, nullptr);
     if (window == nullptr)
