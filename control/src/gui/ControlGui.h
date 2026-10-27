@@ -71,6 +71,21 @@ public:
     // fix the second press replaced the first, since the new cue's default
     // time equaled the last cue's and Show::addCue replaces on collision).
     std::size_t testAddCue();
+    // Registers a system without persisting the config (the self-test never
+    // writes its deliberately-nonexistent config file; selfTestSystem does
+    // the same after addSystem()).
+    void testAddSystem(const std::string& name, const std::string& host, int port);
+    // True once a registered system reports its poll connection up.
+    bool testSystemConnected(const std::string& name) const;
+    // Gives the fresh self-test editor a deterministic scene (id 1) with one
+    // color layer (id 10) and marks it edited: the live self-test's
+    // auto-push then delivers a show with a real layer for the
+    // live-override broadcast check to target (issue 13).
+    void testGiveEditorALayer();
+    // The exact sends the Layers block makes for a layer's position commit
+    // and Clear button, aimed at every connected system (issue 13).
+    bool testBroadcastLayerSet(Id layerId, float x, float y);
+    bool testBroadcastLayerClear(Id layerId);
 
 private:
     // --- systems -----------------------------------------------------------
@@ -100,6 +115,10 @@ private:
     void renderPlaybackWindow();
     void renderTransportBlock(const SystemConnection::Snapshot& snap);
     void renderScenesBlock(const SystemConnection::Snapshot& snap);
+    // Live-override block of the playback pane: shows the active system's
+    // active scene; its controls broadcast layer.set / layer.clear to every
+    // connected system (issue 13) so a live adjustment reaches all players,
+    // while the displayed values keep resyncing from the active system.
     void renderLayersBlock(const SystemConnection::Snapshot& snap);
     void renderDisplaysBlock(const SystemConnection::Snapshot& snap);
     // Opens the "Display settings" / "Projection warp" dialog for the given
@@ -156,6 +175,15 @@ private:
     // `outResult` is non-null the result JSON is also returned.
     bool sendActive(const std::string& method, const nlohmann::json& params, std::string& error,
                     nlohmann::json* outResult = nullptr);
+    // Sends a command to every connected system (not just the active one)
+    // and logs the exchange per system. The Layers block's live-override
+    // controls use it: an operator adjusting a live layer expects the whole
+    // wall to follow, not only the system the playback pane is showing.
+    // Returns true when every connected system accepted the command (also
+    // when none is connected - nothing to apply); `error` carries the first
+    // failure.
+    bool sendToAllConnected(const std::string& method, const nlohmann::json& params,
+                            std::string& error);
     void consoleSubmit();
     // Builds the show.loadJson params for pushing the editor's document to a
     // system: the document plus the directory of the file it was opened

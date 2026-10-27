@@ -292,6 +292,44 @@ bool ControlGuiApp::sendActive(const std::string& method, const json& params, st
     return true;
 }
 
+bool ControlGuiApp::sendToAllConnected(const std::string& method, const json& params, std::string& error)
+{
+    std::vector<SystemConnection*> targets;
+    for (auto& system : m_Systems)
+    {
+        if (system->pollConnected())
+        {
+            targets.push_back(system.get());
+        }
+    }
+    log("> " + method + (params.empty() ? "" : " " + params.dump()) +
+        " -> " + std::to_string(targets.size()) + " connected");
+    if (targets.empty())
+    {
+        return true; // nothing connected: nothing to apply
+    }
+    bool allOk = true;
+    for (SystemConnection* target : targets)
+    {
+        json result;
+        std::string sendError;
+        if (target->send(method, params, result, sendError))
+        {
+            log("  <= " + target->name() + " ok");
+        }
+        else
+        {
+            log("  <= " + target->name() + " failed: " + sendError);
+            if (error.empty())
+            {
+                error = target->name() + ": " + sendError;
+            }
+            allOk = false;
+        }
+    }
+    return allOk;
+}
+
 void ControlGuiApp::consoleSubmit()
 {
     const size_t begin = m_ConsoleInput.find_first_not_of(" \t");
@@ -1171,6 +1209,9 @@ void ControlGuiApp::renderScenesBlock(const SystemConnection::Snapshot& snap)
 void ControlGuiApp::renderLayersBlock(const SystemConnection::Snapshot& snap)
 {
     ImGui::TextUnformatted("Layers (live overrides, active scene)");
+    // The values shown are the active system's; a change below is applied to
+    // every connected system (issue 13).
+    ImGui::TextDisabled("changes apply to every connected system");
     const json* activeScene = nullptr;
     if (snap.scenes.contains("scenes") && snap.scenes["scenes"].is_array())
     {
@@ -1204,19 +1245,19 @@ void ControlGuiApp::renderLayersBlock(const SystemConnection::Snapshot& snap)
         if (ImGui::SliderFloat("Opacity##op", &lv.opacity, 0.0f, 1.0f, "%.2f"))
         {
             std::string error;
-            sendActive("layer.set", {{"layer", layerId}, {"opacity", lv.opacity}}, error);
+            sendToAllConnected("layer.set", {{"layer", layerId}, {"opacity", lv.opacity}}, error);
         }
         ImGui::SameLine();
         if (ImGui::Checkbox("Visible##vis", &lv.visible))
         {
             std::string error;
-            sendActive("layer.set", {{"layer", layerId}, {"visible", lv.visible}}, error);
+            sendToAllConnected("layer.set", {{"layer", layerId}, {"visible", lv.visible}}, error);
         }
         ImGui::SameLine();
         if (ImGui::Combo("Blend##blend", &lv.blend, kBlendModes, kBlendModeCount))
         {
             std::string error;
-            sendActive("layer.set", {{"layer", layerId}, {"blend", kBlendModes[lv.blend]}}, error);
+            sendToAllConnected("layer.set", {{"layer", layerId}, {"blend", kBlendModes[lv.blend]}}, error);
         }
         ImGui::SameLine();
         // Enabled only when the layer actually has overrides to clear.
@@ -1224,7 +1265,7 @@ void ControlGuiApp::renderLayersBlock(const SystemConnection::Snapshot& snap)
         if (ImGui::Button("Clear##clr"))
         {
             std::string error;
-            if (sendActive("layer.clear", {{"layer", layerId}}, error))
+            if (sendToAllConnected("layer.clear", {{"layer", layerId}}, error))
             {
                 // The engine's position is valid again (snapshot catches up
                 // at the next poll).
@@ -1238,7 +1279,7 @@ void ControlGuiApp::renderLayersBlock(const SystemConnection::Snapshot& snap)
         auto commitPosition = [&lv, &layerId, this]()
         {
             std::string error;
-            if (sendActive("layer.set", {{"layer", layerId}, {"x", lv.x}, {"y", lv.y}}, error))
+            if (sendToAllConnected("layer.set", {{"layer", layerId}, {"x", lv.x}, {"y", lv.y}}, error))
             {
                 m_LayerPosSentAt[layerId] = std::chrono::steady_clock::now();
             }
@@ -3184,6 +3225,51 @@ std::size_t ControlGuiApp::testAddCue()
     addCueDefault();
     m_Editor.touch();
     return m_Editor.show().cues.size();
+}
+
+void ControlGuiApp::testAddSystem(const std::string& name, const std::string& host, int port)
+{
+    addSystem(name, host, port);
+    m_ConfigDirty = false; // the self-test never writes a config file
+}
+
+bool ControlGuiApp::testSystemConnected(const std::string& name) const
+{
+    for (const auto& system : m_Systems)
+    {
+        if (system->name() == name && system->pollConnected())
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+void ControlGuiApp::testGiveEditorALayer()
+{
+    Show& show = m_Editor.show();
+    Scene scene;
+    scene.id = 1;
+    scene.name = "A";
+    Layer layer;
+    layer.id = 10;
+    layer.name = "red";
+    layer.color = {1.0f, 0.0f, 0.0f, 1.0f};
+    scene.layers.push_back(layer);
+    show.scenes.push_back(std::move(scene));
+    m_Editor.touch();
+}
+
+bool ControlGuiApp::testBroadcastLayerSet(Id layerId, float x, float y)
+{
+    std::string error;
+    return sendToAllConnected("layer.set", {{"layer", layerId}, {"x", x}, {"y", y}}, error);
+}
+
+bool ControlGuiApp::testBroadcastLayerClear(Id layerId)
+{
+    std::string error;
+    return sendToAllConnected("layer.clear", {{"layer", layerId}}, error);
 }
 
 // --- self test ---------------------------------------------------------------------------

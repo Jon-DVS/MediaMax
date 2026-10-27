@@ -313,6 +313,12 @@ them (when it is absent).
 - Result: `{"layer":<id>}` for a single layer (fails when it had no
   override), `{"cleared":<n>}` for all.
 
+The control GUI's Layers block (playback pane) applies `layer.set` /
+`layer.clear` to **every connected system** at once when an operator
+changes a live override (per-system failures are logged in the GUI
+console), so the adjustment reaches all players together; the values it
+displays keep resyncing from the active system.
+
 ### Displays
 
 Display object shape (used by `display.list`, `display.set`, `status`):

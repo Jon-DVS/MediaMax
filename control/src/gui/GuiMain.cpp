@@ -320,6 +320,10 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
             // the edit (issue 8).
             autoPushName = "AutoPush self-test";
             app.testTouchEditor(autoPushName);
+            // A deterministic layer (step 4b target): the auto-push below
+            // delivers this show to the engine, which the live-override
+            // broadcast check then overrides and clears (issue 13).
+            app.testGiveEditorALayer();
         }
     }
 
@@ -399,7 +403,10 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
     // 4) Auto-push (issue 8): the editor edit from step 1 must have reached
     //    the system via the debounced auto-push during the frame phases.
     //    Keep rendering frames (the push happens in frame()) while polling
-    //    show.info for the pushed show name.
+    //    show.info for the pushed show. Wait for the FINAL document (name +
+    //    the two cues step 3b added), not just the name: an earlier push
+    //    already carries the name, and step 4b must not race the last push -
+    //    a show reload clears the layer overrides that check verifies.
     if (haveLiveSystem && !autoPushName.empty())
     {
         SystemConnection check("auto-push-check", liveHost, livePort);
@@ -412,7 +419,8 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
             glfwPollEvents();
             runtime.renderFrame();
             if (check.send("show.info", nlohmann::json::object(), result, checkError) &&
-                result.value("name", std::string()) == autoPushName)
+                result.value("name", std::string()) == autoPushName &&
+                result.value("cues", 0) == 2)
             {
                 arrived = true;
             }
@@ -424,6 +432,108 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
         std::cout << (arrived ? "PASS" : "FAIL") << " auto-push - show.info name = "
                   << (arrived ? autoPushName : "<not received>") << std::endl;
         liveOk = liveOk && arrived;
+    }
+
+    // 4b) Live-override broadcast (issue 13): the Layers block applies
+    //     layer.set / layer.clear to every connected system, not only the
+    //     active one. A second system entry on the same engine proves the
+    //     fan-out; the engine-side check reads scene.list, whose x reports
+    //     the override (issue 11) and returns to the authored 0 after the
+    //     broadcast layer.clear.
+    if (haveLiveSystem && !autoPushName.empty() && liveOk)
+    {
+        app.testAddSystem("self-test-2", liveHost, livePort);
+        bool secondUp = false;
+        const auto upDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (!secondUp && std::chrono::steady_clock::now() < upDeadline)
+        {
+            secondUp = app.testSystemConnected("self-test-2");
+            if (!secondUp)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(150));
+            }
+        }
+        liveReport += std::string(secondUp ? "PASS " : "FAIL ") +
+                      "second system connected (fan-out target)\n";
+        liveOk = liveOk && secondUp;
+
+        // The exact position commit the Layers block sends on Enter /
+        // focus loss: an idempotent set, fanned out to both systems (both
+        // of which reach the same engine).
+        const bool setOk = secondUp && app.testBroadcastLayerSet(10, 123.5f, 67.25f);
+        auto readLayer10 = [](const nlohmann::json& scenes, double& x, bool& overridden) {
+            for (const auto& s : scenes.value("scenes", nlohmann::json::array()))
+            {
+                if (!s.value("active", false))
+                {
+                    continue;
+                }
+                for (const auto& l : s.value("layers", nlohmann::json::array()))
+                {
+                    if (l.value("id", 0u) == 10u)
+                    {
+                        x = l.value("x", -1.0);
+                        overridden = l.value("override", false);
+                        return true;
+                    }
+                }
+            }
+            return false;
+        };
+        auto pollLayer10 = [&](double expectedX, bool expectedOverride, double& x, bool& overridden,
+                               bool& found) {
+            SystemConnection verify("self-test-verify", liveHost, livePort);
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            found = false;
+            while (std::chrono::steady_clock::now() < deadline)
+            {
+                x = -1.0;
+                overridden = false;
+                nlohmann::json r;
+                std::string e;
+                if (verify.send("scene.list", nlohmann::json::object(), r, e) &&
+                    readLayer10(r, x, overridden) && x == expectedX &&
+                    overridden == expectedOverride)
+                {
+                    found = true;
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(150));
+            }
+        };
+
+        double xSet = -1.0;
+        bool overSet = false;
+        bool setArrived = false;
+        if (setOk)
+        {
+            pollLayer10(123.5, true, xSet, overSet, setArrived);
+        }
+        liveReport += std::string(setOk && setArrived ? "PASS " : "FAIL ") +
+                      "layer.set broadcast reached all systems (x=" + std::to_string(xSet) +
+                      ", override=" + std::string(overSet ? "true" : "false") + ")\n";
+        liveOk = liveOk && setOk && setArrived;
+
+        // The Clear button's exact send. layer.clear is not idempotent and
+        // both systems target the same engine, so the second system's clear
+        // legitimately fails ("no override set") after the first one has
+        // released it - judge the broadcast by the engine's state, not by
+        // per-system success.
+        if (setArrived)
+        {
+            app.testBroadcastLayerClear(10);
+        }
+        double xClear = -1.0;
+        bool overClear = true;
+        bool clearArrived = false;
+        if (setArrived)
+        {
+            pollLayer10(0.0, false, xClear, overClear, clearArrived);
+        }
+        liveReport += std::string(clearArrived ? "PASS " : "FAIL ") +
+                      "layer.clear broadcast released the override (x=" + std::to_string(xClear) +
+                      ")\n";
+        liveOk = liveOk && clearArrived;
     }
 
     runtime.shutdown();
