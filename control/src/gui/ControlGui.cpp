@@ -1399,11 +1399,12 @@ void ControlGuiApp::renderMediaBlock(const SystemConnection::Snapshot& snap)
     ImGui::TextUnformatted("Media (engine library)");
     if (snap.status.contains("media"))
     {
-        if (ImGui::BeginTable("media", 6,
+        if (ImGui::BeginTable("media", 7,
                               ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_BordersOuter))
         {
             ImGui::TableSetupColumn("##id", ImGuiTableColumnFlags_WidthFixed, 40.0f);
             ImGui::TableSetupColumn("type");
+            ImGui::TableSetupColumn("fps", ImGuiTableColumnFlags_WidthFixed, 56.0f);
             ImGui::TableSetupColumn("size", ImGuiTableColumnFlags_WidthFixed, 80.0f);
             ImGui::TableSetupColumn("duration", ImGuiTableColumnFlags_WidthFixed, 70.0f);
             ImGui::TableSetupColumn("path");
@@ -1416,7 +1417,19 @@ void ControlGuiApp::renderMediaBlock(const SystemConnection::Snapshot& snap)
                 ImGui::TableNextColumn();
                 ImGui::Text("%u", id);
                 ImGui::TableNextColumn();
-                ImGui::TextUnformatted(m.value("type", "?").c_str());
+                const std::string type = m.value("type", "?");
+                ImGui::TextUnformatted(type.c_str());
+                ImGui::TableNextColumn();
+                // The frame rate only exists for video entries (probe result
+                // of the loaded file); images/audio have none.
+                if (type == "video" && m.contains("frameRate"))
+                {
+                    ImGui::TextUnformatted(m["frameRate"].get<std::string>().c_str());
+                }
+                else
+                {
+                    ImGui::TextDisabled("-");
+                }
                 ImGui::TableNextColumn();
                 ImGui::Text("%dx%d", static_cast<int>(m.value("width", 0)),
                             static_cast<int>(m.value("height", 0)));
