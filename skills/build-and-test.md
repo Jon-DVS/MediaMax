@@ -72,9 +72,9 @@ Gotchas:
 # playback: must print "self-test: OK - N frames rendered, ..."
 build\playback\Release\mediamax_playback.exe --self-test --self-test-seconds 3
 
-# control: must print usage / configured systems
+# control: must print usage / the show file's systems
 build\control\Release\mediamax_control.exe --help
-build\control\Release\mediamax_control.exe --list     # needs systems.json
+build\control\Release\mediamax_control.exe --show examples\01_basics\show.json --list
 ```
 
 `--self-test` writes `selftest_*.ppm` next to the exe's working directory

@@ -28,7 +28,9 @@ namespace mediamax::gui
 class ControlGuiApp
 {
 public:
-    explicit ControlGuiApp(std::string systemsPath);
+    // The system list is not loaded at startup (issue 18: it lives in the
+    // show file) - File > Open brings it in with the show.
+    ControlGuiApp();
     ~ControlGuiApp();
 
     ControlGuiApp(const ControlGuiApp&) = delete;
@@ -72,9 +74,8 @@ public:
     // fix the second press replaced the first, since the new cue's default
     // time equaled the last cue's and Show::addCue replaces on collision).
     std::size_t testAddCue();
-    // Registers a system without persisting the config (the self-test never
-    // writes its deliberately-nonexistent config file; selfTestSystem does
-    // the same after addSystem()).
+    // Registers a system in the GUI list (the self-test's entries; nothing
+    // is persisted - the show file is where the list is stored, issue 18).
     void testAddSystem(const std::string& name, const std::string& host, int port);
     // True once a registered system reports its poll connection up.
     bool testSystemConnected(const std::string& name) const;
@@ -145,8 +146,17 @@ private:
     // --- systems -----------------------------------------------------------
 
     SystemConnection* activeConnection() const;
-    void loadSystemsConfig();
-    bool saveSystemsConfig(std::string& error);
+    // The show file is the system list's persistence target (issue 18):
+    // serialize the current list into the editor document (called before
+    // every save and push).
+    void syncSystemsToShow();
+    // The show file is the system list's source of truth (issue 18): after
+    // opening a show, make its system list the GUI's. Entries with the same
+    // name+host+port reuse the existing connection (stays online); the rest
+    // are removed and new ones connect.
+    void applyShowSystems();
+    // Saves the editor's show to `path`, syncing the system list first.
+    bool saveEditorFile(const std::string& path, std::string& error);
 
     // --- UI sections ---------------------------------------------------------
 
@@ -267,10 +277,8 @@ private:
 
     // --- state ---------------------------------------------------------------
 
-    std::string m_SystemsPath;
     std::vector<std::unique_ptr<SystemConnection>> m_Systems;
     int m_Active = -1; // selected system index
-    bool m_ConfigDirty = false;
 
     // "Add system" form.
     std::string m_NewName;
@@ -295,9 +303,9 @@ private:
     bool m_AboutModal = false;
     // "System settings" dialog (settings... in the Systems pane, issue 16):
     // the entry's identity and address (name / host / port - the same
-    // fields "Add system" and systems.json use). m_SysSettingsIndex is the
-    // entry's slot in m_Systems; retargeting keeps the slot, so selections
-    // and stored pointers stay valid.
+    // fields the show file's `systems` list stores). m_SysSettingsIndex is
+    // the entry's slot in m_Systems; retargeting keeps the slot, so
+    // selections and stored pointers stay valid.
     bool m_SysSettingsModal = false;
     int m_SysSettingsIndex = -1;
     struct SystemSettingsEdit

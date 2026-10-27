@@ -1,19 +1,17 @@
 // MediaMax control interface.
 //
 //   mediamax_control                              (windowed control GUI)
-//   mediamax_control --list
-//   mediamax_control --system <name|idx> --command "method" [json-params]
-//   mediamax_control --system <name|idx>          (interactive REPL)
-//   mediamax_control --system <host:port>         (direct, no config file)
+//   mediamax_control --show <file> --list
+//   mediamax_control --show <file> --system <name|idx> --command "method" [json-params]
+//   mediamax_control --show <file> --system <name|idx>          (interactive REPL)
+//   mediamax_control --system <host:port>                       (direct, no file)
 //   mediamax_control --gui                        (explicit GUI; = no args)
 //   mediamax_control --gui-self-test [frames]     (headless GUI smoke test)
 //       [--gui-self-test-system host:port]        (also drive a live engine)
 //
-// Systems are configured in a JSON file (default: ./systems.json):
-//   { "systems": [ { "name": "Living Room", "host": "192.168.1.50", "port": 47600 } ] }
-//
-// `--system` accepts the config name, the 1-based index, or a direct
-// host:port address.
+// The system list lives in the show file (its "systems" field, issue 18):
+// --show <file> makes --system <name|idx> resolve from it; a direct
+// --system host:port works without any file.
 
 #include <cstdint>
 #include <fstream>
@@ -27,6 +25,7 @@
 #include "gui/GuiMain.h"
 #include "mediamax/net/ControlClient.h"
 #include "mediamax/protocol/CommandServer.h"
+#include "mediamax/show/Show.h"
 #include "mediamax/util/Logger.h"
 
 namespace
@@ -47,7 +46,10 @@ struct Config
     std::vector<System> systems;
 };
 
-bool loadConfig(const std::string& path, Config& out, std::string& error)
+// Reads the system list from a show file (issue 18: the show document is
+// where the systems live). The core show parser validates the file, so a
+// broken show is reported as one.
+bool loadShowSystems(const std::string& path, Config& out, std::string& error)
 {
     std::ifstream in(path);
     if (!in)
@@ -55,26 +57,26 @@ bool loadConfig(const std::string& path, Config& out, std::string& error)
         error = "cannot read " + path;
         return false;
     }
-    json parsed = json::parse(in, nullptr, false);
+    const json parsed = json::parse(in, nullptr, false);
     if (parsed.is_discarded())
     {
         error = "invalid JSON in " + path;
         return false;
     }
-    if (!parsed.contains("systems") || !parsed["systems"].is_array())
+    auto show = mediamax::Show::fromJson(parsed, error);
+    if (!show)
     {
-        error = path + " must contain a \"systems\" array";
         return false;
     }
     out.path = path;
     out.systems.clear();
-    for (const auto& entry : parsed["systems"])
+    for (const auto& s : show->systems)
     {
-        System s;
-        s.name = entry.value("name", "unnamed");
-        s.host = entry.value("host", "127.0.0.1");
-        s.port = static_cast<std::uint16_t>(entry.value("port", 47600));
-        out.systems.push_back(std::move(s));
+        System sys;
+        sys.name = s.name;
+        sys.host = s.host;
+        sys.port = s.port;
+        out.systems.push_back(std::move(sys));
     }
     return true;
 }
@@ -106,7 +108,7 @@ bool resolveSystem(const std::string& spec, const Config& config, System& out, s
 
     if (config.systems.empty())
     {
-        error = "no systems configured (use a config file or host:port)";
+        error = "no systems in the show file (use --show <file> or host:port)";
         return false;
     }
     // Index?
@@ -162,15 +164,17 @@ void printUsage()
         "Usage:\n"
         "  mediamax_control\n"
         "  mediamax_control --gui\n"
-        "  mediamax_control --list\n"
-        "  mediamax_control --system <name|idx|host:port> --command \"method\" [json-params]\n"
-        "  mediamax_control --system <name|idx|host:port>\n"
+        "  mediamax_control --show <file> --list\n"
+        "  mediamax_control --show <file> --system <name|idx|host:port> --command \"method\" [json-params]\n"
+        "  mediamax_control --show <file> --system <name|idx|host:port>\n"
         "  mediamax_control --gui-self-test [frames] [--gui-self-test-system host:port]\n"
         "\n"
         "Options:\n"
-        "  --config <file>    Systems config (default ./systems.json)\n"
-        "  --list             List configured systems and exit\n"
-        "  --system <spec>    Target system (config name, 1-based index or host:port)\n"
+        "  --show <file>      Show file with the system list (--system <name|idx>\n"
+        "                     resolves from it)\n"
+        "  --list             List the show file's systems and exit\n"
+        "  --system <spec>    Target system (show-file name, 1-based index or\n"
+        "                     host:port; host:port needs no --show)\n"
         "  --command <m>      One-shot command; optional json-params argument\n"
         "  --gui              Open the windowed control GUI (also the default\n"
         "                     when no other mode is given)\n"
@@ -182,7 +186,7 @@ void printUsage()
         "\n"
         "REPL commands:\n"
         "  system <name|idx|host:port>   Connect to a system\n"
-        "  systems                       List configured systems\n"
+        "  systems                       List the show file's systems\n"
         "  <method> [json-params]        Send a protocol command\n"
         "  help                          This list\n"
         "  quit                          Exit\n";
@@ -193,7 +197,7 @@ void printReplHelp()
     std::cout <<
         "Commands:\n"
         "  system <name|idx|host:port>   Connect to a system\n"
-        "  systems                       List configured systems\n"
+        "  systems                       List the show file's systems\n"
         "  help                          Show this list\n"
         "  quit | exit                   Exit\n"
         "  <method> [json-params]        Send a protocol command\n"
@@ -272,7 +276,11 @@ bool runRepl(const Config& config, const std::string& initialSystem)
         {
             if (config.systems.empty())
             {
-                std::cout << "(no systems in " << config.path << "; use host:port)" << std::endl;
+                std::cout << (config.path.empty()
+                                  ? "(no systems given: --show <file> provides them; host:port "
+                                    "works without)"
+                                  : "(no systems in " + config.path + "; use host:port)")
+                          << std::endl;
             }
             for (size_t i = 0; i < config.systems.size(); ++i)
             {
@@ -337,7 +345,7 @@ bool runRepl(const Config& config, const std::string& initialSystem)
 
 int main(int argc, char** argv)
 {
-    std::string configPath = "systems.json";
+    std::string showPath;
     std::string systemSpec;
     std::string command;
     std::string paramsArg; // optional one-shot json-params (a positional)
@@ -363,9 +371,9 @@ int main(int argc, char** argv)
         {
             help = true;
         }
-        else if (a == "--config")
+        else if (a == "--show")
         {
-            configPath = next();
+            showPath = next();
         }
         else if (a == "--list")
         {
@@ -438,26 +446,36 @@ int main(int argc, char** argv)
 
     mediamax::Logger::instance().setLevel(mediamax::LogLevel::Error);
 
-    // GUI modes (the GUI loads the systems config itself).
+    // GUI modes (the GUI keeps its systems in the show file, issue 18).
     if (gui || guiSelfTest)
     {
         if (gui)
         {
-            return mediamax::gui::runGui(configPath);
+            return mediamax::gui::runGui();
         }
         return mediamax::gui::runGuiSelfTest(guiSelfTestFrames, guiSelfTestSystem);
     }
 
     Config config;
     std::string error;
-    if (!loadConfig(configPath, config, error))
+    bool configOk = false;
+    if (showPath.empty())
+    {
+        error = "no show file given (--show <file>); --system <name|idx> needs it "
+                "(a direct host:port works without one)";
+    }
+    else
+    {
+        configOk = loadShowSystems(showPath, config, error);
+    }
+    if (!configOk)
     {
         if (listOnly)
         {
             std::cerr << "mediamax_control: " << error << std::endl;
             return 1;
         }
-        // A missing config is fine when targeting a direct host:port.
+        // No usable show file is fine when targeting a direct host:port.
         std::cerr << "note: " << error << std::endl;
     }
 
@@ -481,7 +499,7 @@ int main(int argc, char** argv)
         if (command.empty())
         {
             // No CLI mode requested: the windowed GUI is the default mode.
-            return mediamax::gui::runGui(configPath);
+            return mediamax::gui::runGui();
         }
         std::cerr << "mediamax_control: --command requires --system" << std::endl;
         printUsage();

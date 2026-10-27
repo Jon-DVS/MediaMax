@@ -274,8 +274,9 @@ render thread (main)   media pump thread      audio thread         control clien
 ## Control app (`control/`)
 
 Thin CLI + the operator GUI. With **no mode given it opens the windowed GUI**
-(`--gui` is kept as the explicit form). The CLI reads `systems.json`
-(`{"systems":[{"name","host","port"}]}`), resolves
+(`--gui` is kept as the explicit form). The CLI reads the system list from a
+show file (`--show <file>`, its `systems` field — the same field the GUI
+stores in the show file), resolves
 `--system <name|idx|host:port>`, then either sends one
 `--command "method" [json-params]` (one-shot) or enters a REPL
 (`system <spec>`, `systems`, `<method> [json]`, `help`, `quit`). The CLI

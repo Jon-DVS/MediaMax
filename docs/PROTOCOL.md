@@ -93,8 +93,8 @@ Rename the system (reflected in `status`/`ping`).
 The control GUI's Systems pane shows this system info per system: each row
 shows the computer name the engine reports (`hostname`) under the custom
 name, and a settings dialog (the `settings...` button on a row) edits the
-entry's name, IP address and port — the same fields the systems config
-stores — reconnecting the entry when the address changes.
+entry's name, IP address and port — the same fields the show file's
+`systems` list stores — reconnecting the entry when the address changes.
 
 ### Shows
 
@@ -129,6 +129,12 @@ show editor) push an edited show to a system without a shared filesystem.
 - Errors: missing/non-object `show` parameter, an invalid document, or a
   malformed file are reported the same way as for `show.load`. Media
   loading (and skipping of missing media files) is identical.
+
+The document may carry a `systems` array (target systems, see
+[SHOW_FORMAT.md](SHOW_FORMAT.md)): client-side targeting info that the
+control GUI stores in the show file with the show itself. The engine parses
+and stores the field, so it round-trips through `show.save`, but it is not
+used for rendering.
 
 Without `preserveState`, loading a show resets playback (stopped, time 0,
 no scene/layer overrides). With `preserveState: true`, the live playback

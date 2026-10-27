@@ -140,10 +140,8 @@ std::string truncate(const std::string& s, size_t limit)
 
 } // namespace
 
-ControlGuiApp::ControlGuiApp(std::string systemsPath)
-    : m_SystemsPath(std::move(systemsPath))
+ControlGuiApp::ControlGuiApp()
 {
-    loadSystemsConfig();
 }
 
 ControlGuiApp::~ControlGuiApp()
@@ -204,48 +202,64 @@ void ControlGuiApp::frame()
 
 // --- systems -----------------------------------------------------------------
 
-void ControlGuiApp::loadSystemsConfig()
+void ControlGuiApp::syncSystemsToShow()
 {
-    auto file = readFile(m_SystemsPath);
-    if (!file)
+    // The show file is the system list's persistence target (issue 18):
+    // every save and push serializes the current list into the document.
+    // A direct document mutation - no touch(), so this does not by itself
+    // mark the editor dirty or trigger an auto-push.
+    Show& show = m_Editor.show();
+    show.systems.clear();
+    for (const auto& system : m_Systems)
     {
-        return; // no config: start with an empty list
-    }
-    json parsed = json::parse(*file, nullptr, false);
-    if (parsed.is_discarded() || !parsed.contains("systems") || !parsed["systems"].is_array())
-    {
-        return;
-    }
-    for (const auto& entry : parsed["systems"])
-    {
-        m_Systems.push_back(std::make_unique<SystemConnection>(
-            entry.value("name", "unnamed"), entry.value("host", "127.0.0.1"),
-            static_cast<std::uint16_t>(entry.value("port", 47600))));
-        m_Systems.back()->connect(); // auto-connect; the poll thread reports state
-    }
-    if (!m_Systems.empty())
-    {
-        m_Active = 0;
-        m_LastActive = 0;
+        show.systems.push_back({system->name(), system->host(), system->port()});
     }
 }
 
-bool ControlGuiApp::saveSystemsConfig(std::string& error)
+void ControlGuiApp::applyShowSystems()
 {
-    json arr = json::array();
-    for (const auto& s : m_Systems)
+    // The show file is the system list's source of truth (issue 18): the
+    // document's list becomes the GUI's. Entries with the same
+    // name+host+port reuse the existing connection (it stays online);
+    // everything else is dropped, and new entries connect.
+    const Show& show = m_Editor.show();
+    std::vector<std::unique_ptr<SystemConnection>> next;
+    for (const auto& ref : show.systems)
     {
-        arr.push_back({{"name", s->name()}, {"host", s->host()}, {"port", s->port()}});
+        std::unique_ptr<SystemConnection> conn;
+        for (size_t i = 0; i < m_Systems.size(); ++i)
+        {
+            if (m_Systems[i]->name() == ref.name && m_Systems[i]->host() == ref.host &&
+                m_Systems[i]->port() == ref.port)
+            {
+                conn = std::move(m_Systems[i]);
+                m_Systems.erase(m_Systems.begin() + static_cast<std::ptrdiff_t>(i));
+                break;
+            }
+        }
+        if (!conn)
+        {
+            conn = std::make_unique<SystemConnection>(ref.name, ref.host, ref.port);
+            conn->connect();
+        }
+        next.push_back(std::move(conn));
     }
-    json doc;
-    doc["systems"] = arr;
-    if (!writeFile(m_SystemsPath, doc.dump(2)))
-    {
-        error = "cannot write " + m_SystemsPath;
-        return false;
-    }
-    m_ConfigDirty = false;
-    return true;
+    m_Systems = std::move(next); // the rest are dropped (poll threads stopped)
+    m_Active = m_Systems.empty() ? -1 : 0;
+    m_LastActive = m_Active;
+    // The per-dialog stored targets are invalid with a new list; the
+    // dialogs are modal, so none can be open when a show is opened.
+    m_EditTarget = nullptr;
+    m_WarpTarget = nullptr;
+    m_SysSettingsIndex = -1;
+    log("show opened: " + std::to_string(m_Systems.size()) +
+        (m_Systems.size() == 1 ? " system" : " systems") + " from the document");
+}
+
+bool ControlGuiApp::saveEditorFile(const std::string& path, std::string& error)
+{
+    syncSystemsToShow();
+    return m_Editor.saveFile(path, error);
 }
 
 SystemConnection* ControlGuiApp::activeConnection() const
@@ -359,6 +373,7 @@ void ControlGuiApp::consoleSubmit()
 
 nlohmann::json ControlGuiApp::showPushParams()
 {
+    syncSystemsToShow(); // the pushed document carries the system list (issue 18)
     nlohmann::json params = {{"show", m_Editor.documentJson()}, {"preserveState", true}};
     // Relative media paths in the document resolve against the directory of
     // the file the editor has open (mediaDir), so a push behaves like a
@@ -488,7 +503,7 @@ void ControlGuiApp::renderMenuBar()
         if (ImGui::MenuItem("Save", nullptr, nullptr, canSave) && canSave)
         {
             std::string error;
-            if (!m_Editor.saveFile(m_Editor.filePath(), error))
+            if (!saveEditorFile(m_Editor.filePath(), error))
             {
                 m_EditorError = error;
             }
@@ -501,22 +516,6 @@ void ControlGuiApp::renderMenuBar()
         if (ImGui::MenuItem("Exit"))
         {
             m_ShutdownRequested = true;
-        }
-        ImGui::EndMenu();
-    }
-    if (ImGui::BeginMenu("System"))
-    {
-        if (ImGui::MenuItem("Save Systems List"))
-        {
-            std::string error;
-            if (saveSystemsConfig(error))
-            {
-                log("systems list saved to " + m_SystemsPath);
-            }
-            else
-            {
-                log("systems list save failed: " + error);
-            }
         }
         ImGui::EndMenu();
     }
@@ -733,7 +732,6 @@ void ControlGuiApp::addSystem(const std::string& name, const std::string& host, 
         std::make_unique<SystemConnection>(name, host, static_cast<std::uint16_t>(port)));
     m_Systems.back()->connect(); // dials the running engine; the poll thread reports state
     m_Active = static_cast<int>(m_Systems.size()) - 1;
-    m_ConfigDirty = true;
     log("added system " + name + " (" + host + ":" + std::to_string(port) + "); connecting...");
     m_NewName.clear();
     m_SysTestResult.clear();
@@ -776,26 +774,11 @@ void ControlGuiApp::renderSystemsWindow()
         ImGui::End();
         return;
     }
-    ImGui::InputText("Config file", &m_SystemsPath);
-    ImGui::SameLine();
-    if (ImGui::Button("Save List##systems") || m_ConfigDirty)
-    {
-        std::string error;
-        if (saveSystemsConfig(error))
-        {
-            log("systems list saved to " + m_SystemsPath);
-        }
-        else
-        {
-            log("systems list save failed: " + error);
-        }
-    }
-    if (m_ConfigDirty)
-    {
-        ImGui::SameLine();
-        ImGui::TextColored(kWarnColor, "(unsaved)");
-    }
-    ImGui::Spacing();
+    // The system list is stored in the show file (issue 18): File > Open
+    // loads it, File > Save (and pushes) write it back.
+    ImGui::TextDisabled(
+        "Systems are stored in the show file: File > Open loads them, File > Save writes them "
+        "back.");
     ImGui::Separator();
 
     // "Add system" — always visible at the top of the pane. This section used
@@ -907,7 +890,6 @@ void ControlGuiApp::renderSystemsWindow()
                     {
                         --m_Active;
                     }
-                    m_ConfigDirty = true;
                     log("removed system " + name);
                     break;
                 }
@@ -1443,7 +1425,7 @@ void ControlGuiApp::openSystemSettings(int index)
     {
         return;
     }
-    // The same fields "Add system" and systems.json use (issue 16): the
+    // The same fields the show file's `systems` list stores (issue 16): the
     // entry's identity and address.
     const SystemConnection& conn = *m_Systems[static_cast<size_t>(index)];
     m_SysSettings.name = conn.name();
@@ -1471,7 +1453,6 @@ bool ControlGuiApp::applySystemSettings()
     const bool wasActive = conn.active();
     conn.retarget(m_SysSettings.name, m_SysSettings.host,
                   static_cast<std::uint16_t>(m_SysSettings.port));
-    m_ConfigDirty = true;
     log("system settings applied: " + m_SysSettings.name + " (" + m_SysSettings.host + ":" +
         std::to_string(m_SysSettings.port) + ")" + (wasActive ? "; reconnecting" : ""));
     m_SysSettingsModal = false;
@@ -1719,7 +1700,7 @@ void ControlGuiApp::renderShowEditorWindow()
     if (ImGui::Button("Save") && canSave)
     {
         std::string error;
-        if (!m_Editor.saveFile(m_Editor.filePath(), error))
+        if (!saveEditorFile(m_Editor.filePath(), error))
         {
             m_EditorError = error;
         }
@@ -2653,6 +2634,8 @@ void ControlGuiApp::renderFileDialogs()
                 if (m_Editor.loadFile(selection.begin()->second, error))
                 {
                     m_EditorError.clear();
+                    // The show file carries the system list (issue 18).
+                    applyShowSystems();
                 }
                 else
                 {
@@ -2671,7 +2654,7 @@ void ControlGuiApp::renderFileDialogs()
             if (!path.empty())
             {
                 std::string error;
-                if (m_Editor.saveFile(path, error))
+                if (saveEditorFile(path, error))
                 {
                     m_EditorError.clear();
                 }
@@ -3362,7 +3345,6 @@ std::size_t ControlGuiApp::testAddCue()
 void ControlGuiApp::testAddSystem(const std::string& name, const std::string& host, int port)
 {
     addSystem(name, host, port);
-    m_ConfigDirty = false; // the self-test never writes a config file
 }
 
 bool ControlGuiApp::testSystemConnected(const std::string& name) const
@@ -3474,12 +3456,7 @@ void ControlGuiApp::testSetSystemSettingsPort(int port)
 bool ControlGuiApp::testApplySystemSettings()
 {
     // The exact action of the dialog's Apply button (no ImGui involved).
-    const bool ok = applySystemSettings();
-    if (ok)
-    {
-        m_ConfigDirty = false; // the self-test never writes a config file
-    }
-    return ok;
+    return applySystemSettings();
 }
 
 std::string ControlGuiApp::testSystemNameAt(int index) const
@@ -3514,11 +3491,8 @@ bool ControlGuiApp::selfTestSystem(const std::string& host, std::uint16_t port, 
     // deterministic one; run it against a scratch playback instance.
     //
     // The system is also registered in the app itself: the UI (and the
-    // auto-push of edited shows) must see it as a real system. addSystem()
-    // marks the systems config dirty; undo that, so the self-test never
-    // writes a config file (its config path is deliberately nonexistent).
+    // auto-push of edited shows) must see it as a real system.
     addSystem("self-test", host, port);
-    m_ConfigDirty = false;
     SystemConnection conn("self-test", host, port);
     bool allOk = true;
     auto step = [&](const std::string& name, bool ok, const std::string& detail = "") {

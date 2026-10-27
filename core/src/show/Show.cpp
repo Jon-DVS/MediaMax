@@ -263,6 +263,13 @@ nlohmann::json Show::toJson() const
     }
     j["cues"] = cueArr;
 
+    nlohmann::json systemsArr = nlohmann::json::array();
+    for (const auto& sys : systems)
+    {
+        systemsArr.push_back({{"name", sys.name}, {"host", sys.host}, {"port", sys.port}});
+    }
+    j["systems"] = systemsArr;
+
     return j;
 }
 
@@ -436,6 +443,34 @@ std::optional<Show> Show::fromJson(const nlohmann::json& in, std::string& error)
         }
         std::sort(show.cues.begin(), show.cues.end(),
                   [](const Cue& a, const Cue& b) { return a.time < b.time; });
+    }
+
+    // Target systems (client-side info; issue 18).
+    if (in.contains("systems") && in["systems"].is_array())
+    {
+        for (const auto& sj : in["systems"])
+        {
+            if (!sj.is_object() || !sj.contains("name") || !sj.contains("host") ||
+                !sj["name"].is_string() || !sj["host"].is_string())
+            {
+                error = "show file: invalid systems entry";
+                return std::nullopt;
+            }
+            SystemReference sys;
+            sys.name = sj["name"].get<std::string>();
+            sys.host = sj["host"].get<std::string>();
+            if (sj.contains("port"))
+            {
+                if (!sj["port"].is_number_integer() || sj["port"].get<int>() < 1 ||
+                    sj["port"].get<int>() > 65535)
+                {
+                    error = "show file: invalid systems entry";
+                    return std::nullopt;
+                }
+                sys.port = static_cast<std::uint16_t>(sj["port"].get<int>());
+            }
+            show.systems.push_back(std::move(sys));
+        }
     }
 
     return show;

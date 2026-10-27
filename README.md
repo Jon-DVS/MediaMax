@@ -174,35 +174,34 @@ script to regenerate the example media.
 
 ## Using the control interface
 
-Systems are configured in a JSON file (default `./systems.json`):
+The system list is stored in the show file (its `systems` field):
 
 ```json
-{
-  "systems": [
-    { "name": "Main Wall",  "host": "192.168.1.50", "port": 47600 },
-    { "name": "Lobby",      "host": "192.168.1.51", "port": 47600 }
-  ]
-}
+"systems": [
+  { "name": "Main Wall",  "host": "192.168.1.50", "port": 47600 },
+  { "name": "Lobby",      "host": "192.168.1.51", "port": 47600 }
+]
 ```
 
 ```
-mediamax_control --list
-mediamax_control --system <name|idx|host:port> --command "method" [json-params]
-mediamax_control --system <name|idx|host:port>        (interactive REPL)
+mediamax_control --show show.json --list
+mediamax_control --show show.json --system <name|idx|host:port> --command "method" [json-params]
+mediamax_control --show show.json --system <name|idx|host:port>        (interactive REPL)
+mediamax_control --system <host:port>                                 (direct, no file)
 ```
 
 Examples:
 
 ```sh
 # One-shot commands
-mediamax_control --system "Main Wall" --command "status"
-mediamax_control --system "Main Wall" --command "show.load" '{"path":"show.json"}'
-mediamax_control --system "Main Wall" --command "playback.play" '{"at":"0"}'
-mediamax_control --system "Main Wall" --command "display.warp.set" \
+mediamax_control --show show.json --system "Main Wall" --command "status"
+mediamax_control --show show.json --system "Main Wall" --command "show.load" '{"path":"show.json"}'
+mediamax_control --show show.json --system "Main Wall" --command "playback.play" '{"at":"0"}'
+mediamax_control --show show.json --system "Main Wall" --command "display.warp.set" \
   '{"display":1,"points":[[0,0],[1,0],[0,1],[1,1]]}'
 
 # Interactive REPL
-mediamax_control --system 1
+mediamax_control --show show.json --system 1
   > system "Main Wall"
   > status
   > scene.set {"index":0}
@@ -217,12 +216,13 @@ mediamax_control --gui
 ```
 
 Opens a windowed multi-system control interface (Dear ImGui, docking layout).
-The same `systems.json` drives it: configured systems connect automatically
-and a poll thread keeps their status/scene snapshots fresh.
+The show file drives it: File > Open loads a show *and its system list*
+(entries connect automatically), and File > Save (or a push) writes the list
+back in. A poll thread keeps each entry's status/scene snapshot fresh.
 
 - **Systems** (left) — the system list with live connection state, connect/
-  disconnect and removal, plus a form to add new systems (saved back to the
-  config with *System > Save Systems List*).
+  disconnect and removal, plus a form to add new systems (stored in the show
+  file; written in by File > Save).
 - **Playback** (center) — for the selected system: transport
   (play/pause/stop), a seek slider that follows the live time, scene
   selection and *scene.clear* (return to the timeline), live layer

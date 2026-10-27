@@ -25,6 +25,10 @@ TEST_CASE("Round trip: full show serializes and parses back")
     layer.transform.rotation = 0.5f;
     layer.color = {0.5f, 0.25f, 0.125f, 0.75f};
 
+    // Target systems (issue 18): the show file carries the system list.
+    original.systems.push_back({"Main Wall", "192.168.1.50", 47600});
+    original.systems.push_back({"Lobby", "192.168.1.51", 47601});
+
     const nlohmann::json json = original.toJson();
     std::string error;
     auto parsed = Show::fromJson(json, error);
@@ -60,6 +64,14 @@ TEST_CASE("Round trip: full show serializes and parses back")
     const auto* playScene = std::get_if<PlayScene>(&s.cues[0].action);
     REQUIRE(playScene != nullptr);
     CHECK(playScene->scene == 1);
+
+    CHECK(s.systems.size() == 2);
+    CHECK(s.systems[0].name == "Main Wall");
+    CHECK(s.systems[0].host == "192.168.1.50");
+    CHECK(s.systems[0].port == 47600);
+    CHECK(s.systems[1].name == "Lobby");
+    CHECK(s.systems[1].host == "192.168.1.51");
+    CHECK(s.systems[1].port == 47601);
 }
 
 TEST_CASE("Cue round trip: every action type")
@@ -147,6 +159,19 @@ TEST_CASE("fromJson rejects malformed input")
                                  {"action", nlohmann::json::object()},
                              }})}};
     CHECK_FALSE(Show::fromJson(badCue, error).has_value());
+
+    nlohmann::json badSys = {{"app", "mediamax-show"},
+                             {"version", 1},
+                             {"systems", nlohmann::json::array({{{"name", "no host"}}})}};
+    CHECK_FALSE(Show::fromJson(badSys, error).has_value());
+    CHECK(error.find("systems") != std::string::npos);
+
+    nlohmann::json badSysPort = {{"app", "mediamax-show"},
+                                 {"version", 1},
+                                 {"systems",
+                                  nlohmann::json::array(
+                                      {{{"name", "a"}, {"host", "b"}, {"port", 99999}}})}};
+    CHECK_FALSE(Show::fromJson(badSysPort, error).has_value());
 }
 
 TEST_CASE("fromJson tolerates optional fields")
@@ -166,6 +191,7 @@ TEST_CASE("fromJson tolerates optional fields")
     REQUIRE(show.has_value());
     CHECK(show->name == "Untitled Show");
     CHECK(show->frameRate == FrameRate::fps30()); // default
+    CHECK(show->systems.empty()); // absent field: no target systems
     const auto& layer = show->scenes[0].layers[0];
     CHECK(layer.opacity == doctest::Approx(1.f));
     CHECK(layer.blend == BlendMode::Normal);

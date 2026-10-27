@@ -10,8 +10,9 @@ namespace mediamax::gui
 {
 
 // Runs the windowed GUI until the window is closed. Returns the process exit
-// code (0 on a clean exit).
-int runGui(const std::string& systemsPath);
+// code (0 on a clean exit). The system list lives in the show file (issue
+// 18): File > Open loads it, File > Save writes it back.
+int runGui();
 
 // Headless smoke mode: renders `frames` full UI frames to a hidden window and
 // exits. When `liveSystem` is non-empty ("host:port"), the scripted command

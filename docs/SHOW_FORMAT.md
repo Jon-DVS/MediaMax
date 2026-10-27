@@ -20,7 +20,8 @@ Reference implementation: `Show::toJson` / `Show::fromJson`
   "duration": 30.0,
   "media": [ ... ],
   "scenes": [ ... ],
-  "cues": [ ... ]
+  "cues": [ ... ],
+  "systems": [ ... ]
 }
 ```
 
@@ -34,6 +35,7 @@ Reference implementation: `Show::toJson` / `Show::fromJson`
 | `media` | array | no | Media references (below) |
 | `scenes` | array | yes* | Scenes (below) — a show without scenes is empty |
 | `cues` | array | no | Timeline cues (below) |
+| `systems` | array | no | Target systems (below) — where the show runs |
 
 \* "required" in the sense that an empty show is valid but useless; the
 parser accepts all lists as empty.
@@ -212,6 +214,28 @@ existing time replaces it.
 
 A cue action overrides a layer's *static* value and *tracks* for all later
 times until another cue of the same kind targets the same layer.
+
+## Systems (where the show runs)
+
+```json
+"systems": [
+  { "name": "Main Wall", "host": "192.168.1.50", "port": 47600 },
+  { "name": "Lobby",     "host": "192.168.1.51", "port": 47600 }
+]
+```
+
+| Field | Type | Required | Meaning |
+| --- | --- | --- | --- |
+| `name` | string | yes | Label for the system |
+| `host` | string | yes | IP address (or hostname) of the machine running the playback engine |
+| `port` | int 1..65535 | no | Control-protocol port (default 47600) |
+
+The show file is where the system list lives: the control GUI loads its
+system list when a show is opened (File > Open) and writes it back in when
+the show is saved or pushed, and the CLI resolves `--system <name|idx>`
+from it (`--show <file>`). This is **client-side targeting info** — the
+playback engine parses and stores the field but does not use it for
+rendering.
 
 ## Minimal example
 

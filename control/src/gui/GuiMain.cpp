@@ -2,8 +2,11 @@
 
 #include <chrono>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <vector>
 
@@ -189,7 +192,7 @@ bool GuiRuntime::renderFrame()
 
 } // namespace
 
-int runGui(const std::string& systemsPath)
+int runGui()
 {
     glfwSetErrorCallback(glfwErrorCallback);
     if (!glfwInit())
@@ -216,7 +219,7 @@ int runGui(const std::string& systemsPath)
         return 1;
     }
 
-    ControlGuiApp app(systemsPath);
+    ControlGuiApp app;
     GuiRuntime runtime;
     std::string error;
     if (!runtime.init(window, &app, error))
@@ -267,9 +270,9 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
         return 1;
     }
 
-    // A config path that does not exist: the self-test UI starts with no
-    // systems (deterministic; no side effects on real systems).
-    ControlGuiApp app("gui_selftest_no_systems_config.json");
+    // The self-test UI starts with no systems (deterministic; no side
+    // effects on real systems).
+    ControlGuiApp app;
     GuiRuntime runtime;
     std::string error;
     if (!runtime.init(window, &app, error))
@@ -439,6 +442,47 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
         std::cout << (arrived ? "PASS" : "FAIL") << " auto-push - show.info name = "
                   << (arrived ? autoPushName : "<not received>") << std::endl;
         liveOk = liveOk && arrived;
+
+        // Issue 18: the pushed document carries the GUI's system list (the
+        // show file is where the systems live). The engine stores the field
+        // and show.save writes the document back - pull it and check the
+        // list round-tripped (at this moment it is exactly [self-test]).
+        const std::string docPath =
+            (std::filesystem::temp_directory_path() / "it18_engine_show.json").string();
+        std::error_code fsError;
+        std::filesystem::remove(docPath, fsError);
+        nlohmann::json saveResult;
+        std::string saveError;
+        const bool docSaved =
+            check.send("show.save", nlohmann::json({{"path", docPath}}), saveResult, saveError);
+        bool systemsInDoc = false;
+        std::string systemsDetail = saveError;
+        if (docSaved)
+        {
+            std::ifstream in(docPath);
+            const nlohmann::json doc = nlohmann::json::parse(in, nullptr, false);
+            if (doc.is_object() && doc.contains("systems") && doc["systems"].is_array())
+            {
+                for (const auto& entry : doc["systems"])
+                {
+                    if (entry.value("name", std::string()) == "self-test" &&
+                        entry.value("host", std::string()) == liveHost &&
+                        entry.value("port", 0) == static_cast<int>(livePort))
+                    {
+                        systemsInDoc = true;
+                        break;
+                    }
+                }
+            }
+            if (!systemsInDoc)
+            {
+                systemsDetail = "document has no matching system entry";
+            }
+        }
+        std::cout << (systemsInDoc ? "PASS" : "FAIL")
+                  << " auto-pushed document carries the system list (show.save round-trip)"
+                  << (systemsInDoc ? std::string() : " - " + systemsDetail) << std::endl;
+        liveOk = liveOk && systemsInDoc;
     }
 
     // 4b) Live-override broadcast (issue 13): the Layers block applies

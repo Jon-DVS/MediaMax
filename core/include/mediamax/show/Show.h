@@ -11,6 +11,7 @@
 // Shows serialize to a human-readable JSON document (see docs/SHOW_FORMAT.md)
 // which doubles as the interchange format.
 
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
@@ -31,6 +32,16 @@ struct MediaReference
     std::string path;
 };
 
+// A playback system the show runs on (issue 18: the show file is where the
+// control GUI stores its system list). Client-side targeting info: the
+// engine parses and stores the field but does not use it for rendering.
+struct SystemReference
+{
+    std::string name;
+    std::string host;
+    std::uint16_t port = 47600;
+};
+
 class Show
 {
 public:
@@ -45,6 +56,10 @@ public:
 
     // Timeline, kept sorted by time.
     std::vector<Cue> cues;
+
+    // The playback systems the show targets (the control GUI's system list;
+    // issue 18 - stored in the show file rather than a separate config).
+    std::vector<SystemReference> systems;
 
     // --- Queries -----------------------------------------------------------
 
