@@ -83,7 +83,10 @@ between them. Several scenes may also be active at once (the operator's
 **in the order they appear in the `scenes` list** (first active scene
 bottom-most, then each scene's layers by `zIndex`). Reordering the list
 therefore reorders the compositing. Cues reference scenes by `id`, so
-reordering does not affect the timeline.
+reordering does not affect the timeline. The operator may also have **no
+scene active at any time** (a deliberate empty manual set, via
+`scene.toggle`): then nothing is composited (black output) until a scene
+is toggled back on, `scene.clear` releases, or a `playScene` cue fires.
 
 ### Layer
 

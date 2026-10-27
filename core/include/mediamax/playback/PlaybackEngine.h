@@ -132,9 +132,10 @@ public:
 
     // All scenes active at show time t, in show-list order (= compositing
     // order: the first is bottom-most). While a manual scene set is live
-    // (setSceneNow/toggleSceneNow) that set is returned; otherwise the single
-    // timeline scene (the last PlayScene cue at or before t; the preview
-    // scene when none has fired).
+    // (setSceneNow/toggleSceneNow) that set is returned - possibly empty,
+    // meaning no scene is active; otherwise the single timeline scene (the
+    // last PlayScene cue at or before t; the preview scene when none has
+    // fired).
     std::vector<Id> activeScenesAt(const Time& t) const;
 
     // The primary active scene at t: the first of activeScenesAt(t)
@@ -154,15 +155,21 @@ public:
     // exactly the given scene (solo); toggleSceneNow() adds/removes the
     // scene from the manual set - taken from a timeline-driven state it
     // first takes the timeline scene with it, so a toggle adds to (or, for
-    // the timeline scene itself, removes) what the timeline shows. The media
-    // in a manually activated scene start from its activation time.
+    // the timeline scene itself, removes) what the timeline shows. Toggling
+    // the last manual scene off leaves the manual set in effect but empty:
+    // no scene is active (black output) until a scene is toggled back on,
+    // scene.clear releases, or a PlayScene cue is crossed. The media in a
+    // manually activated scene start from its activation time.
     // clearSceneNow() returns to cue-driven scene selection (a PlayScene cue
     // crossed while playing does the same) and returns how many manual
-    // scenes were released.
+    // scenes were released (0 for a deliberate empty set, which is
+    // released as well).
     bool setSceneNow(Id sceneId);
     bool toggleSceneNow(Id sceneId);
     int clearSceneNow();
-    bool hasSceneOverride() const { return !m_ForceScenes.empty(); }
+    // True while the operator's manual scene set is in effect - including a
+    // deliberate empty set (no scene active).
+    bool hasSceneOverride() const { return m_ForceScenes.has_value(); }
 
     bool setLayerOpacity(Id layerId, float value);
     bool setLayerVisible(Id layerId, bool value);
@@ -204,11 +211,13 @@ private:
     PlayState m_State = PlayState::Stopped;
     Time m_Time;
     int m_PreviewScene = 0;
-    // Manually active scenes (scene.set/scene.toggle) mapped to the show time
-    // at which each was activated (its media start from there). While
-    // non-empty this set is the active set; scene.clear or a crossed
-    // PlayScene cue empties it.
-    std::map<Id, Time> m_ForceScenes;
+    // The operator's manual scene set (scene.set/scene.toggle), mapping each
+    // scene to the show time at which it was activated (its media start from
+    // there). While present, this set is the active set - even when empty,
+    // which means no scene is active (black output). scene.clear or a
+    // crossed PlayScene cue releases it (nullopt), returning scene
+    // selection to the timeline.
+    std::optional<std::map<Id, Time>> m_ForceScenes;
 
     struct LayerOverride
     {

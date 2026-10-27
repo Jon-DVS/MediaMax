@@ -401,13 +401,57 @@ TEST_CASE("Multiple scenes can be active at once (composited in list order)")
     CHECK(engine.toggleSceneNow(2));
     CHECK(engine.activeScenesAt(engine.time()) == std::vector<Id>{1});
 
-    // Toggling the last manual scene off returns to the timeline.
+    // Toggling the last manual scene off leaves the manual set in effect but
+    // empty: no scene is active (black output) - it does not fall back to
+    // the timeline.
     CHECK(engine.toggleSceneNow(1));
+    CHECK(engine.hasSceneOverride());
+    CHECK(engine.activeScenesAt(engine.time()).empty());
+    CHECK(engine.activeSceneAt(engine.time()) == kInvalidId);
+    const FrameState black = engine.frameState();
+    CHECK(black.activeSceneId == kInvalidId);
+    CHECK(black.activeSceneIds.empty());
+    CHECK(black.layers.empty());
+
+    // scene.clear releases the (empty) manual set back to the timeline.
+    CHECK(engine.clearSceneNow() == 0);
     CHECK_FALSE(engine.hasSceneOverride());
     CHECK(engine.activeScenesAt(engine.time()) == std::vector<Id>{1}); // by cue
 
     // Toggling a scene that is not in the show is rejected.
     CHECK_FALSE(engine.toggleSceneNow(99));
+}
+
+TEST_CASE("Toggling the timeline scene off leaves no scene active")
+{
+    auto media = makeLoadedMediaLibrary();
+    auto engine = makeTestEngine(media);
+
+    engine.play();
+    engine.seek(Time::fromSeconds(1.0)); // timeline scene 1 (cue at t=0)
+    CHECK(engine.activeSceneAt(engine.time()) == 1);
+
+    // Toggling the timeline scene itself off takes manual control with an
+    // empty set: nothing is active (black output) and the override stays in
+    // effect - there is no fallback to the timeline.
+    CHECK(engine.toggleSceneNow(1));
+    CHECK(engine.hasSceneOverride());
+    CHECK(engine.activeScenesAt(engine.time()).empty());
+    CHECK(engine.activeSceneAt(engine.time()) == kInvalidId);
+    const FrameState black = engine.frameState();
+    CHECK(black.activeSceneId == kInvalidId);
+    CHECK(black.activeSceneIds.empty());
+    CHECK(black.layers.empty());
+
+    // Toggling the same scene back on restores it (manual, media from now).
+    CHECK(engine.toggleSceneNow(1));
+    CHECK(engine.hasSceneOverride());
+    CHECK(engine.activeScenesAt(engine.time()) == std::vector<Id>{1});
+
+    // A crossed PlayScene cue also releases the override.
+    engine.tick(Time::fromSeconds(1.1)); // t=1 -> t=2.1, crossing PlayScene(2) @2
+    CHECK_FALSE(engine.hasSceneOverride());
+    CHECK(engine.activeSceneAt(engine.time()) == 2);
 }
 
 TEST_CASE("Scene list order determines compositing order")

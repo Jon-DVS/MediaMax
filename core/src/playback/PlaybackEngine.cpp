@@ -36,7 +36,7 @@ void PlaybackEngine::loadShow(Show show, bool preserveState)
         m_State = PlayState::Stopped;
         m_Time = Time::zero();
         m_PreviewScene = 0;
-        m_ForceScenes.clear();
+        m_ForceScenes.reset();
         m_Overrides.clear();
         return;
     }
@@ -56,9 +56,19 @@ void PlaybackEngine::loadShow(Show show, bool preserveState)
     {
         m_PreviewScene = 0;
     }
-    for (auto it = m_ForceScenes.begin(); it != m_ForceScenes.end();)
+    if (m_ForceScenes.has_value())
     {
-        it = m_Show.findScene(it->first) ? std::next(it) : m_ForceScenes.erase(it);
+        for (auto it = m_ForceScenes->begin(); it != m_ForceScenes->end();)
+        {
+            it = m_Show.findScene(it->first) ? std::next(it) : m_ForceScenes->erase(it);
+        }
+        if (m_ForceScenes->empty())
+        {
+            // Every manually active scene was removed by the edit: release
+            // the override back to the timeline. (A deliberate empty set is
+            // only ever created live, by toggling the last scene off.)
+            m_ForceScenes.reset();
+        }
     }
     for (auto it = m_Overrides.begin(); it != m_Overrides.end();)
     {
@@ -145,7 +155,7 @@ void PlaybackEngine::tick(const Time& dt)
         }
         if (std::holds_alternative<PlayScene>(cue.action))
         {
-            m_ForceScenes.clear();
+            m_ForceScenes.reset();
         }
         if (const auto* seek = std::get_if<SeekTo>(&cue.action))
         {
@@ -199,12 +209,13 @@ std::vector<Id> PlaybackEngine::activeScenesAt(const Time& t) const
 {
     std::vector<Id> result;
     // The live manual set (setSceneNow/toggleSceneNow) wins for the current
-    // time; reported in show-list order, which is the compositing order.
-    if (t == m_Time && !m_ForceScenes.empty())
+    // time - including a deliberate empty set (no scene active); reported in
+    // show-list order, which is the compositing order.
+    if (t == m_Time && m_ForceScenes.has_value())
     {
         for (const auto& scene : m_Show.scenes)
         {
-            if (m_ForceScenes.count(scene.id) > 0)
+            if (m_ForceScenes->count(scene.id) > 0)
             {
                 result.push_back(scene.id);
             }
@@ -229,9 +240,9 @@ Time PlaybackEngine::sceneStartFor(const Time& t, Id sceneId) const
 {
     // A manually activated scene starts (its media) from its activation
     // time.
-    if (t == m_Time)
+    if (t == m_Time && m_ForceScenes.has_value())
     {
-        if (const auto it = m_ForceScenes.find(sceneId); it != m_ForceScenes.end())
+        if (const auto it = m_ForceScenes->find(sceneId); it != m_ForceScenes->end())
         {
             return it->second;
         }
@@ -476,8 +487,7 @@ bool PlaybackEngine::setSceneNow(Id sceneId)
     {
         return false;
     }
-    m_ForceScenes.clear();
-    m_ForceScenes[sceneId] = m_Time;
+    m_ForceScenes = std::map<Id, Time>{{sceneId, m_Time}};
     return true;
 }
 
@@ -487,32 +497,39 @@ bool PlaybackEngine::toggleSceneNow(Id sceneId)
     {
         return false;
     }
-    if (m_ForceScenes.empty())
+    if (!m_ForceScenes.has_value())
     {
-        // Taking manual control from a timeline state: keep the timeline
-        // scene active (starting where the timeline started it), so the
-        // toggle adds to what the timeline shows.
+        // Taking manual control from a timeline state: the toggle operates
+        // on what the timeline shows. Toggling the timeline scene itself off
+        // takes control with an empty set (no scene active); otherwise the
+        // timeline scene stays active (starting where the timeline started
+        // it) and the toggle adds (or removes) the given scene.
+        m_ForceScenes = std::map<Id, Time>{};
         const Id timelineId = timelineSceneAt(m_Time);
-        if (timelineId != kInvalidId && timelineId != sceneId)
+        if (timelineId == sceneId)
         {
-            m_ForceScenes[timelineId] = sceneStartFor(m_Time, timelineId);
+            return true; // empty manual set: nothing is active
+        }
+        if (timelineId != kInvalidId)
+        {
+            (*m_ForceScenes)[timelineId] = sceneStartFor(m_Time, timelineId);
         }
     }
-    if (const auto it = m_ForceScenes.find(sceneId); it != m_ForceScenes.end())
+    if (const auto it = m_ForceScenes->find(sceneId); it != m_ForceScenes->end())
     {
-        m_ForceScenes.erase(it);
+        m_ForceScenes->erase(it);
     }
     else
     {
-        m_ForceScenes[sceneId] = m_Time;
+        (*m_ForceScenes)[sceneId] = m_Time;
     }
     return true;
 }
 
 int PlaybackEngine::clearSceneNow()
 {
-    const int count = static_cast<int>(m_ForceScenes.size());
-    m_ForceScenes.clear();
+    const int count = m_ForceScenes.has_value() ? static_cast<int>(m_ForceScenes->size()) : 0;
+    m_ForceScenes.reset();
     return count;
 }
 

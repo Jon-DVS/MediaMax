@@ -73,7 +73,7 @@ Full snapshot of the system.
 | `timecode` | `HH:MM:SS:FF` at the show frame rate |
 | `duration` | show duration (s), `-1` when unlimited |
 | `frameRate` | broadcast string, e.g. `"30"` or `"29.97"` |
-| `scene` | primary (bottom-most) active scene id |
+| `scene` | primary (bottom-most) active scene id (`0` when no scene is active) |
 | `activeScenes` | all active scene ids, in show-list order (= compositing order) |
 | `previewScene` | show's preview scene index (always `0` in v1; not settable via the protocol) |
 | `layers` | number of layers in the current frame |
@@ -213,7 +213,11 @@ Stop and return to time 0.
 Several scenes may be active at once (composited, in show-list order — the
 first active scene is bottom-most). `scene.set` activates exactly one scene
 (solo), `scene.toggle` adds/removes a scene, and `scene.clear` releases the
-whole manual set back to the timeline.
+whole manual set back to the timeline. The operator may also have **no
+scene active at any time**: when the manual set is empty (deliberately,
+via `scene.toggle`), nothing is composited (black output) and `status`
+reports `scene: 0` with an empty `activeScenes` array, until a scene is
+toggled back on, `scene.clear` releases, or a `playScene` cue is crossed.
 
 #### `scene.set`
 
@@ -227,21 +231,25 @@ timeline until the timeline's next `playScene` cue, another `scene.set`, or
 #### `scene.toggle`
 
 Toggle a scene in/out of the manual active set. Taken from a
-timeline-driven state (no manual set yet) it first takes the timeline scene
-with it, so toggling a *different* scene on composites it **with** what the
-timeline shows, and toggling the timeline scene itself is a no-op. Each
-manually activated scene starts its media from its activation time. The
-timeline's next `playScene` cue (crossed while playing) releases the whole
-manual set, like `scene.clear`.
+timeline-driven state (no manual set yet) it operates on what the timeline
+shows: toggling a *different* scene on composites it **with** the timeline
+scene, while toggling the timeline scene itself off takes manual control
+with an empty set — **no scene is active** (black output). Toggling the
+last manually active scene off likewise leaves the manual set in effect
+but empty. Each manually activated scene starts its media from its
+activation time. The timeline's next `playScene` cue (crossed while
+playing) releases the whole manual set, like `scene.clear`.
 
 - Params: `index` (int, required) — 0-based scene index in the show.
 - Result: `{"scene":<id>,"name":"<name>","active":<bool>,"activeScenes":[<id>,...]}`
-  — `activeScenes` in show-list order (= compositing order, bottom to top).
+  — `activeScenes` in show-list order (= compositing order, bottom to top);
+  empty while the manual set has no active scene.
 
 #### `scene.clear`
 
 Release the operator's manual scene set (from `scene.set`/`scene.toggle`):
-scene selection returns to the timeline. Idempotent — clearing when there is
+scene selection returns to the timeline — including a deliberate empty set
+(no scene active), which this releases. Idempotent — clearing when there is
 no manual set succeeds and reports `cleared: 0`.
 
 - Params: none.

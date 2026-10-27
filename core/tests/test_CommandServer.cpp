@@ -263,12 +263,23 @@ TEST_CASE("scene.toggle composites multiple scenes in list order")
     CHECK(off.result.at("activeScenes").get<std::vector<std::uint64_t>>() ==
           std::vector<std::uint64_t>{2});
 
-    // Toggling the last manual scene off returns to the timeline.
+    // Toggling the last manual scene off leaves the manual set in effect
+    // but empty: no scene is active (status reports scene 0) and the
+    // timeline does not take back until scene.clear.
     const Response off2 = f.run("scene.toggle", {{"index", 1}});
     REQUIRE(off2.ok);
-    CHECK(off2.result.at("activeScenes").get<std::vector<std::uint64_t>>() ==
-          std::vector<std::uint64_t>{1});
-    CHECK_FALSE(f.engine.hasSceneOverride());
+    CHECK_FALSE(off2.result.at("active").get<bool>());
+    CHECK(off2.result.at("activeScenes").get<std::vector<std::uint64_t>>().empty());
+    CHECK(f.engine.hasSceneOverride());
+    const nlohmann::json status2 = f.run("status").result;
+    CHECK(status2.at("scene").get<std::uint64_t>() == 0);
+    CHECK(status2.at("activeScenes").get<std::vector<std::uint64_t>>().empty());
+
+    // scene.clear releases the empty set back to the timeline (0 scenes).
+    const Response released = f.run("scene.clear");
+    REQUIRE(released.ok);
+    CHECK(released.result.at("cleared").get<int>() == 0);
+    CHECK(released.result.at("scene").get<std::uint64_t>() == 1);
 
     // scene.set is still a solo: exactly the given scene, nothing else.
     REQUIRE(f.run("scene.set", {{"index", 1}}).ok);

@@ -995,16 +995,26 @@ void ControlGuiApp::renderTransportBlock(const SystemConnection::Snapshot& snap)
     // Current scene: the id plus its name (looked up from scene.list), so
     // the operator sees what is playing, not just a number. With several
     // scenes active at once this is the engine's primary scene; the full
-    // active set is visible (highlighted) in the Scenes block below.
-    std::string sceneLabel = "scene " + std::to_string(sceneId);
-    if (sceneId != kInvalidId && snap.scenes.contains("scenes") && snap.scenes["scenes"].is_array())
+    // active set is visible (highlighted) in the Scenes block below. With
+    // no scene active (the operator's manual set is empty) it reads
+    // "no scene".
+    std::string sceneLabel;
+    if (sceneId == kInvalidId)
     {
-        for (const auto& s : snap.scenes["scenes"])
+        sceneLabel = "no scene";
+    }
+    else
+    {
+        sceneLabel = "scene " + std::to_string(sceneId);
+        if (snap.scenes.contains("scenes") && snap.scenes["scenes"].is_array())
         {
-            if (s.is_object() && s.value("id", 0u) == sceneId)
+            for (const auto& s : snap.scenes["scenes"])
             {
-                sceneLabel += " " + s.value("name", std::string());
-                break;
+                if (s.is_object() && s.value("id", 0u) == sceneId)
+                {
+                    sceneLabel += " " + s.value("name", std::string());
+                    break;
+                }
             }
         }
     }
@@ -3245,6 +3255,24 @@ bool ControlGuiApp::selfTestSystem(const std::string& host, std::uint16_t port, 
     step("scene.toggle index 0 again (removes scene 1)",
          conn.send("scene.toggle", {{"index", 0}}, result, error), error);
     step("toggle: only scene 2 remains",
+         activeScenes() == std::vector<std::uint64_t>{2},
+         "activeScenes size=" + std::to_string(activeScenes().size()));
+
+    // The last manual scene can be toggled off: the manual set stays in
+    // effect but empty - no scene active (black output, status scene 0)
+    // until a scene is toggled back on or the operator returns to the
+    // timeline.
+    step("scene.toggle index 1 again (removes scene 2)",
+         conn.send("scene.toggle", {{"index", 1}}, result, error), error);
+    step("toggle: no scene active (empty manual set)",
+         !result.value("active", false) && activeScenes().empty(),
+         "activeScenes size=" + std::to_string(activeScenes().size()));
+    conn.send("status", json::object(), result, error);
+    step("status with no scene active reports scene 0", result.value("scene", 0u) == 0u,
+         "scene=" + std::to_string(result.value("scene", 0u)));
+    step("scene.toggle index 1 (adds scene 2 back)",
+         conn.send("scene.toggle", {{"index", 1}}, result, error), error);
+    step("toggle: scene 2 active again",
          activeScenes() == std::vector<std::uint64_t>{2},
          "activeScenes size=" + std::to_string(activeScenes().size()));
 
