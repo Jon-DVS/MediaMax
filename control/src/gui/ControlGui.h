@@ -47,7 +47,7 @@ public:
 
     // --- test hooks (driven by --gui-self-test; no effect in normal use) ----
     // Queues the given modal ("open", "saveas", "media", "pull", "about",
-    // "move", "edit", "warp" or "mediadetails") to be opened by the next
+    // "edit", "warp" or "mediadetails") to be opened by the next
     // frame(): the same state the UI buttons set plus OpenPopup() (or, for
     // "open"/"saveas"/"media", the ImGuiFileDialog OpenDialog). Deferred
     // because OpenPopup() must run inside a frame (it dereferences the
@@ -86,6 +86,39 @@ public:
     // and Clear button, aimed at every connected system (issue 13).
     bool testBroadcastLayerSet(Id layerId, float x, float y);
     bool testBroadcastLayerClear(Id layerId);
+    // Sets the Display settings dialog's System dropdown (index into
+    // m_Systems; the same state the combo sets) - the live self-test's
+    // display-move check (issue 14).
+    void testSelectDisplayEditSystem(int index);
+    // Presses the Display settings Apply button: the exact action the UI
+    // runs (display.set, or a move to the selected system - issue 14).
+    bool testApplyDisplayEdit();
+    // True when the active system's snapshot reports at least one display -
+    // the same precondition the UI's Edit... button has (its row only
+    // exists then). The live self-test waits for it before opening the
+    // dialog (issue 14): a freshly connected system's first status poll
+    // lands ~500 ms after connect and can still be in flight.
+    bool testActiveHasDisplay() const;
+    // The Display settings dialog's current error line (empty when healthy);
+    // the live self-test's move check reports it on failure.
+    std::string testGetDisplayEditError() const { return m_EditError; }
+    // One-line description of the Display settings dialog's state for the
+    // live self-test: the target system's index (-1 when none), the display
+    // id and the System dropdown's selection.
+    std::string testDescribeDisplayEdit() const
+    {
+        int targetIdx = -1;
+        for (int i = 0; i < static_cast<int>(m_Systems.size()); ++i)
+        {
+            if (m_Systems[static_cast<size_t>(i)].get() == m_EditTarget)
+            {
+                targetIdx = i;
+                break;
+            }
+        }
+        return "target=" + std::to_string(targetIdx) + " id=" + std::to_string(m_EditDisplayId) +
+               " editSystem=" + std::to_string(m_EditSystem) + " active=" + std::to_string(m_Active);
+    }
 
 private:
     // --- systems -----------------------------------------------------------
@@ -110,7 +143,8 @@ private:
     // blocking (<= ~2 s), run from the UI thread on explicit user action.
     void testSystemAddress(const std::string& host, int port);
     // Cross-system display list: every display of every online system with
-    // its owning system, plus "Move..." (move a display to another system).
+    // the system it is linked to. Relinking a display to another system is
+    // done from its Display settings dialog's System dropdown (issue 14).
     void renderDisplaysWindow();
     void renderPlaybackWindow();
     void renderTransportBlock(const SystemConnection::Snapshot& snap);
@@ -122,9 +156,16 @@ private:
     void renderLayersBlock(const SystemConnection::Snapshot& snap);
     void renderDisplaysBlock(const SystemConnection::Snapshot& snap);
     // Opens the "Display settings" / "Projection warp" dialog for the given
-    // display record, sending display.set / display.warp.set to `target`
-    // (the system the record came from).
+    // display record. The settings dialog starts on `target` (the system the
+    // record came from) and can relink the display to another system via its
+    // System dropdown (Apply then moves it - issue 14); the warp dialog
+    // sends display.warp.set to `target`.
     void openDisplayEdit(const nlohmann::json& display, SystemConnection* target);
+    // The Display settings Apply button: display.set on the selected system,
+    // or - when that is not the display's current system - a move there
+    // (display.add + display.set on the target, display.remove on the
+    // source; issue 14). Closes the dialog on success.
+    bool applyDisplayEdit();
     void openWarpEdit(const nlohmann::json& display, SystemConnection* target);
     // Opens the "Media details" dialog for the given media record (the
     // system it came from is shown in the dialog title; the details are
@@ -224,22 +265,16 @@ private:
     bool m_PullModal = false;
     std::string m_PullPath;
     bool m_AboutModal = false;
-    // "Move display to system..." modal (the Displays window). The source
-    // display's record is copied from the clicked row; the move sends
-    // display.add to the target system and display.remove to the source.
-    bool m_MoveModal = false;
-    int m_MoveSourceSystem = -1; // index into m_Systems
-    Id m_MoveDisplayId = kInvalidId;
-    std::string m_MoveName;
-    std::int32_t m_MoveX = 0, m_MoveY = 0, m_MoveWidth = 0, m_MoveHeight = 0;
-    int m_MoveTarget = -1; // index into m_Systems
-    std::string m_MoveError;
     // "Display settings" dialog (Edit... in the Displays block): per-display
     // x/y/w/h/brightness/enabled. m_EditTarget is the system the dialog was
-    // opened from (modal, so it cannot be removed while open).
+    // opened from; m_EditSystem is the System dropdown's selection (index
+    // into m_Systems) - Apply to a different system moves the display there
+    // (issue 14). The dialog is a modal, so neither can be removed while it
+    // is open.
     bool m_EditModal = false;
     SystemConnection* m_EditTarget = nullptr;
     Id m_EditDisplayId = kInvalidId;
+    int m_EditSystem = -1; // index into m_Systems (the System dropdown)
     std::string m_EditError;
     // "Projection warp" dialog (Warp... in the Displays block): the warp
     // grid editor, moved out of the Displays block into its own dialog.
@@ -291,7 +326,8 @@ private:
 
     // "Display settings" dialog (Edit... in the Displays block). The working
     // values live in m_DisplayEdits, resynced from the snapshot every time
-    // the dialog opens; Apply sends display.set to m_EditTarget.
+    // the dialog opens; Apply sends display.set to the selected system (or
+    // moves the display there - issue 14).
     struct DisplayEdit
     {
         int x = 0;
@@ -300,6 +336,7 @@ private:
         int height = 1080;
         float brightness = 1.0f;
         bool enabled = true;
+        std::string name; // carried through a move (display.add takes a name)
     };
     std::map<Id, DisplayEdit> m_DisplayEdits;
 

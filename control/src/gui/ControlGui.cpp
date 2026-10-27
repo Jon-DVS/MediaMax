@@ -110,10 +110,6 @@ const char* modalPopupName(const std::string& which)
     {
         return "Pull show from system";
     }
-    if (which == "move")
-    {
-        return "Move display to system...";
-    }
     if (which == "edit")
     {
         return "Display settings";
@@ -924,11 +920,11 @@ void ControlGuiApp::renderDisplaysWindow()
         ImGui::End();
         return;
     }
-    // Every display of every online system, with the system it is attached
-    // to. "Move..." recreates the display on another system (display.add
-    // there + display.remove here).
+    // Every display of every online system, with the system it is linked to.
+    // A display's settings dialog (Edit...) can relink it to another system
+    // (issue 14).
     int shown = 0;
-    if (ImGui::BeginTable("alldisplays", 8,
+    if (ImGui::BeginTable("alldisplays", 7,
                           ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_BordersOuter))
     {
         ImGui::TableSetupColumn("system");
@@ -938,7 +934,6 @@ void ControlGuiApp::renderDisplaysWindow()
         ImGui::TableSetupColumn("y", ImGuiTableColumnFlags_WidthFixed, 52.0f);
         ImGui::TableSetupColumn("w", ImGuiTableColumnFlags_WidthFixed, 52.0f);
         ImGui::TableSetupColumn("h", ImGuiTableColumnFlags_WidthFixed, 52.0f);
-        ImGui::TableSetupColumn("##move", ImGuiTableColumnFlags_WidthFixed, 62.0f);
         for (size_t i = 0; i < m_Systems.size(); ++i)
         {
             const SystemConnection::Snapshot snap = m_Systems[i]->snapshot();
@@ -949,7 +944,6 @@ void ControlGuiApp::renderDisplaysWindow()
             }
             for (const auto& d : snap.status["displays"])
             {
-                const Id id = static_cast<Id>(d.value("id", 0u));
                 const std::string name = d.value("name", "display");
                 ImGui::TableNextRow();
                 ImGui::TableNextColumn();
@@ -957,7 +951,7 @@ void ControlGuiApp::renderDisplaysWindow()
                 ImGui::TableNextColumn();
                 ImGui::TextUnformatted(name.c_str());
                 ImGui::TableNextColumn();
-                ImGui::Text("%u", id);
+                ImGui::Text("%u", static_cast<unsigned>(d.value("id", 0u)));
                 ImGui::TableNextColumn();
                 ImGui::Text("%d", static_cast<int>(d.value("x", 0)));
                 ImGui::TableNextColumn();
@@ -966,22 +960,6 @@ void ControlGuiApp::renderDisplaysWindow()
                 ImGui::Text("%d", static_cast<int>(d.value("width", 0)));
                 ImGui::TableNextColumn();
                 ImGui::Text("%d", static_cast<int>(d.value("height", 0)));
-                ImGui::TableNextColumn();
-                // Unique per (system, display): display ids repeat across systems.
-                if (ImGui::Button(("Move##movedisp" + std::to_string(i) + "_" + std::to_string(id)).c_str()))
-                {
-                    m_MoveSourceSystem = static_cast<int>(i);
-                    m_MoveDisplayId = id;
-                    m_MoveName = name;
-                    m_MoveX = static_cast<std::int32_t>(d.value("x", 0));
-                    m_MoveY = static_cast<std::int32_t>(d.value("y", 0));
-                    m_MoveWidth = static_cast<std::int32_t>(d.value("width", 1920));
-                    m_MoveHeight = static_cast<std::int32_t>(d.value("height", 1080));
-                    m_MoveTarget = -1;
-                    m_MoveError.clear();
-                    m_MoveModal = true;
-                    ImGui::OpenPopup(modalPopupId("Move display to system..."));
-                }
                 ++shown;
             }
         }
@@ -1335,11 +1313,101 @@ void ControlGuiApp::openDisplayEdit(const json& display, SystemConnection* targe
     de.height = static_cast<int>(display.value("height", 1080));
     de.brightness = static_cast<float>(display.value("brightness", 1.0));
     de.enabled = display.value("enabled", true);
+    de.name = display.value("name", "");
     m_EditTarget = target;
     m_EditDisplayId = id;
+    // The System dropdown starts on the system the display is linked to.
+    m_EditSystem = -1;
+    for (int i = 0; i < static_cast<int>(m_Systems.size()); ++i)
+    {
+        if (m_Systems[static_cast<size_t>(i)].get() == target)
+        {
+            m_EditSystem = i;
+            break;
+        }
+    }
     m_EditError.clear();
     m_EditModal = true;
     ImGui::OpenPopup(modalPopupId("Display settings"));
+}
+
+bool ControlGuiApp::applyDisplayEdit()
+{
+    if (!m_EditTarget || m_EditDisplayId == kInvalidId)
+    {
+        return false;
+    }
+    DisplayEdit& de = m_DisplayEdits[m_EditDisplayId];
+    m_EditError.clear();
+    // The system the display should be linked to (the dialog's System
+    // dropdown). Usually the system the dialog was opened on.
+    SystemConnection* target = m_EditTarget;
+    if (m_EditSystem >= 0 && m_EditSystem < static_cast<int>(m_Systems.size()) &&
+        m_Systems[static_cast<size_t>(m_EditSystem)].get() != m_EditTarget)
+    {
+        target = m_Systems[static_cast<size_t>(m_EditSystem)].get();
+    }
+
+    nlohmann::json result;
+    std::string error;
+    if (target != m_EditTarget)
+    {
+        // Move (issue 14): recreate the display on the target with the
+        // dialog's values, then remove it from the source. Create first: if
+        // the add fails the source display is untouched; if the remove
+        // fails afterwards, the error says exactly which side now holds the
+        // display.
+        if (!target->send("display.add",
+                          {{"x", de.x}, {"y", de.y}, {"width", de.width}, {"height", de.height},
+                           {"name", de.name}},
+                          result, error))
+        {
+            m_EditError = "display.add on '" + target->name() + "' failed: " + error;
+            return false;
+        }
+        const Id newId = static_cast<Id>(result.value("id", 0u));
+        // display.add does not carry brightness/enabled: apply the dialog's
+        // values to the recreated display.
+        if (!target->send("display.set",
+                          {{"display", newId}, {"brightness", de.brightness},
+                           {"enabled", de.enabled}},
+                          result, error))
+        {
+            m_EditError = "display.set on '" + target->name() + "' after the move failed: " + error;
+            return false;
+        }
+        nlohmann::json removed;
+        std::string removeError;
+        if (!m_EditTarget->send("display.remove", {{"display", m_EditDisplayId}}, removed, removeError))
+        {
+            m_EditError = "display added on '" + target->name() + "' but the remove on '" +
+                          m_EditTarget->name() + "' failed: " + removeError;
+            return false;
+        }
+        log("moved display '" + de.name + "' (" + std::to_string(m_EditDisplayId) + ") from '" +
+            m_EditTarget->name() + "' to " + target->name() + " (new id " + std::to_string(newId) +
+            ")");
+        // Track the display on its new system (the dialog closes now; this
+        // also leaves the edits map ready if the dialog reopens).
+        m_DisplayEdits[newId] = de;
+        m_EditDisplayId = newId;
+        m_EditTarget = target;
+        m_EditModal = false;
+        return true;
+    }
+
+    if (!target->send("display.set",
+                      {{"display", m_EditDisplayId}, {"x", de.x}, {"y", de.y},
+                       {"width", de.width}, {"height", de.height},
+                       {"brightness", de.brightness}, {"enabled", de.enabled}},
+                      result, error))
+    {
+        m_EditError = error;
+        return false;
+    }
+    log("display " + std::to_string(m_EditDisplayId) + " settings applied on " + target->name());
+    m_EditModal = false;
+    return true;
 }
 
 void ControlGuiApp::openMediaDetails(const json& media, SystemConnection* target)
@@ -2618,111 +2686,6 @@ void ControlGuiApp::renderModals()
             ImGui::EndPopup();
         }
     }
-    if (m_MoveModal)
-    {
-        modalStartSize(500.0f);
-        if (ImGui::BeginPopupModal("Move display to system...", &m_MoveModal))
-        {
-            const std::string sourceName =
-                (m_MoveSourceSystem >= 0 && m_MoveSourceSystem < static_cast<int>(m_Systems.size()))
-                    ? m_Systems[static_cast<size_t>(m_MoveSourceSystem)]->name()
-                    : "?";
-            ImGui::TextWrapped(
-                "Moves \"%s\" (display %u) from \"%s\" to another system: the display is "
-                "recreated on the target system with the same geometry (display.add) and "
-                "then removed from the source (display.remove).",
-                m_MoveName.c_str(), m_MoveDisplayId, sourceName.c_str());
-
-            // Candidates: every system except the source (display ids repeat
-            // across systems, so the target is an index, not an id).
-            std::vector<int> candidates;
-            for (int i = 0; i < static_cast<int>(m_Systems.size()); ++i)
-            {
-                if (i != m_MoveSourceSystem)
-                {
-                    candidates.push_back(i);
-                }
-            }
-            int comboIdx = -1;
-            for (size_t i = 0; i < candidates.size(); ++i)
-            {
-                if (m_MoveTarget == candidates[i])
-                {
-                    comboIdx = static_cast<int>(i);
-                }
-            }
-            const char* preview =
-                comboIdx >= 0 ? m_Systems[candidates[static_cast<size_t>(comboIdx)]]->name().c_str()
-                              : "(select a system)";
-            if (ImGui::BeginCombo("Target system##movetarget", preview))
-            {
-                for (size_t i = 0; i < candidates.size(); ++i)
-                {
-                    SystemConnection& sys = *m_Systems[candidates[i]];
-                    const std::string label =
-                        sys.name() + (sys.pollConnected() ? std::string() : "  (offline)");
-                    if (ImGui::Selectable(label.c_str(), comboIdx == static_cast<int>(i)))
-                    {
-                        comboIdx = static_cast<int>(i);
-                    }
-                }
-                ImGui::EndCombo();
-            }
-            if (comboIdx >= 0)
-            {
-                m_MoveTarget = candidates[static_cast<size_t>(comboIdx)];
-            }
-
-            const bool canMove =
-                comboIdx >= 0 && m_MoveSourceSystem >= 0 && m_MoveSourceSystem < static_cast<int>(m_Systems.size());
-            if (!canMove)
-            {
-                ImGui::BeginDisabled();
-            }
-            if (ImGui::Button("Move##move") && canMove)
-            {
-                m_MoveError.clear();
-                SystemConnection& src = *m_Systems[static_cast<size_t>(m_MoveSourceSystem)];
-                SystemConnection& dst = *m_Systems[static_cast<size_t>(m_MoveTarget)];
-                nlohmann::json result;
-                std::string error;
-                // Create first: if the add fails the source display is
-                // untouched; if the remove fails afterwards, the error says
-                // exactly which side now holds the display.
-                if (dst.send("display.add",
-                             {{"x", m_MoveX}, {"y", m_MoveY}, {"width", m_MoveWidth},
-                              {"height", m_MoveHeight}, {"name", m_MoveName}},
-                             result, error))
-                {
-                    nlohmann::json removed;
-                    std::string removeError;
-                    if (src.send("display.remove", {{"display", m_MoveDisplayId}}, removed, removeError))
-                    {
-                        log("moved display " + m_MoveName + " (" + sourceName + ") to " + dst.name());
-                        m_MoveModal = false;
-                    }
-                    else
-                    {
-                        m_MoveError = "added on '" + dst.name() + "' but the remove on '" + src.name() +
-                                      "' failed: " + removeError;
-                    }
-                }
-                else
-                {
-                    m_MoveError = "display.add on '" + dst.name() + "' failed: " + error;
-                }
-            }
-            if (!canMove)
-            {
-                ImGui::EndDisabled();
-            }
-            if (!m_MoveError.empty())
-            {
-                ImGui::TextColored(kBadColor, "%s", m_MoveError.c_str());
-            }
-            ImGui::EndPopup();
-        }
-    }
     if (m_EditModal)
     {
         modalStartSize(420.0f);
@@ -2733,6 +2696,42 @@ void ControlGuiApp::renderModals()
                 DisplayEdit& de = m_DisplayEdits[m_EditDisplayId];
                 ImGui::Text("Display %u on %s", m_EditDisplayId, m_EditTarget->name().c_str());
                 ImGui::Spacing();
+                // The system this display is linked to (issue 14): picking
+                // a different system and pressing Apply moves the display
+                // there (recreated with these settings, then removed from
+                // the old system) instead of just applying them.
+                int sysIdx = m_EditSystem;
+                if (sysIdx < 0 || sysIdx >= static_cast<int>(m_Systems.size()))
+                {
+                    sysIdx = -1;
+                    for (int i = 0; i < static_cast<int>(m_Systems.size()); ++i)
+                    {
+                        if (m_Systems[static_cast<size_t>(i)].get() == m_EditTarget)
+                        {
+                            sysIdx = i;
+                            break;
+                        }
+                    }
+                }
+                const char* sysPreview =
+                    sysIdx >= 0 ? m_Systems[static_cast<size_t>(sysIdx)]->name().c_str()
+                                : m_EditTarget->name().c_str();
+                if (ImGui::BeginCombo("System##editsys", sysPreview))
+                {
+                    for (int i = 0; i < static_cast<int>(m_Systems.size()); ++i)
+                    {
+                        SystemConnection& sys = *m_Systems[static_cast<size_t>(i)];
+                        const std::string label =
+                            sys.name() + (sys.pollConnected() ? std::string() : "  (offline)");
+                        if (ImGui::Selectable(label.c_str(), i == sysIdx))
+                        {
+                            sysIdx = i;
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+                m_EditSystem = sysIdx;
+                ImGui::Spacing();
                 ImGui::InputInt("X (px)##editx", &de.x);
                 ImGui::InputInt("Y (px)##edity", &de.y);
                 ImGui::InputInt("Width (px)##editw", &de.width);
@@ -2741,27 +2740,7 @@ void ControlGuiApp::renderModals()
                 ImGui::Checkbox("Enabled##editen", &de.enabled);
                 if (ImGui::Button("Apply##editapply"))
                 {
-                    m_EditError.clear();
-                    nlohmann::json result;
-                    std::string error;
-                    if (m_EditTarget->send("display.set",
-                                           {{"display", m_EditDisplayId},
-                                            {"x", de.x},
-                                            {"y", de.y},
-                                            {"width", de.width},
-                                            {"height", de.height},
-                                            {"brightness", de.brightness},
-                                            {"enabled", de.enabled}},
-                                           result, error))
-                    {
-                        log("display " + std::to_string(m_EditDisplayId) + " settings applied on " +
-                            m_EditTarget->name());
-                        m_EditModal = false;
-                    }
-                    else
-                    {
-                        m_EditError = error;
-                    }
+                    applyDisplayEdit();
                 }
                 if (!m_EditError.empty())
                 {
@@ -3064,13 +3043,6 @@ void ControlGuiApp::openModal(const std::string& which)
     {
         m_PullModal = true;
     }
-    else if (which == "move")
-    {
-        // The real buttons fill the source/target state from a table row;
-        // the test hook only needs the dialog to open and close.
-        m_MoveModal = true;
-        m_MoveError.clear();
-    }
     else if (which == "edit" || which == "warp")
     {
         // The real buttons fill the state from a table row; the test hook
@@ -3185,14 +3157,15 @@ bool ControlGuiApp::testCloseModal(const std::string& which)
         m_PullModal = false;
         return true;
     }
-    if (which == "move")
-    {
-        m_MoveModal = false;
-        return true;
-    }
     if (which == "edit")
     {
         m_EditModal = false;
+        // Tear down the dialog state the same way the in-frame close paths
+        // do (renderModals): a test close between frames skips that reset,
+        // and a stale target must never survive into a later open.
+        m_EditTarget = nullptr;
+        m_EditDisplayId = kInvalidId;
+        m_EditSystem = -1;
         return true;
     }
     if (which == "warp")
@@ -3270,6 +3243,28 @@ bool ControlGuiApp::testBroadcastLayerClear(Id layerId)
 {
     std::string error;
     return sendToAllConnected("layer.clear", {{"layer", layerId}}, error);
+}
+
+void ControlGuiApp::testSelectDisplayEditSystem(int index)
+{
+    m_EditSystem = index;
+}
+
+bool ControlGuiApp::testApplyDisplayEdit()
+{
+    // The exact action of the dialog's Apply button (no ImGui involved).
+    return applyDisplayEdit();
+}
+
+bool ControlGuiApp::testActiveHasDisplay() const
+{
+    const SystemConnection* active = activeConnection();
+    if (active == nullptr)
+    {
+        return false;
+    }
+    const auto snap = active->snapshot();
+    return snap.haveStatus && snap.status.contains("displays") && !snap.status["displays"].empty();
 }
 
 // --- self test ---------------------------------------------------------------------------

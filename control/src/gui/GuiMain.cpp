@@ -347,7 +347,7 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
     std::string modalReport;
     bool modalOk = true;
     for (const char* which :
-         {"about", "open", "saveas", "media", "pull", "move", "edit", "warp",
+         {"about", "open", "saveas", "media", "pull", "edit", "warp",
           "mediadetails"})
     {
         if (!app.testOpenModal(which))
@@ -534,6 +534,129 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
                       "layer.clear broadcast released the override (x=" + std::to_string(xClear) +
                       ")\n";
         liveOk = liveOk && clearArrived;
+    }
+
+    // 4c) Display system dropdown (issue 14): the Display settings dialog
+    //     relinks a display to another system - Apply with a different
+    //     selection moves it (display.add + display.set on the target,
+    //     display.remove on the source). Open the dialog on the engine's
+    //     first display (it opened on the active system, self-test-2 after
+    //     4b), point the System dropdown at the other system, Apply, and
+    //     verify the engine holds the display under a fresh id (display
+    //     ids never repeat) with the same name, geometry and brightness.
+    if (haveLiveSystem && !autoPushName.empty() && liveOk)
+    {
+        SystemConnection listConn("self-test-displays", liveHost, livePort);
+        nlohmann::json before;
+        std::string listError;
+        const bool haveDisplay =
+            listConn.send("display.list", nlohmann::json::object(), before, listError) &&
+            before.contains("displays") && !before["displays"].empty();
+
+        const int beforeCount = haveDisplay ? static_cast<int>(before["displays"].size()) : 0;
+        const std::uint64_t oldId =
+            haveDisplay ? before["displays"][0].value("id", 0u) : 0u;
+        const std::string oldName =
+            haveDisplay ? before["displays"][0].value("name", "") : "";
+        const int oldX = haveDisplay ? before["displays"][0].value("x", 0) : 0;
+        const int oldY = haveDisplay ? before["displays"][0].value("y", 0) : 0;
+        const int oldW = haveDisplay ? before["displays"][0].value("width", 0) : 0;
+        const int oldH = haveDisplay ? before["displays"][0].value("height", 0) : 0;
+        const double oldBrightness =
+            haveDisplay ? before["displays"][0].value("brightness", -1.0) : -1.0;
+
+        bool opened = false;
+        // The dialog opens from the active system's snapshot (the UI's
+        // Edit... button only exists on a display row, which only exists
+        // when the snapshot reports displays). The active system's first
+        // status poll lands ~500 ms after its connect (step 4b), which can
+        // still be in flight here - wait for it before opening.
+        bool snapHasDisplay = false;
+        const auto snapDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (!snapHasDisplay && std::chrono::steady_clock::now() < snapDeadline)
+        {
+            snapHasDisplay = app.testActiveHasDisplay();
+            if (!snapHasDisplay)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(150));
+            }
+        }
+        liveReport += std::string(snapHasDisplay ? "PASS " : "FAIL ") +
+                      "active system snapshot reports the displays\n";
+        liveOk = liveOk && snapHasDisplay;
+        if (haveDisplay && snapHasDisplay)
+        {
+            app.testOpenModal("edit"); // deferred: the next frame opens it
+            for (int i = 0; i < 3 && !opened; ++i)
+            {
+                glfwPollEvents();
+                if (runtime.renderFrame())
+                {
+                    opened = app.testModalOpen("edit");
+                }
+            }
+        }
+
+        bool applied = false;
+        if (opened)
+        {
+            // The dialog opened on the active system (index 1, self-test-2);
+            // select the other one so Apply is a move, then press the
+            // dialog's Apply button (the exact action the UI runs).
+            app.testSelectDisplayEditSystem(0);
+            applied = app.testApplyDisplayEdit();
+        }
+
+        bool movedOk = false;
+        nlohmann::json after;
+        if (applied)
+        {
+            std::string afterError;
+            if (listConn.send("display.list", nlohmann::json::object(), after, afterError) &&
+                after.contains("displays") &&
+                after["displays"].size() == static_cast<size_t>(beforeCount))
+            {
+                bool oldGone = true;
+                bool recreated = false;
+                for (const auto& d : after["displays"])
+                {
+                    if (d.value("id", 0u) == oldId)
+                    {
+                        oldGone = false;
+                    }
+                    if (d.value("id", 0u) != oldId && d.value("name", "") == oldName &&
+                        d.value("x", -1) == oldX && d.value("y", -1) == oldY &&
+                        d.value("width", -1) == oldW && d.value("height", -1) == oldH &&
+                        d.value("brightness", -1.0) == oldBrightness)
+                    {
+                        recreated = true;
+                    }
+                }
+                movedOk = oldGone && recreated;
+            }
+        }
+        liveReport += std::string(movedOk ? "PASS " : "FAIL ") +
+                      "display settings System dropdown moved the display (old id " +
+                      std::to_string(oldId) + " gone, name/geometry/brightness kept)" +
+                      (movedOk
+                           ? std::string()
+                           : "; " + app.testDescribeDisplayEdit() + " opened=" +
+                                 std::string(opened ? "y" : "n") +
+                                 " applied=" + std::string(applied ? "y" : "n") +
+                                 " editError='" + app.testGetDisplayEditError() + "' before=" +
+                                 before.dump() + " after=" + after.dump()) +
+                      "\n";
+        liveOk = liveOk && movedOk;
+
+        // Close the dialog if the move path left it open (failure paths
+        // keep it open with the error line); a few frames let the popup
+        // tear down, as the modal loop above does.
+        app.testCloseModal("edit");
+        for (int i = 0; i < 3; ++i)
+        {
+            glfwPollEvents();
+            runtime.renderFrame();
+        }
     }
 
     runtime.shutdown();

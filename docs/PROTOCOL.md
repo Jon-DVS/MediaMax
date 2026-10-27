@@ -332,6 +332,13 @@ Display object shape (used by `display.list`, `display.set`, `status`):
 Geometry is in the shared output space (pixels, origin top-left). The union
 of enabled display rectangles defines the scene size.
 
+The control GUI's Display settings dialog (Edit... in the Displays pane)
+includes a **System** dropdown: the system a display is linked to. Applying
+settings to the current system is a plain `display.set`; applying them to a
+different system **moves** the display there — `display.add` + `display.set`
+(brightness/enabled, which `display.add` does not carry) on the target, then
+`display.remove` on the source.
+
 #### `display.add`
 
 Add a display to the system. The playback engine creates a window for it
