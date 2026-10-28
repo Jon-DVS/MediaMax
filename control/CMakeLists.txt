@@ -41,10 +41,8 @@ target_include_directories(mediamax_control
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
-# Project version, shown in Help > About.
-target_compile_definitions(mediamax_control
-    PRIVATE
-        MEDIAMAX_VERSION="${PROJECT_VERSION}")
+# The project version (MEDIAMAX_VERSION) comes in PUBLIC from
+# mediamax::mediamax; the GUI shows it in Help > About.
 
 if(WIN32)
     # MessageBoxW (crash diagnostics), DwmSetWindowAttribute (dark title

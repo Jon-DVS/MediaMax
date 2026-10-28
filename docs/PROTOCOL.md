@@ -68,6 +68,7 @@ Full snapshot of the system.
 | Field | Meaning |
 | --- | --- |
 | `system` | system name |
+| `version` | engine build version (e.g. `"0.1.4"`; the project version, bumped before every commit) |
 | `hostname` | computer name of the machine running the engine (empty when unknown) |
 | `ip` | the machine's primary IPv4 address (`"127.0.0.1"` when it cannot be determined) |
 | `state` | `stopped` / `playing` / `paused` |

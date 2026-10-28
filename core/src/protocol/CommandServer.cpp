@@ -286,6 +286,7 @@ nlohmann::json CommandServer::handleStatus() const
 
     return {
         {"system", m_SystemName},
+        {"version", MEDIAMAX_VERSION},
         {"hostname", m_HostName},
         {"ip", m_Ip},
         {"state", PlaybackEngine::stateToString(m_Engine.state())},

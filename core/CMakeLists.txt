@@ -23,6 +23,12 @@ target_link_libraries(mediamax
         glm
         nlohmann_json::nlohmann_json)
 
+# The project version (root CMakeLists, bumped before every commit - see
+# AGENTS.md) is available to all of core, the apps and the tests.
+target_compile_definitions(mediamax
+    PUBLIC
+        MEDIAMAX_VERSION="${PROJECT_VERSION}")
+
 if(MEDIAMAX_HAS_FFMPEG)
     target_compile_definitions(mediamax PUBLIC MEDIAMAX_HAS_FFMPEG=1)
     target_link_libraries(mediamax PUBLIC ${MEDIAMAX_FFMPEG_LIBS})

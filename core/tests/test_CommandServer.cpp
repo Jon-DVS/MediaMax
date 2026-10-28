@@ -119,6 +119,7 @@ TEST_CASE("status reflects the full system state")
     REQUIRE(resp.ok);
 
     CHECK(resp.result.at("system").get<std::string>() == "test-system");
+    CHECK(resp.result.at("version").get<std::string>() == std::string(MEDIAMAX_VERSION));
     CHECK(resp.result.at("state").get<std::string>() == "stopped");
     // The machine identity is reported too; the core fixture has no
     // platform access, so the app-set values default to empty.

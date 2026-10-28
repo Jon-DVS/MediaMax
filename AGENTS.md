@@ -102,6 +102,18 @@ MSVC workflow notes:
   do not "fix" warnings inside `build/_deps` or `third_party/` (the
   vendored code compiles at the default warning level on purpose).
 
+## Versioning
+
+The project version lives in the root `CMakeLists.txt`
+(`project(MediaMax VERSION <major>.<minor>.<build>)`). **Bump the build
+number (the third component) before every commit**, so each commit ships a
+unique, traceable version. The major and minor components change only when
+the maintainer calls a new release.
+
+The version is exposed to code as the `MEDIAMAX_VERSION` compile define
+(core, `PUBLIC`, so the apps and the tests see it too), is reported in the
+`status` protocol result, and is shown in the control GUI (Help > About).
+
 ## Coding conventions
 
 - C++20, no C++23. `#pragma once` on headers.
@@ -283,7 +295,9 @@ A change is done when:
    `--gui-self-test 90` for control GUI changes).
 4. Docs are updated when behavior/protocol/format changed.
 5. The diff was self-reviewed against the conventions above.
-6. `git add` (explicit paths), `git commit` (conventional message),
+6. The build version (third component of `project(MediaMax VERSION ...)`,
+   see "Versioning") was bumped before the commit.
+7. `git add` (explicit paths), `git commit` (conventional message),
    `git push origin main`.
 
 ## Skills (task playbooks)
