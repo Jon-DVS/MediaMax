@@ -427,6 +427,7 @@ int runSelfTest(const AppArgs& args)
         nvrhi::ICommandList* cmd = cmdList.Get();
         device->executeCommandLists(&cmd, 1);
         device->waitForIdle();
+        device->runGarbageCollection();
 
         // Sample one frame per second: read the scene back and verify it is
         // not black.

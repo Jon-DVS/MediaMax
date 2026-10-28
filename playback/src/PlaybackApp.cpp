@@ -766,6 +766,14 @@ void PlaybackApp::renderFrame(const FrameSnapshot& snap)
         }
     }
 
+    // Release the GPU resources (command lists, upload chunks) of the frames
+    // that finished in step 1. NVRHI never recycles these on its own - the app
+    // must poll runGarbageCollection() (see nvrhi.h IDevice docs). Without it
+    // every frame's upload chunk - sized to that frame's largest CPU->GPU
+    // upload, i.e. the whole decoded video frame - is never freed (a leak of
+    // ~frame bytes per rendered frame).
+    device->runGarbageCollection();
+
     // The previous frame's GPU work is done now (step 1): its timer result
     // is readable, and the query can be re-armed for the current frame
     // (single-flight model, see the m_FrameQuery comment in PlaybackApp.h).

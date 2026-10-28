@@ -177,6 +177,15 @@ The version is exposed to code as the `MEDIAMAX_VERSION` compile define
   FetchContent and sets `NVRHI_FETCH_VULKAN_HEADERS OFF` so NVRHI uses the
   SDK `Vulkan::Headers` target. Two different vulkan.hpp versions in one link
   give cryptic SIGSEGVs/dispatcher mismatches.
+- **NVRHI command-list lifetime is app-driven: call
+  `device->runGarbageCollection()` once per frame.** A submitted command
+  list stays alive (and with it its upload chunks, sized to that frame's
+  largest CPU→GPU upload — for video, the *whole decoded frame*) until the
+  app retires it through `IDevice::runGarbageCollection()` (nvrhi.h: "Execute
+  runGarbageCollection frequently to poll the GPU and release resources when
+  possible"). Skipping it leaks ~frame bytes per rendered frame (measured: a
+  4K loop OOM-kills the engine in ~2 min; a 540p loop grows ~65 MB/s).
+  `render/tests/test_UploadMemory.cpp` asserts the growth stays bounded.
 - **NVRHI places sampler descriptors at binding `128 + slot` by default**
   (the DXC register-space convention). Our GLSL declares samplers explicitly
   (`layout(set=0, binding=2)`), so every `BindingLayoutDesc` must call

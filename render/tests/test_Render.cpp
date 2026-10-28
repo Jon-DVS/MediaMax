@@ -105,6 +105,7 @@ void renderOneFrame(SceneRenderer& renderer, const SceneRenderer::FrameInput& fr
     nvrhi::ICommandList* cmdPtr = cmd.Get();
     dev->executeCommandLists(&cmdPtr, 1);
     dev->waitForIdle();
+    dev->runGarbageCollection();
 }
 
 struct Pixel
@@ -135,6 +136,7 @@ bool readBackTexture(nvrhi::DeviceHandle device, nvrhi::TextureHandle tex,
     nvrhi::ICommandList* cmdPtr = cmd.Get();
     device->executeCommandLists(&cmdPtr, 1);
     device->waitForIdle();
+    device->runGarbageCollection();
 
     size_t rowPitch = 0;
     const auto* src = static_cast<const unsigned char*>(

@@ -227,6 +227,7 @@ bool SceneRenderer::create(const Desc& desc, SceneRenderer& out, std::string& er
         nvrhi::ICommandList* cmdPtr = cmd.Get();
         device->executeCommandLists(&cmdPtr, 1);
         device->waitForIdle();
+        device->runGarbageCollection();
     }
 
     // --- Scene targets --------------------------------------------------------------------------------
@@ -772,6 +773,7 @@ bool SceneRenderer::readBackScene(std::vector<std::uint8_t>& outRgba) const
     nvrhi::ICommandList* cmdPtr = cmd.Get();
     m_Device->executeCommandLists(&cmdPtr, 1);
     m_Device->waitForIdle();
+    m_Device->runGarbageCollection();
 
     size_t rowPitch = 0;
     const auto* src = static_cast<const unsigned char*>(m_Device->mapStagingTexture(
