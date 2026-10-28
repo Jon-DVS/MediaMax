@@ -73,7 +73,11 @@ set(NVRHI_FETCH_VULKAN_HEADERS OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(nvrhi
     GIT_REPOSITORY https://github.com/NVIDIA-RTX/NVRHI.git
     GIT_TAG 6b96fb03e07539f08327aea76c56d55f1de9d906
-    GIT_SHALLOW TRUE)
+    # Pinned to a raw commit (the NVRHI repo publishes no tags) and GitHub
+    # will not shallow-fetch an arbitrary SHA: GIT_SHALLOW TRUE makes a
+    # fresh build tree fail with "Failed to checkout tag" during the
+    # populate step. Fetch full history so the commit can be checked out.
+    GIT_SHALLOW FALSE)
 FetchContent_MakeAvailable(nvrhi)
 
 # ---------------------------------------------------------------------------
