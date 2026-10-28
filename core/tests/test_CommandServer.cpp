@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <optional>
@@ -152,6 +153,20 @@ TEST_CASE("status reports the machine identity set by the app")
     REQUIRE(resp.ok);
     CHECK(resp.result.at("hostname").get<std::string>() == "wall-pc-01");
     CHECK(resp.result.at("ip").get<std::string>() == "10.0.0.42");
+}
+
+TEST_CASE("status reports the dropped video frame count set by the app")
+{
+    Fixture f;
+    // Default (the playback app sets this every frame; 0 until then).
+    const Response def = f.run("status");
+    REQUIRE(def.ok);
+    CHECK(def.result.at("droppedVideoFrames").get<std::uint64_t>() == 0);
+
+    f.server.setDroppedVideoFrames(1234);
+    const Response resp = f.run("status");
+    REQUIRE(resp.ok);
+    CHECK(resp.result.at("droppedVideoFrames").get<std::uint64_t>() == 1234);
 }
 
 TEST_CASE("unknown method fails with a descriptive error")

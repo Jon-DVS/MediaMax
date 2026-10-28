@@ -310,15 +310,15 @@ void SceneRenderer::ensureMediaTexture(Id layerId, std::uint32_t width, std::uin
     m_MediaTextures[layerId] = PooledTexture{m_Device->createTexture(td), width, height};
 }
 
-void SceneRenderer::updateMediaTexture(Id layerId, const std::vector<std::uint8_t>& rgbaData)
+void SceneRenderer::updateMediaTexture(Id layerId, std::vector<std::uint8_t> rgbaData)
 {
     std::lock_guard lock(m_UploadMutex);
     if (!m_MediaTextures.count(layerId))
     {
         return;
     }
-    m_PendingUploads.push_back(PendingUpload{layerId, PendingUpload::Kind::Media,
-                                             std::make_shared<const std::vector<std::uint8_t>>(rgbaData)});
+    m_PendingUploads.push_back(
+        PendingUpload{layerId, PendingUpload::Kind::Media, std::move(rgbaData)});
 }
 
 void SceneRenderer::removeMediaTexture(Id layerId)
@@ -369,7 +369,7 @@ void SceneRenderer::updateWarpTexture(Id displayId, const std::vector<unsigned c
     }
     m_PendingUploads.push_back(PendingUpload{
         displayId, PendingUpload::Kind::Warp,
-        std::make_shared<const std::vector<std::uint8_t>>(rgData.begin(), rgData.end())});
+        std::vector<std::uint8_t>(rgData.begin(), rgData.end())});
 }
 
 void SceneRenderer::removeWarpTexture(Id displayId)
@@ -419,9 +419,7 @@ void SceneRenderer::updateOverlayTexture(Id displayId, const std::vector<std::ui
     {
         return;
     }
-    m_PendingUploads.push_back(PendingUpload{
-        displayId, PendingUpload::Kind::Overlay,
-        std::make_shared<const std::vector<std::uint8_t>>(rgbaData)});
+    m_PendingUploads.push_back(PendingUpload{displayId, PendingUpload::Kind::Overlay, rgbaData});
 }
 
 void SceneRenderer::removeOverlayTexture(Id displayId)
@@ -512,11 +510,11 @@ void SceneRenderer::recordFrame(nvrhi::ICommandList* cmd, const FrameInput& fram
             const size_t expected = up.kind == PendingUpload::Kind::Warp
                 ? static_cast<size_t>(it->second.width) * it->second.height * 2
                 : static_cast<size_t>(it->second.width) * it->second.height * 4; // media + overlay: RGBA8
-            if (up.data->size() != expected)
+            if (up.data.size() != expected)
             {
                 continue; // size mismatch (texture was re-created); drop
             }
-            cmd->writeTexture(it->second.texture.Get(), 0, 0, up.data->data(), 0, 0);
+            cmd->writeTexture(it->second.texture.Get(), 0, 0, up.data.data(), 0, 0);
         }
     }
 

@@ -11,8 +11,12 @@
 //   - nextAudioFrame(out, timeout) ditto for audio
 //
 // A source instance is single-consumer: exactly one thread calls its
-// methods at a time. The playback engine guarantees this (one media pump).
+// methods at a time. The playback engine guarantees this: the media pump's
+// decode workers each open and consume their own instance per active layer
+// (see MediaPump); the library's own instance is kept for probing/metadata
+// and is not decoded by anyone.
 
+#include "mediamax/math/Rect.h"
 #include "mediamax/media/MediaTypes.h"
 
 namespace mediamax
@@ -36,6 +40,15 @@ public:
 
     // Advances and returns the next audio block.
     virtual bool nextAudioFrame(AudioFrame& out, std::uint32_t timeoutMs) = 0;
+
+    // Hint: the video is displayed at about this size in px (an invalid
+    // size = no hint). Sources that scale at decode time (FFmpegSource)
+    // decode at min(native, hint) so the uploaded texture matches what the
+    // display shows - decoding 4K for a 1080p layer wastes CPU and upload
+    // bandwidth. Sources without a scalable path (or without a video
+    // stream) ignore it. Idempotent: a source no-ops while the hint
+    // matches its current output.
+    virtual void setVideoOutputSizeHint(Size2i) {}
 
     // Sources without a video stream always return false.
     virtual bool hasVideo() const { return false; }

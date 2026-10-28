@@ -4,15 +4,18 @@
 // library, displays, control protocol) to the render module (Vulkan context,
 // swapchains, scene renderer) and to the OS (GLFW windows, miniaudio device).
 //
-// Thread model (one application, five threads):
+// Thread model (one application, a few threads):
 //
 //   render thread (main)      owns the frame cadence. Each frame:
 //                              - under m_StateMutex: engine.tick(), frameState(),
 //                                display snapshot, pump target publication
 //                              - outside the lock: deliverVideo() (texture
 //                                uploads), record + present (see Swapchain.h)
-//   media pump thread         consumes the IMediaSource decoders toward the
-//                              published targets (MediaPump)
+//   media pump coordinator    the MediaPump's original pump thread: spawns and
+//                              retires the decode workers (MediaPump)
+//   decode worker threads     one per active media layer: each owns its layer's
+//                              IMediaSource instance (single-consumer) and
+//                              decodes video/audio toward the published targets
 //   audio render thread       miniaudio callback: snapshotTargets() + mixAudio()
 //   control client threads    ControlServer runs each command under its own
 //                              handler mutex; handleCommand() additionally
@@ -23,6 +26,8 @@
 // A media load (control command) can therefore stall the frame loop for the
 // duration of the FFmpeg probe/decode-open. That is deliberate: correctness
 // (one writer-visible-at-a-time view) over latency for an admin action.
+// (A decode worker opening its layer's source happens on the worker's own
+// thread, so a layer appearing in the show never stalls the frame loop.)
 
 #include <array>
 #include <atomic>
@@ -188,6 +193,10 @@ private:
     // Exponential moving average of the measured frame period (renderFrame
     // cadence); 0 until the second frame.
     double m_FrameFps = 0.0;
+    // Total video frames dropped so far (high water, all layers; from the
+    // media pump's FrameDropCounters). Shown in the status overlay and
+    // reported in the status protocol result.
+    std::uint64_t m_DroppedVideoFrames = 0;
     std::chrono::steady_clock::time_point m_LastFrameTime{};
     bool m_HaveLastFrameTime = false;
     // This system's IPv4 (gethostname/getaddrinfo, computed once in run()).

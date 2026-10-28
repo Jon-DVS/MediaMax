@@ -71,6 +71,7 @@ Full snapshot of the system.
 | `version` | engine build version (e.g. `"0.1.4"`; the project version, bumped before every commit) |
 | `hostname` | computer name of the machine running the engine (empty when unknown) |
 | `ip` | the machine's primary IPv4 address (`"127.0.0.1"` when it cannot be determined) |
+| `droppedVideoFrames` | video frames that were due for display but never shown, total since engine start (all layers, high-water mark). `0` when playback keeps up. Reported by the playback app from its media pump; headless engine instances always report `0` |
 | `state` | `stopped` / `playing` / `paused` |
 | `time` | current show time (s) |
 | `timecode` | `HH:MM:SS:FF` at the show frame rate |

@@ -28,6 +28,14 @@ constexpr double kMaxFrameDeltaSeconds = 0.5;
 constexpr std::uint32_t kFenceTimeoutMs = 2000;
 constexpr std::uint32_t kAcquireTimeoutMs = 100;
 
+// Frame-loop event wait (s). Deliberately small: the loop is paced by the
+// single-flight fence wait and the swapchain present (vsync), NOT by this
+// wait. A 16 ms floor here used to cap the loop at ~30 fps (16 ms wait +
+// ~18 ms of 4K upload/composite work per frame) and visibly stuttered the
+// video; a short wait keeps window-event latency low while the GPU does the
+// pacing.
+constexpr double kFrameLoopWaitSeconds = 0.002;
+
 // Dense warp texture size (display pass).
 constexpr std::uint32_t kWarpTextureSize = 512;
 
@@ -162,7 +170,7 @@ int PlaybackApp::run()
     auto lastTime = std::chrono::steady_clock::now();
     while (!m_ShutdownRequested.load())
     {
-        glfwWaitEventsTimeout(0.016);
+        glfwWaitEventsTimeout(kFrameLoopWaitSeconds);
         pollWindowEvents();
         if (m_ShutdownRequested.load())
         {
@@ -652,12 +660,21 @@ PlaybackApp::FrameSnapshot PlaybackApp::takeFrameSnapshot(const Time& dt)
             {
                 const MediaMetadata& md = (*asset)->metadata;
                 t.mediaSize = Size2i{static_cast<std::int32_t>(md.width), static_cast<std::int32_t>(md.height)};
+                // The layer's on-screen size in px: its transform scale (a
+                // multiplier, see Transform2D) applied to the media size;
+                // abs() covers mirrored (negative) scales. The decode
+                // worker uses it to scale its decode output down to what
+                // the display shows (min(native, on-screen)).
+                t.onScreenSize =
+                    Size2i{static_cast<std::int32_t>(std::llround(std::abs(lf.scaleX) * static_cast<float>(md.width))),
+                           static_cast<std::int32_t>(std::llround(std::abs(lf.scaleY) * static_cast<float>(md.height)))};
                 t.hasAudio = md.hasAudio;
                 t.audioChannels = md.audioChannels;
                 t.audioSampleRate = md.audioSampleRate;
                 t.mediaDuration = md.duration;
             }
-            // The loop flag lives on the Layer, not the resolved frame.
+            // The loop flag and bounds live on the Layer, not the resolved
+            // frame.
             if (snap.fs.activeSceneId != kInvalidId)
             {
                 if (const auto* scene = m_Engine.show().findScene(snap.fs.activeSceneId))
@@ -665,6 +682,18 @@ PlaybackApp::FrameSnapshot PlaybackApp::takeFrameSnapshot(const Time& dt)
                     if (const auto* layer = scene->findLayer(lf.layerId))
                     {
                         t.loop = layer->loop;
+                        if (t.loop && t.mediaDuration > Time::zero())
+                        {
+                            // The playhead wraps within [inPoint, end):
+                            // end = outPoint if set, else the media duration
+                            // (mirrors PlaybackEngine::mediaTimeFor).
+                            t.loopStart = layer->inPoint;
+                            t.loopEnd = t.mediaDuration;
+                            if (layer->outPoint > Time::zero() && layer->outPoint < t.loopEnd)
+                            {
+                                t.loopEnd = layer->outPoint;
+                            }
+                        }
                     }
                 }
             }
@@ -773,6 +802,15 @@ void PlaybackApp::renderFrame(const FrameSnapshot& snap)
     // upload, i.e. the whole decoded video frame - is never freed (a leak of
     // ~frame bytes per rendered frame).
     device->runGarbageCollection();
+
+    // The dropped-video-frames metric (media pump): the high-water count of
+    // frames that were due but never displayed, across all layers. Published
+    // to the status overlay and the control protocol (status).
+    m_DroppedVideoFrames = m_Pump.droppedVideoFrames();
+    if (m_CommandServer)
+    {
+        m_CommandServer->setDroppedVideoFrames(m_DroppedVideoFrames);
+    }
 
     // The previous frame's GPU work is done now (step 1): its timer result
     // is readable, and the query can be re-armed for the current frame
@@ -919,14 +957,17 @@ void PlaybackApp::updateStatusOverlay(DisplaySurface& ds, const Display& display
         // At least four lines at scale 2 (64 px), at most a square canvas.
         ch = std::min<std::uint32_t>(std::max<std::uint32_t>(ch, 96), kOverlayMaxHeight);
     }
-    // Five lines are 5 * (7 + 1) * scale px tall: 120 px at scale 3, 80 px
+    // Six lines are 6 * (7 + 1) * scale px tall: 144 px at scale 3, 96 px
     // at scale 2 - both fit the canvas minimum (96 px).
-    const int scale = (ch < 100) ? 2 : 3;
+    const int scale = (ch < 144) ? 2 : 3;
 
     char line3[80];
     char line4[80];
+    char line5[80];
     std::snprintf(line3, sizeof(line3), "%.1f fps  %dx%d", m_FrameFps, ds.width, ds.height);
     std::snprintf(line4, sizeof(line4), "frame %.2f ms  gpu %.2f ms", m_CpuFrameMs, m_GpuFrameMs);
+    std::snprintf(line5, sizeof(line5), "vid drop %llu",
+                  static_cast<unsigned long long>(m_DroppedVideoFrames));
 
     std::string text;
     text.reserve(256);
@@ -934,7 +975,8 @@ void PlaybackApp::updateStatusOverlay(DisplaySurface& ds, const Display& display
     text += "Display " + display.name + " (" + std::to_string(display.id) + ")\n";
     text += (display.monitor.empty() ? "off-screen" : display.monitor) + "\n";
     text += std::string(line3) + "\n";
-    text += line4;
+    text += std::string(line4) + "\n";
+    text += line5;
 
     std::vector<std::uint8_t> glyphRgba;
     std::uint32_t gw = 0, gh = 0;

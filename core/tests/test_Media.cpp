@@ -651,6 +651,108 @@ TEST_CASE("FFmpeg: alternating video/audio pulls keep the audio continuous (A/V 
     CHECK(audioSeconds > 1.8);
     CHECK(maxGapSeconds < 0.010);
 }
+
+TEST_CASE("FFmpeg: setVideoOutputSizeHint decodes at min(native, hint)")
+{
+    // The decode worker hints each source with the layer's on-screen size
+    // so a 4K asset displayed at 1080p does not decode (and upload) 4K.
+    // The source must decode at min(native, hint) with even sizes, drop
+    // the old-size frames it has queued, and stay put while the hint is
+    // repeated.
+    const auto ffmpeg = findFfmpegCli();
+    if (ffmpeg.empty())
+    {
+        std::fprintf(stderr,
+                     "[skip] ffmpeg CLI not available; skipping size hint test\n");
+        return;
+    }
+
+    const auto dir = std::filesystem::temp_directory_path() / "mediamax-tests";
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    static std::atomic<std::uint64_t> counter{0};
+    const auto path =
+        dir / ("size-hint-" + std::to_string(counter.fetch_add(1)) + ".mp4");
+
+    // 5 s of 160x90@30 h264 (150 frames) - small enough to decode in
+    // milliseconds, long enough for several size transitions.
+    const std::string cmd = "\"" + ffmpeg.string() + "\" -hide_banner -loglevel error -y "
+        "-f lavfi -i testsrc=duration=5:size=160x90:rate=30 "
+        "-c:v libx264 -preset ultrafast -pix_fmt yuv420p " +
+        "\"" + path.string() + "\"";
+    const int rc = runCommandLine(cmd);
+    if (rc != 0)
+    {
+        std::fprintf(stderr, "[skip] ffmpeg failed to generate the test file (rc=%d)\n", rc);
+        std::filesystem::remove(path);
+        return;
+    }
+
+    std::string error;
+    auto source = ffmpeg::createSource(path.string(), error);
+    REQUIRE(source != nullptr);
+    const MediaMetadata meta = source->metadata();
+    REQUIRE(meta.hasVideo);
+    REQUIRE(meta.width == 160);
+    REQUIRE(meta.height == 90);
+
+    VideoFrame frame;
+    // No hint yet: frames come out at the native size.
+    REQUIRE(source->nextVideoFrame(frame, 5000));
+    CHECK(frame.width == 160);
+    CHECK(frame.height == 90);
+
+    // A sub-native hint (odd on purpose) takes effect from the next frame:
+    // the scaler is recreated at even 80x40 and the queued native frames
+    // are dropped, so no native-size frame may survive the change.
+    source->setVideoOutputSizeHint(Size2i{81, 41});
+    int downscaled = 0;
+    int oldSizeAfterHint = 0;
+    int wrongSize = 0;
+    for (int i = 0; i < 10; ++i)
+    {
+        if (!source->nextVideoFrame(frame, 5000))
+        {
+            break;
+        }
+        if (frame.width == 160 && frame.height == 90)
+        {
+            ++oldSizeAfterHint;
+        }
+        if (frame.width != 80 || frame.height != 40)
+        {
+            ++wrongSize; // the hinted size must be even 80x40
+        }
+        else
+        {
+            ++downscaled;
+        }
+    }
+    CHECK(downscaled == 10);
+    CHECK(oldSizeAfterHint == 0);
+    CHECK(wrongSize == 0);
+
+    // A hint above the native size decodes at native (min(native, hint));
+    // repeating it is a no-op while it matches the current output.
+    source->setVideoOutputSizeHint(Size2i{4096, 4096});
+    source->setVideoOutputSizeHint(Size2i{4096, 4096});
+    int nativeAfterUpHint = 0;
+    for (int i = 0; i < 10; ++i)
+    {
+        if (!source->nextVideoFrame(frame, 5000))
+        {
+            break;
+        }
+        if (frame.width == 160 && frame.height == 90)
+        {
+            ++nativeAfterUpHint;
+        }
+    }
+    CHECK(nativeAfterUpHint == 10);
+
+    source.reset(); // Windows: the format context holds the file handle
+    std::filesystem::remove(path);
+}
 #endif // MEDIAMAX_HAS_FFMPEG
 
 } // TEST_SUITE("Media")

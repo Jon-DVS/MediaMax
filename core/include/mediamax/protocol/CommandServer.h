@@ -8,6 +8,8 @@
 // control surface unit-testable (see core/tests/test_CommandServer.cpp), and
 // lets the control interface validate commands before sending.
 
+#include <atomic>
+#include <cstdint>
 #include <exception>
 #include <filesystem>
 #include <functional>
@@ -59,6 +61,12 @@ public:
     // the engine. The app fills these in (the core has no platform access).
     void setSystemHost(const std::string& hostName) { m_HostName = hostName; }
     void setSystemIp(const std::string& ip) { m_Ip = ip; }
+
+    // Video frames dropped so far (high water, all layers), reported in
+    // "status" as `droppedVideoFrames`. The playback app updates this from
+    // its media pump every frame (the core has no access to the pump).
+    // Atomic: written by the render thread, read by the command threads.
+    void setDroppedVideoFrames(std::uint64_t count) { m_DroppedVideoFrames.store(count); }
 
     // Handles a decoded command. Never throws; all failures become responses
     // with ok=false.
@@ -127,6 +135,7 @@ private:
     mutable std::string m_SystemName; // mutable: system.set mutates it under lock
     std::string m_HostName;           // machine computer name (status "hostname")
     std::string m_Ip;                 // machine primary IPv4 (status "ip")
+    std::atomic<std::uint64_t> m_DroppedVideoFrames{0}; // status "droppedVideoFrames"
     MediaLoadFunction m_LoadMedia;
     DisplayAddedFunction m_DisplayAdded;
     DisplayRemovedFunction m_DisplayRemoved;

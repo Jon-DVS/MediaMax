@@ -34,7 +34,6 @@
 
 #include <cstdint>
 #include <map>
-#include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -72,9 +71,11 @@ public:
     // layers share one media asset).
     void ensureMediaTexture(Id layerId, std::uint32_t width, std::uint32_t height);
 
-    // Queues a new frame for the texture (tightly packed RGBA8). Applied to
-    // the GPU inside the next recordFrame(); no GPU work happens here.
-    void updateMediaTexture(Id layerId, const std::vector<std::uint8_t>& rgbaData);
+    // Queues a new frame for the texture (tightly packed RGBA8). The pixel
+    // buffer is moved into the upload queue (no copy - a 4K frame is 33 MB,
+    // copied once per frame by the caller at most). Applied to the GPU inside
+    // the next recordFrame(); no GPU work happens here.
+    void updateMediaTexture(Id layerId, std::vector<std::uint8_t> rgbaData);
 
     // Removes the texture from the pool. Safe while the GPU is using it:
     // NVRHI keeps the resource alive until all submitted work is done.
@@ -231,8 +232,10 @@ private:
     std::map<Id, PooledTexture> m_OverlayTextures;
 
     // Queued uploads (applied inside recordFrame on the render thread).
-    // The pixel data is shared (multiple queued entries for the same frame
-    // size can alias one allocation) and const: the GPU upload only reads it.
+    // The pixel data is moved into the entry: each queued upload is one
+    // texture's worth of pixels and at most one upload is queued per
+    // texture per frame, so the shared-aliasing indirection was needless
+    // (and cost a small heap allocation per upload).
     struct PendingUpload
     {
         enum class Kind : std::uint8_t
@@ -243,7 +246,7 @@ private:
         };
         Id id;
         Kind kind = Kind::Media;
-        std::shared_ptr<const std::vector<std::uint8_t>> data;
+        std::vector<std::uint8_t> data;
     };
     mutable std::mutex m_UploadMutex;
     std::vector<PendingUpload> m_PendingUploads;

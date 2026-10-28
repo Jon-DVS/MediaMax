@@ -32,7 +32,8 @@ one-directional dependency flow:
 - **`mediamax_render`** — the GPU side: Vulkan context bootstrap, GLFW
   swapchain management, and the scene renderer (compositor + display pass).
 - **`mediamax_playback`** — the app that wires core + render + OS
-  (windows, audio, the media pump thread, the control server).
+  (windows, audio, the media pump - a coordinator plus one decode worker
+  thread per active media layer, the control server).
 - **`mediamax_control`** — the CLI/operator tool that talks to one or many
   playback systems.
 
@@ -93,10 +94,11 @@ pixels to this reference for every mode.
   canonicalized path is the key, and a stored `(file size, last write time)`
   fingerprint decides re-loads — an unchanged file returns the existing
   asset id, a changed file is reloaded in place keeping its id (the media
-  pump holds `shared_ptr` copies of sources, so in-flight frames stay safe).
+  pump's decode workers hold `shared_ptr` copies of their source instances,
+  so in-flight frames stay safe).
   **Not internally synchronized**: the app
   serializes access with its state mutex (the media pump is handed the same
-  mutex), which is the synchronization point between the pump thread and
+  mutex), which is the synchronization point between the pump's threads and
   everything else.
 - `FFmpegSource` (+ `FFmpegSupport`) — the file-backed source: demux, decode
   video to RGBA8 and audio to interleaved float32, with a shared packet
@@ -198,9 +200,9 @@ full frame into a caller-owned command list (it never submits; the host
 owns the queue). Per frame:
 
 1. **Flush queued texture uploads** — the texture pool (media, warp and
-   status-overlay textures) is updated by the media pump thread and the
-   render thread through a lock-guarded queue; the render thread applies the
-   pending uploads at the start of recording.
+   status-overlay textures) is updated by the media pump's decode workers
+   and the render thread through a lock-guarded queue; the render thread
+   applies the pending uploads at the start of recording.
 2. **Clear both ping-pong scene targets** to premultiplied `(0,0,0,1)`.
    (NVRHI render passes always use `loadOp = LOAD`, so anything a layer quad
    does not cover keeps the previous content — both targets must be
@@ -241,16 +243,16 @@ vertex buffer.
 Threading model:
 
 ```
-render thread (main)   media pump thread      audio thread         control client threads
-  |  parse args,          |  decode video/audio     |  miniaudio callback:  |  one per connection:
-  |  build engine,        |  from the show's        |  snapshotTargets +    |  decode line,
-  |  displays, audio      |  sources; push frames   |  mixAudio() -> device |  CommandServer::
-  |  sink; per frame,     |  into the SceneRenderer |                     |  handle (under the
-  |  under m_StateMutex:  |  texture pool (queued)  |                     |  handler mutex),
-  |  tick(), frameState,  |                         |                     |  write response
-  |  publish pump targets;|                         |                     |
-  |  deliverVideo,        |                         |                     |
-  |  record + present     |                         |                     |
+render thread (main)   media pump                       audio thread         control client threads
+  |  parse args,          |  coordinator: spawns/retires  |  miniaudio callback:  |  one per connection:
+  |  build engine,        |  the decode workers           |  snapshotTargets +    |  decode line,
+  |  displays, audio      |  workers (one per media       |  mixAudio() -> device |  CommandServer::
+  |  sink; per frame,     |  layer): open their own       |                     |  handle (under the
+  |  under m_StateMutex:  |  source instance, decode      |                     |  handler mutex),
+  |  tick(), frameState,  |  video/audio toward the       |                     |  write response
+  |  publish pump targets;|  published targets, push      |                     |
+  |  deliverVideo,        |  frames into the texture      |                     |
+  |  record + present     |  pool (queued)               |                     |
 ```
 
 - `PlaybackApp` — owns `PlaybackEngine`, `MediaLibrary`, `DisplayManager`,
@@ -258,9 +260,15 @@ render thread (main)   media pump thread      audio thread         control clien
   `ControlServer`. Each tick: advance the engine clock, resolve the
   `FrameState`, map media frames onto layers (via the texture pool), record
   and present.
-- `MediaPump` — a dedicated thread that pulls `nextVideoFrame`/`nextAudioFrame`
-  from every active source and hands frames to the renderer's texture pool /
-  audio sink. Decoding never blocks the render loop.
+- `MediaPump` — a coordinator thread plus one decode worker thread per
+  active media layer. Each worker owns its layer's `IMediaSource` instance
+  (opened through the library's source factory - a source is
+  single-consumer, and layers sharing a file each need their own decode
+  position) and pulls `nextVideoFrame`/`nextAudioFrame` toward the
+  published targets, handing frames to the renderer's texture pool / audio
+  sink. Looping layers get a seamless wrap: the worker pre-decodes the loop
+  start before the playhead reaches the end. Decoding never blocks the
+  render loop.
 - `AudioSink` — miniaudio output; mixes the show's audio (one sink per
   system; per-layer audio mixing is the current scope).
 - `WindowSurface` — the borderless GLFW window + cursor/resize plumbing for

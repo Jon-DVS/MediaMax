@@ -289,6 +289,7 @@ nlohmann::json CommandServer::handleStatus() const
         {"version", MEDIAMAX_VERSION},
         {"hostname", m_HostName},
         {"ip", m_Ip},
+        {"droppedVideoFrames", m_DroppedVideoFrames.load()},
         {"state", PlaybackEngine::stateToString(m_Engine.state())},
         {"time", state.showTime.toSeconds()},
         {"timecode", state.showTime.toTimecode(show.frameRate)},

@@ -51,6 +51,13 @@ public:
     void setSourceFactory(MediaSourceFactory factory) { m_Factory = std::move(factory); }
     void setProbeFunction(MediaProbeFunction fn) { m_Probe = std::move(fn); }
 
+    // A copy of the installed source factory (may be empty). The playback
+    // engine's media pump opens one fresh source instance per active layer
+    // with it (a source is single-consumer, and a layer needs its own
+    // decode position - see MediaPump); the library's own instance stays
+    // with the library for probing/metadata.
+    MediaSourceFactory sourceFactory() const { return m_Factory; }
+
     // Loads a media file: probes it, creates a source, registers the asset.
     // Returns the asset id; kInvalidId (and an error) on failure.
     //

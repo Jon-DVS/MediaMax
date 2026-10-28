@@ -135,14 +135,17 @@ The version is exposed to code as the `MEDIAMAX_VERSION` compile define
 - Time: use `Time` (exact rational seconds) for anything internal. `double`
   seconds are only acceptable at the very edges (protocol JSON, file I/O) —
   `Time::fromSeconds` is the documented precision boundary.
-- Threads: the render (main) thread, the media pump thread, the audio
+- Threads: the render (main) thread, the media pump (a coordinator thread
+  plus one decode worker thread per active media layer), the audio
   callback and the per-client control threads are separate. `MediaLibrary`
   is *not* internally synchronized: access to it is serialized by the
-  app's state mutex (the pump is handed the same mutex). Cross-thread
-  frames go through `SceneRenderer`'s upload queue and `MediaPump`'s
-  targets/channels locks. Do not introduce cross-thread raw pointer
-  sharing without a clear owner + refcount (NVRHI handles are refcounted;
-  keep them in `RefCountPtr`/`Handle` types).
+  app's state mutex (the pump is handed the same mutex; a decode worker
+  copies the asset path + source factory under it, then opens and decodes
+  its source instance outside it). Cross-thread frames go through
+  `SceneRenderer`'s upload queue and `MediaPump`'s targets/channels locks.
+  Do not introduce cross-thread raw pointer sharing without a clear owner
+  + refcount (NVRHI handles are refcounted; keep them in `RefCountPtr`/
+  `Handle` types).
 
 ## Critical invariants (breaking these causes subtle bugs)
 

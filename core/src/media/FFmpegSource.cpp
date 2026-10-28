@@ -40,6 +40,16 @@ constexpr size_t kMaxQueuedVideoFrames = 8;
 constexpr size_t kMaxQueuedAudioFrames = 16;
 constexpr int kAudioBlockFrames = 4096;
 
+// Added to the resolved decoder thread count for the pumps' in-flight packet
+// caps (FFmpegSource::m_VideoInFlightCap / m_AudioInFlightCap). A
+// frame-threaded decoder's input latency is roughly thread_count plus the
+// stream's reorder window (the H264 DPB size, 16, is the worst case), and a
+// cap below that latency stalls the pipeline forever - the decoder withholds
+// every output until the window is filled, and the pump stops feeding it.
+// The decoder's own EAGAIN (its internal input buffer) is the true upper
+// bound; this cap must only ever stay ABOVE the latency. See pumpVideo.
+constexpr int kInFlightReorderMargin = 16;
+
 // Packets of the *other* stream are parked here while one pump waits for a
 // frame of its own stream. Video and audio pulls alternate on the shared
 // demuxer, so without parking, the video pump would silently drop every
@@ -60,8 +70,13 @@ Time toTime(int64_t value, const AVRational& timeBase)
     {
         return Time::zero();
     }
-    const double seconds = static_cast<double>(value) * timeBase.num / timeBase.den;
-    return Time::fromSeconds(seconds);
+    // Exact rational seconds (value * num / den). The double round-trip
+    // (Time::fromSeconds) quantizes to the nearest microsecond, and a 1/60 s
+    // frame step then alternates 16666/16667 us - enough to break the
+    // frame-exact step arithmetic downstream (FrameDropCounter floors the
+    // step ratio, so a one-frame advance of 16666 us counted as zero). The
+    // product is safe int64 for realistic pts and time_base values.
+    return Time(value * timeBase.num, timeBase.den);
 }
 
 FrameRate frameRateFromRational(const AVRational& r)
@@ -200,6 +215,9 @@ private:
 
     bool pumpVideo(uint64_t deadlineMs);
     bool pumpAudio(uint64_t deadlineMs);
+    // Recreates the video scaler at min(native, on-screen) (see
+    // IMediaSource::setVideoOutputSizeHint).
+    void setVideoOutputSizeHint(Size2i onScreenSize) override;
     // Parks the packet in m_Packet (the other stream's data) so the other
     // pump can decode it later instead of dropping it.
     void parkPacket();
@@ -236,6 +254,36 @@ private:
 
     int m_VideoFinished = 0;
     int m_AudioFinished = 0;
+
+    // Packets accepted by the decoder whose frames have not been received
+    // yet (the frame-threaded decoder decodes them asynchronously). Bounded
+    // by the pumps' in-flight caps; see pumpVideo.
+    int m_VideoInFlight = 0;
+    int m_AudioInFlight = 0;
+
+    // In-flight packet caps for the pumps, derived from the resolved
+    // (auto) decoder thread count after avcodec_open2: thread_count +
+    // kInFlightReorderMargin. The defaults cover the window before setup
+    // (the pumps do not run until the streams are set up).
+    int m_VideoInFlightCap = 32;
+    int m_AudioInFlightCap = 32;
+
+    // Current sws output size (the decode resolution); see
+    // setVideoOutputSizeHint.
+    int m_SwsOutWidth = 0;
+    int m_SwsOutHeight = 0;
+
+    // (Rare failure indicator) Last popped video frame time: a jump of more
+    // than two frame steps between consecutive pulls means frames were
+    // skipped between decoded frames (see nextVideoFrame).
+    bool m_HaveLastVideoTime = false;
+    Time m_LastVideoTime;
+
+    // A packet the decoder refused (send_packet EAGAIN: its input buffer was
+    // still full because a frame is in flight). Re-offered on the next pull
+    // for this stream instead of being dropped.
+    AVPacket m_PendingPacket = {};
+    bool m_HavePendingPacket = false;
 };
 
 FFmpegSource::~FFmpegSource()
@@ -243,6 +291,7 @@ FFmpegSource::~FFmpegSource()
     teardownStreams();
     clearParkedPackets();
     av_packet_unref(&m_Packet);
+    av_packet_unref(&m_PendingPacket);
     if (m_FormatCtx)
     {
         avformat_close_input(&m_FormatCtx);
@@ -412,6 +461,9 @@ bool FFmpegSource::setupVideo(std::string& error)
         error = "avcodec_open2 failed for video";
         return false;
     }
+    // The resolved (auto) thread count drives the in-flight cap; see
+    // kInFlightReorderMargin.
+    m_VideoInFlightCap = m_VideoCodec->thread_count + kInFlightReorderMargin;
 
     m_Sws = sws_getContext(m_VideoCodec->width, m_VideoCodec->height,
                            m_VideoCodec->pix_fmt, m_VideoCodec->width, m_VideoCodec->height,
@@ -421,6 +473,8 @@ bool FFmpegSource::setupVideo(std::string& error)
         error = "sws_getContext failed";
         return false;
     }
+    m_SwsOutWidth = m_VideoCodec->width;
+    m_SwsOutHeight = m_VideoCodec->height;
     return true;
 }
 
@@ -454,6 +508,7 @@ bool FFmpegSource::setupAudio(std::string& error)
         error = "avcodec_open2 failed for audio";
         return false;
     }
+    m_AudioInFlightCap = m_AudioCodec->thread_count + kInFlightReorderMargin;
 
     // Convert to interleaved float32, preserving channels and rate; the
     // mixer handles final conversion to the output device format.
@@ -477,8 +532,14 @@ void FFmpegSource::flushDecoders()
     m_VideoQueue.clear();
     m_AudioQueue.clear();
     clearParkedPackets();
+    // A pending packet belongs to the pre-seek stream position; drop it.
+    av_packet_unref(&m_PendingPacket);
+    m_PendingPacket = {};
+    m_HavePendingPacket = false;
     m_VideoFinished = 0;
     m_AudioFinished = 0;
+    m_VideoInFlight = 0;
+    m_AudioInFlight = 0;
 
     if (m_VideoCodec)
     {
@@ -498,21 +559,20 @@ bool FFmpegSource::seek(const Time& t)
     {
         const int64_t ts = av_rescale_q(targetUs, AVRational{1, 1000000},
                                         m_VideoStream->time_base);
-        if (av_seek_frame(m_FormatCtx, m_VideoStream->index, ts, AVSEEK_FLAG_BACKWARD) < 0)
-        {
-            Logger::instance().debug("Video seek failed for asset (continuing)");
-        }
+        const int ret =
+            av_seek_frame(m_FormatCtx, m_VideoStream->index, ts, AVSEEK_FLAG_BACKWARD);
+        Logger::instance().debug("seek: video av_seek_frame t={}us ret={}", targetUs, ret);
     }
     if (m_AudioStream)
     {
         const int64_t ts = av_rescale_q(targetUs, AVRational{1, 1000000},
                                         m_AudioStream->time_base);
-        if (av_seek_frame(m_FormatCtx, m_AudioStream->index, ts, AVSEEK_FLAG_BACKWARD) < 0)
-        {
-            Logger::instance().debug("Audio seek failed for asset (continuing)");
-        }
+        const int ret =
+            av_seek_frame(m_FormatCtx, m_AudioStream->index, ts, AVSEEK_FLAG_BACKWARD);
+        Logger::instance().debug("seek: audio av_seek_frame t={}us ret={}", targetUs, ret);
     }
     flushDecoders();
+    m_HaveLastVideoTime = false;
     return true;
 }
 
@@ -548,6 +608,19 @@ void FFmpegSource::parkPacket()
 
 int FFmpegSource::nextPacketForStream(int streamIndex, AVPacket& out, uint64_t deadlineMs)
 {
+    // A packet the decoder refused earlier comes before anything newly read
+    // (it is the most recent packet of its stream).
+    if (m_HavePendingPacket && m_PendingPacket.stream_index == streamIndex)
+    {
+        av_packet_move_ref(&out, &m_PendingPacket);
+        m_HavePendingPacket = false;
+        return kPacketGot;
+    }
+    // The demuxer work of this call is characterized (packets read, elapsed
+    // time, parking-lot state) so a deadline/EOF failure below can be
+    // explained from the log.
+    const uint64_t startMs = nowMilliseconds();
+    int readCount = 0;
     for (;;)
     {
         // The parking lot first: take the first packet of our stream, where
@@ -567,8 +640,12 @@ int FFmpegSource::nextPacketForStream(int streamIndex, AVPacket& out, uint64_t d
         const int ret = av_read_frame(m_FormatCtx, &m_Packet);
         if (ret < 0)
         {
+            Logger::instance().info("pkt stream {}: EOF after {} ms ({} read, lot {})",
+                                    streamIndex, nowMilliseconds() - startMs, readCount,
+                                    m_ParkedPackets.size());
             return kPacketEof;
         }
+        ++readCount;
         if (m_Packet.stream_index == streamIndex)
         {
             av_packet_ref(&out, &m_Packet);
@@ -578,19 +655,66 @@ int FFmpegSource::nextPacketForStream(int streamIndex, AVPacket& out, uint64_t d
         // Other stream's packet: keep it for its pump instead of dropping it.
         parkPacket();
 
+        // No sleep here: every loop iteration consumes one packet from the
+        // demuxer (guaranteed progress), so a stall cannot spin; the
+        // deadline check below bounds the work. Sleeping 1 ms per crossed
+        // packet cost ~100 ms/s of decode time per source.
         if (nowMilliseconds() >= deadlineMs)
         {
+            Logger::instance().info("pkt stream {}: deadline after {} ms ({} read, lot {})",
+                                    streamIndex, nowMilliseconds() - startMs, readCount,
+                                    m_ParkedPackets.size());
             return kPacketDeadline;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 }
 
 bool FFmpegSource::pumpVideo(uint64_t deadlineMs)
 {
-    // Decode until we have a frame queued, hit EOF, or run out of time.
+    // Feed the decoder until a frame is queued or the deadline passes:
+    // drain completed frames, and keep sending while the decoder's window
+    // is not full. The two phases must stay interleaved (not "send twice,
+    // then wait"): an H264 stream with B-frames withholds its first output
+    // until the whole mini-GOP has been sent (with two B-frames, five
+    // packets in DTS order: I, P, B, B, B), so a pump that stops sending
+    // before the window is filled waits for a frame that is withheld until
+    // packets that never arrive.
+    //
+    // At most m_VideoInFlightCap packets in flight at any time (thread_count
+    // + kInFlightReorderMargin): the cap must stay ABOVE the frame-threaded
+    // decoder's input latency (roughly thread_count plus the stream's
+    // reorder window) or the decoder withholds all output. It also bounds
+    // the EOF flush burst, where every in-flight frame completes at once:
+    // the burst lands in m_VideoQueue (capped at kMaxQueuedVideoFrames) and
+    // overflow evicts the oldest burst frame. At the tail of a looping file
+    // those frames sit inside the predecode skip window (see
+    // MediaPump::preDecodeUnlocked), where they are deliberately dropped, so
+    // the eviction is harmless.
     for (;;)
     {
+        // Drain what the decoder has completed first: a completed frame
+        // beats the deadline (it decodes even when it overran the caller's
+        // budget slightly).
+        AVFrame frame = {};
+        for (;;)
+        {
+            const int recvRet = avcodec_receive_frame(m_VideoCodec, &frame);
+            if (recvRet != 0)
+            {
+                if (recvRet != AVERROR(EAGAIN))
+                {
+                    Logger::instance().debug("Video receive_frame error: {}",
+                                             errorString(recvRet));
+                }
+                break;
+            }
+            if (m_VideoInFlight > 0)
+            {
+                --m_VideoInFlight;
+            }
+            decodeVideoFrame(frame);
+            av_frame_unref(&frame);
+        }
         if (!m_VideoQueue.empty())
         {
             return true;
@@ -598,6 +722,16 @@ bool FFmpegSource::pumpVideo(uint64_t deadlineMs)
         if (m_VideoFinished)
         {
             return false;
+        }
+        if (nowMilliseconds() >= deadlineMs)
+        {
+            return false;
+        }
+        if (m_VideoInFlight >= m_VideoInFlightCap)
+        {
+            // The decoder is ahead of us; give it a moment to complete.
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            continue;
         }
 
         AVPacket packet = {};
@@ -611,46 +745,79 @@ bool FFmpegSource::pumpVideo(uint64_t deadlineMs)
             // EOF: flush the decoder to drain its internal buffers.
             avcodec_send_packet(m_VideoCodec, nullptr);
             bool gotMore = false;
-            AVFrame frame = {};
-            while (avcodec_receive_frame(m_VideoCodec, &frame) == 0)
+            AVFrame flushFrame = {};
+            while (avcodec_receive_frame(m_VideoCodec, &flushFrame) == 0)
             {
                 gotMore = true;
-                decodeVideoFrame(frame);
+                if (m_VideoInFlight > 0)
+                {
+                    --m_VideoInFlight;
+                }
+                decodeVideoFrame(flushFrame);
+                av_frame_unref(&flushFrame);
             }
             if (!gotMore)
             {
                 m_VideoFinished = 1;
+                // A normal flush yields the still-in-flight frames before
+                // this point; the empty flush marks the true end of the
+                // stream (kept as a tail-of-pass marker).
+                Logger::instance().info("video pump: EOF with empty decoder flush");
             }
             return !m_VideoQueue.empty();
         }
 
         const int sendRet = avcodec_send_packet(m_VideoCodec, &packet);
-        av_packet_unref(&packet);
-        if (sendRet == 0 || sendRet == AVERROR(EAGAIN))
+        if (sendRet == AVERROR(EAGAIN))
         {
-            AVFrame frame = {};
-            while (avcodec_receive_frame(m_VideoCodec, &frame) == 0)
-            {
-                decodeVideoFrame(frame);
-            }
+            // The decoder's input buffer is still full (more in flight
+            // than the cap anticipates); keep the packet and re-offer it
+            // on the next pass of this loop instead of dropping it.
+            av_packet_move_ref(&m_PendingPacket, &packet);
+            m_HavePendingPacket = true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            continue;
         }
-        else
+        av_packet_unref(&packet);
+        if (sendRet != 0)
         {
             Logger::instance().debug("Video send_packet error: {}", errorString(sendRet));
         }
-
-        if (nowMilliseconds() >= deadlineMs)
+        else
         {
-            return false;
+            ++m_VideoInFlight;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 }
 
 bool FFmpegSource::pumpAudio(uint64_t deadlineMs)
 {
+    // Feed the decoder until a block is queued or the deadline passes (see
+    // pumpVideo for why the send and drain phases must stay interleaved).
+    // The audio decoder is single-threaded and EAGAIN-limited, so the
+    // in-flight cap never binds for it.
     for (;;)
     {
+        AVFrame frame = {};
+        for (;;)
+        {
+            const int recvRet = avcodec_receive_frame(m_AudioCodec, &frame);
+            if (recvRet != 0)
+            {
+                if (recvRet != AVERROR(EAGAIN))
+                {
+                    Logger::instance().debug("Audio receive_frame error: {}",
+                                             errorString(recvRet));
+                }
+                break;
+            }
+            if (m_AudioInFlight > 0)
+            {
+                --m_AudioInFlight;
+            }
+            decodeAudioFrame(frame);
+            av_frame_unref(&frame);
+        }
         if (!m_AudioQueue.empty())
         {
             return true;
@@ -658,6 +825,16 @@ bool FFmpegSource::pumpAudio(uint64_t deadlineMs)
         if (m_AudioFinished)
         {
             return false;
+        }
+        if (nowMilliseconds() >= deadlineMs)
+        {
+            return false;
+        }
+        if (m_AudioInFlight >= m_AudioInFlightCap)
+        {
+            // The decoder is ahead of us; give it a moment to complete.
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            continue;
         }
 
         AVPacket packet = {};
@@ -671,39 +848,48 @@ bool FFmpegSource::pumpAudio(uint64_t deadlineMs)
             // EOF: flush the decoder to drain its internal buffers.
             avcodec_send_packet(m_AudioCodec, nullptr);
             bool gotMore = false;
-            AVFrame frame = {};
-            while (avcodec_receive_frame(m_AudioCodec, &frame) == 0)
+            AVFrame flushFrame = {};
+            while (avcodec_receive_frame(m_AudioCodec, &flushFrame) == 0)
             {
                 gotMore = true;
-                decodeAudioFrame(frame);
+                if (m_AudioInFlight > 0)
+                {
+                    --m_AudioInFlight;
+                }
+                decodeAudioFrame(flushFrame);
+                av_frame_unref(&flushFrame);
             }
             if (!gotMore)
             {
                 m_AudioFinished = 1;
+                // A normal flush yields the still-in-flight blocks before
+                // this point; the empty flush marks the true end of the
+                // stream (kept as a tail-of-pass marker).
+                Logger::instance().info("audio pump: EOF with empty decoder flush");
             }
             return !m_AudioQueue.empty();
         }
 
         const int sendRet = avcodec_send_packet(m_AudioCodec, &packet);
-        av_packet_unref(&packet);
-        if (sendRet == 0 || sendRet == AVERROR(EAGAIN))
+        if (sendRet == AVERROR(EAGAIN))
         {
-            AVFrame frame = {};
-            while (avcodec_receive_frame(m_AudioCodec, &frame) == 0)
-            {
-                decodeAudioFrame(frame);
-            }
+            // The decoder's input buffer is still full; keep the packet and
+            // re-offer it on the next pass of this loop instead of
+            // dropping it.
+            av_packet_move_ref(&m_PendingPacket, &packet);
+            m_HavePendingPacket = true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            continue;
         }
-        else
+        av_packet_unref(&packet);
+        if (sendRet != 0)
         {
             Logger::instance().debug("Audio send_packet error: {}", errorString(sendRet));
         }
-
-        if (nowMilliseconds() >= deadlineMs)
+        else
         {
-            return false;
+            ++m_AudioInFlight;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 }
 
@@ -726,6 +912,18 @@ bool FFmpegSource::nextVideoFrame(VideoFrame& out, std::uint32_t timeoutMs)
     }
     out = std::move(m_VideoQueue.front());
     m_VideoQueue.pop_front();
+    // A healthy pull advances by one frame step; a jump of more than two
+    // steps means frames were skipped somewhere between decoded frames
+    // (rare failure indicator, kept at info).
+    if (m_HaveLastVideoTime && (out.time - m_LastVideoTime).toSeconds() > 0.033)
+    {
+        Logger::instance().info(
+            "video jump: {} -> {} ({:.3f} s, queue now {})", m_LastVideoTime.toSeconds(),
+            out.time.toSeconds(), (out.time - m_LastVideoTime).toSeconds(),
+            m_VideoQueue.size());
+    }
+    m_LastVideoTime = out.time;
+    m_HaveLastVideoTime = true;
     return true;
 }
 
@@ -752,18 +950,70 @@ bool FFmpegSource::nextAudioFrame(AudioFrame& out, std::uint32_t timeoutMs)
 }
 
 // Helper: decode one video AVFrame into an RGBA VideoFrame and queue it.
+void FFmpegSource::setVideoOutputSizeHint(Size2i onScreenSize)
+{
+    if (!m_VideoCodec || !m_Sws || !onScreenSize.valid())
+    {
+        return; // no scalable path (yet), or no hint
+    }
+    // Decode at min(native, on-screen) per axis: the display never shows
+    // more pixels than the layer's on-screen size, so decoding the rest
+    // wastes CPU (the scale) and upload bandwidth (the texture). Even
+    // sizes keep the scaler's fast paths.
+    const int nativeW = m_VideoCodec->width;
+    const int nativeH = m_VideoCodec->height;
+    int w = std::min(nativeW, static_cast<int>(onScreenSize.width)) & ~1;
+    int h = std::min(nativeH, static_cast<int>(onScreenSize.height)) & ~1;
+    if (w < 2)
+    {
+        w = 2;
+    }
+    if (h < 2)
+    {
+        h = 2;
+    }
+    if (w == m_SwsOutWidth && h == m_SwsOutHeight)
+    {
+        return; // idempotent while the hint matches the current output
+    }
+    SwsContext* sws =
+        sws_getContext(nativeW, nativeH, m_VideoCodec->pix_fmt, w, h, AV_PIX_FMT_RGBA,
+                       SWS_BILINEAR, nullptr, nullptr, nullptr);
+    if (!sws)
+    {
+        Logger::instance().debug("sws_getContext failed for output size {}x{}", w, h);
+        return; // keep the current size
+    }
+    sws_freeContext(m_Sws);
+    m_Sws = sws;
+    m_SwsOutWidth = w;
+    m_SwsOutHeight = h;
+    // Queued frames are at the old size; drop them. The consumer re-decodes
+    // its lookahead quickly, and the render path re-creates the texture at
+    // the new size (ensureMediaTexture), so the brief gap is the only cost.
+    m_VideoQueue.clear();
+}
+
 void FFmpegSource::decodeVideoFrame(const AVFrame& frame)
 {
+    // The scaler may output below the native resolution (the on-screen size
+    // hint, see setVideoOutputSizeHint); the frame is sized to the scaler's
+    // output, not the decoder's.
+    const int outW = m_SwsOutWidth > 0 ? m_SwsOutWidth : frame.width;
+    const int outH = m_SwsOutHeight > 0 ? m_SwsOutHeight : frame.height;
+
     VideoFrame vf;
-    vf.width = static_cast<std::uint32_t>(frame.width);
-    vf.height = static_cast<std::uint32_t>(frame.height);
+    vf.width = static_cast<std::uint32_t>(outW);
+    vf.height = static_cast<std::uint32_t>(outH);
     vf.time = toTime(frame.pts, m_VideoStream->time_base);
-    vf.rgba.resize(static_cast<size_t>(vf.width) * vf.height * 4);
+    vf.rgba.resize(static_cast<size_t>(outW) * outH * 4);
 
     uint8_t* dst[4] = {vf.rgba.data(), nullptr, nullptr, nullptr};
-    int dstStride[4] = {static_cast<int>(vf.width) * 4, 0, 0, 0};
-    if (sws_scale(m_Sws, frame.data, frame.linesize, 0, frame.height, dst, dstStride) !=
-        frame.height)
+    int dstStride[4] = {outW * 4, 0, 0, 0};
+    // sws_scale returns the number of OUTPUT lines scaled (dst height);
+    // the input height is frame.height, which differs when the scaler
+    // downscales (the on-screen size hint).
+    if (sws_scale(m_Sws, frame.data, frame.linesize, 0, frame.height, dst, dstStride) != outH)
     {
         Logger::instance().debug("sws_scale failed for video frame");
         return;
