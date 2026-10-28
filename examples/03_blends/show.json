@@ -2,7 +2,7 @@
   "app": "mediamax-show",
   "version": 1,
   "name": "Blend modes (add, screen, multiply, subtract)",
-  "frameRate": { "num": 30, "den": 1 },
+  "frameRate": { "num": 60, "den": 1 },
   "duration": 8.0,
   "media": [
     { "id": 1, "path": "media/bars.mp4" },
@@ -25,7 +25,7 @@
           "id": 12,
           "name": "SMPTE bars (static, the blend target)",
           "mediaId": 1,
-          "transform": { "x": 960.0, "y": 540.0, "scaleX": 2.0, "scaleY": 2.0 },
+          "transform": { "x": 960.0, "y": 540.0 },
           "zIndex": 1
         },
         {
@@ -34,7 +34,7 @@
           "mediaId": 2,
           "blend": "add",
           "opacity": 0.9,
-          "transform": { "x": 960.0, "y": 540.0, "scaleX": 2.0, "scaleY": 2.0 },
+          "transform": { "x": 960.0, "y": 540.0 },
           "zIndex": 2
         }
       ]

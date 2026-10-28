@@ -2,7 +2,7 @@
   "app": "mediamax-show",
   "version": 1,
   "name": "Keyframe animation tracks",
-  "frameRate": { "num": 30, "den": 1 },
+  "frameRate": { "num": 60, "den": 1 },
   "duration": 12.0,
   "media": [
     { "id": 1, "path": "media/colorbars.mp4" },
@@ -26,7 +26,7 @@
           "id": 12,
           "name": "Orbit (x/y linear tracks = diamond path)",
           "mediaId": 3,
-          "transform": { "x": 960.0, "y": 300.0 },
+          "transform": { "x": 960.0, "y": 300.0, "scaleX": 0.25, "scaleY": 0.25 },
           "tracks": {
             "x": [
               { "time": 0.0,  "value": 960.0,  "interpolation": "linear" },
@@ -64,7 +64,7 @@
           "id": 14,
           "name": "Pulse (scale track + step opacity track)",
           "mediaId": 2,
-          "transform": { "x": 960.0, "y": 540.0 },
+          "transform": { "x": 960.0, "y": 540.0, "scaleX": 0.5, "scaleY": 0.5 },
           "tracks": {
             "scale": [
               { "time": 0.0, "value": 1.0, "interpolation": "linear" },
@@ -83,7 +83,7 @@
           "id": 15,
           "name": "Fade in (opacity track 0 -> 1 over 3s)",
           "mediaId": 1,
-          "transform": { "x": 300.0, "y": 800.0, "scaleX": 0.5, "scaleY": 0.5 },
+          "transform": { "x": 300.0, "y": 800.0, "scaleX": 0.25, "scaleY": 0.25 },
           "tracks": {
             "opacity": [
               { "time": 0.0, "value": 0.0, "interpolation": "linear" },

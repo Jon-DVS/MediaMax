@@ -2,7 +2,7 @@
   "app": "mediamax-show",
   "version": 1,
   "name": "Basics: scenes, cuts, color layers",
-  "frameRate": { "num": 30, "den": 1 },
+  "frameRate": { "num": 60, "den": 1 },
   "duration": 12.0,
   "media": [
     { "id": 1, "path": "media/colorbars.mp4" },
@@ -32,9 +32,9 @@
         },
         {
           "id": 13,
-          "name": "Still logo (png, zIndex 2 = on top)",
+          "name": "Still logo (png, half-HD 480x270, zIndex 2 = on top)",
           "mediaId": 3,
-          "transform": { "x": 300.0, "y": 200.0 },
+          "transform": { "x": 300.0, "y": 200.0, "scaleX": 0.25, "scaleY": 0.25 },
           "zIndex": 2
         }
       ]
@@ -57,7 +57,7 @@
           "mediaId": 2,
           "inPoint": 0.5,
           "rate": 0.75,
-          "transform": { "x": 960.0, "y": 540.0, "scaleX": 2.0, "scaleY": 2.0 },
+          "transform": { "x": 960.0, "y": 540.0 },
           "zIndex": 1
         }
       ]
@@ -76,9 +76,9 @@
         },
         {
           "id": 32,
-          "name": "Logo (scaled 2x)",
+          "name": "Logo (half scale = 960x540)",
           "mediaId": 3,
-          "transform": { "x": 960.0, "y": 540.0, "scaleX": 2.0, "scaleY": 2.0 },
+          "transform": { "x": 960.0, "y": 540.0, "scaleX": 0.5, "scaleY": 0.5 },
           "zIndex": 1
         }
       ]

@@ -2,7 +2,7 @@
   "app": "mediamax-show",
   "version": 1,
   "name": "Video + audio (A/V sync, in/out points, loop, opacity = gain)",
-  "frameRate": { "num": 30, "den": 1 },
+  "frameRate": { "num": 60, "den": 1 },
   "duration": 10.0,
   "media": [
     { "id": 1, "path": "media/tone.mp4" }

@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.22)
 
 project(MediaMax
-    VERSION 0.1.7
+    VERSION 0.1.8
     DESCRIPTION "MediaMax media server - playback engine, control interface and core engine"
     LANGUAGES C CXX)
 

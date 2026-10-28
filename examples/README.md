@@ -22,8 +22,12 @@ cd examples\01_basics
 ```
 
 A window titled `MediaMax - Display 1` opens and the show starts playing
-automatically (each startup show auto-plays). The control interface listens
-on port 47600; in a second terminal:
+automatically (each startup show auto-plays). The engine opens a 1920x1080
+window by default - the HD output space all the example shows are laid out
+in - and runs them at their show frame rate (60 fps); `--width`/`--height`
+change the window, `--display WxH@X+Y` adds off-default displays (see
+`06_multi_display`). The control interface listens on port 47600; in a
+second terminal:
 
 ```bat
 ..\..\build\control\Release\mediamax_control.exe --system 127.0.0.1:47600
@@ -45,26 +49,27 @@ displays), `show.info`, `scene.list`, `playback.play`, `playback.pause`,
 | `03_blends` | Blend modes over SMPTE bars: `add` (static) cycled to `screen`, `multiply`, `subtract` by `setLayerBlend` cues. `normal` is the default mode |
 | `04_cues` | The cue timeline: an opacity fade, visibility on/off, a position jump, a **`seek` cue that skips an entire scene** (watch the timecode jump 9.0 → 16.5 — the red scene is never shown), and a `pause` cue that holds the last frame (resume with `playback.play`) |
 | `05_video_audio` | A/V sync: a 5 s segment (inPoint 1.0, outPoint 6.0) of an 8 s clip **with audio**, looping inside a 10 s show; layer opacity also drives the audio gain (you hear the fade) |
-| `06_multi_display` | A two-display wall (1920x540 shared wall space): per-display positioning, a layer spanning both displays, and a scene swap |
+| `06_multi_display` | A two-display wall (3840x1080 shared wall space, two HD outputs): per-display positioning, a layer spanning both displays, and a scene swap |
 
 ### 04_cues: watching the seek cue
 
 Run the example and watch `status` around 9 s — the timecode jumps from
-`00:00:09:00` straight to `00:00:16:15` (the show frame at 16.5 s is scene
-3, so the red "Skipped" scene between 10–16 s is never rendered). At 22 s
-the show pauses and holds; `playback.play` resumes it to the end.
+`00:00:09:00` straight to `00:00:16:30` (at 60 fps the show frame at 16.5 s
+is frame 30 of the 17th second, and that frame is scene 3, so the red
+"Skipped" scene between 10–16 s is never rendered). At 22 s the show
+pauses and holds; `playback.play` resumes it to the end.
 
 ### 06_multi_display: the two-window wall
 
 ```bat
 cd examples\06_multi_display
-..\..\build\playback\Release\mediamax_playback.exe --show show.json --display 960x540@0+0 --display 960x540@960+0
+..\..\build\playback\Release\mediamax_playback.exe --show show.json --display 1920x1080@0+0 --display 1920x1080@1920+0
 ```
 
-Two windows appear side by side. Content is laid out in the shared wall
-space (1920x540, origin top-left): the video is centered on the left display
-(x=480), the logo on the right (x=1440), and the 1920 px plasma strip crosses
-**both** windows. At 8 s the panels swap.
+Two HD windows appear side by side. Content is laid out in the shared wall
+space (3840x1080, origin top-left): the video is centered on the left
+display (x=960), the logo on the right (x=2880), and the 3840 px plasma
+strip crosses **both** windows. At 8 s the panels swap.
 
 While it runs, try a projection warp from the control console (display 1,
 a 2x2 grid of display-local UV points — a mild trapezoid):
@@ -78,8 +83,10 @@ and reset it with the identity grid
 
 ## Regenerating the media
 
-The example media are small generated test patterns (FFmpeg lavfi sources:
-`testsrc2`, `gradients`, `smptebars`, `sine`). To regenerate everything:
+The example media are generated test patterns (FFmpeg lavfi sources:
+`testsrc2`, `gradients`, `smptebars`, `sine`) at full HD (1920x1080) and
+60 fps with a fixed 12 Mbit/s video bitrate, matching the 60 fps HD output
+space the shows run in. To regenerate everything:
 
 ```bat
 powershell -ExecutionPolicy Bypass -File examples\generate_media.ps1

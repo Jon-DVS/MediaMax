@@ -1,8 +1,8 @@
 {
   "app": "mediamax-show",
   "version": 1,
-  "name": "Multi-display wall (two 960x540 outputs side by side)",
-  "frameRate": { "num": 30, "den": 1 },
+  "name": "Multi-display wall (two 1920x1080 outputs side by side)",
+  "frameRate": { "num": 60, "den": 1 },
   "duration": 16.0,
   "media": [
     { "id": 1, "path": "media/colorbars.mp4" },
@@ -16,10 +16,10 @@
       "layers": [
         {
           "id": 11,
-          "name": "BG (spans the whole wall: 1920x540)",
+          "name": "BG (spans the whole wall: 3840x1080)",
           "mediaId": 0,
           "color": { "r": 0.04, "g": 0.05, "b": 0.1, "a": 1.0 },
-          "transform": { "x": 960.0, "y": 270.0, "scaleX": 1920.0, "scaleY": 540.0 },
+          "transform": { "x": 1920.0, "y": 540.0, "scaleX": 3840.0, "scaleY": 1080.0 },
           "zIndex": 0
         },
         {
@@ -27,21 +27,21 @@
           "name": "Video (centered on the LEFT display)",
           "mediaId": 1,
           "loop": true,
-          "transform": { "x": 480.0, "y": 270.0 },
+          "transform": { "x": 960.0, "y": 540.0 },
           "zIndex": 1
         },
         {
           "id": 13,
-          "name": "Logo (centered on the RIGHT display)",
+          "name": "Logo (centered on the RIGHT display, half scale)",
           "mediaId": 2,
-          "transform": { "x": 1440.0, "y": 270.0, "scaleX": 1.5, "scaleY": 1.5 },
+          "transform": { "x": 2880.0, "y": 540.0, "scaleX": 0.5, "scaleY": 0.5 },
           "zIndex": 1
         },
         {
           "id": 14,
-          "name": "Strip (1920px wide - crosses BOTH displays)",
+          "name": "Strip (3840px wide - crosses BOTH displays)",
           "mediaId": 3,
-          "transform": { "x": 960.0, "y": 495.0 },
+          "transform": { "x": 1920.0, "y": 990.0 },
           "zIndex": 2
         }
       ]
@@ -55,14 +55,14 @@
           "name": "BG",
           "mediaId": 0,
           "color": { "r": 0.04, "g": 0.05, "b": 0.1, "a": 1.0 },
-          "transform": { "x": 960.0, "y": 270.0, "scaleX": 1920.0, "scaleY": 540.0 },
+          "transform": { "x": 1920.0, "y": 540.0, "scaleX": 3840.0, "scaleY": 1080.0 },
           "zIndex": 0
         },
         {
           "id": 22,
-          "name": "Logo (now on the LEFT display)",
+          "name": "Logo (now on the LEFT display, half scale)",
           "mediaId": 2,
-          "transform": { "x": 480.0, "y": 270.0, "scaleX": 1.5, "scaleY": 1.5 },
+          "transform": { "x": 960.0, "y": 540.0, "scaleX": 0.5, "scaleY": 0.5 },
           "zIndex": 1
         },
         {
@@ -70,22 +70,22 @@
           "name": "Video (now on the RIGHT display)",
           "mediaId": 1,
           "loop": true,
-          "transform": { "x": 1440.0, "y": 270.0 },
+          "transform": { "x": 2880.0, "y": 540.0 },
           "zIndex": 1
         },
         {
           "id": 24,
           "name": "Strip (still spans both)",
           "mediaId": 3,
-          "transform": { "x": 960.0, "y": 495.0 },
+          "transform": { "x": 1920.0, "y": 990.0 },
           "zIndex": 2
         }
       ]
     }
   ],
   "cues": [
-    { "time": 0.0,  "name": "sides",    "action": { "type": "playScene", "scene": 1 } },
-    { "time": 8.0,  "name": "swap",     "action": { "type": "playScene", "scene": 2 } },
-    { "time": 16.0, "name": "end",      "action": { "type": "stop" } }
+    { "time": 0.0,  "name": "sides", "action": { "type": "playScene", "scene": 1 } },
+    { "time": 8.0,  "name": "swap",  "action": { "type": "playScene", "scene": 2 } },
+    { "time": 16.0, "name": "end",   "action": { "type": "stop" } }
   ]
 }

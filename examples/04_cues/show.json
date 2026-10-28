@@ -2,7 +2,7 @@
   "app": "mediamax-show",
   "version": 1,
   "name": "Cue timeline (opacity, visibility, position, seek, pause)",
-  "frameRate": { "num": 30, "den": 1 },
+  "frameRate": { "num": 60, "den": 1 },
   "duration": 24.0,
   "media": [
     { "id": 1, "path": "media/colorbars.mp4" },
@@ -31,9 +31,9 @@
         },
         {
           "id": 13,
-          "name": "Logo (hidden 5.5-7s)",
+          "name": "Logo (hidden 5.5-7s, half-HD 480x270)",
           "mediaId": 2,
-          "transform": { "x": 1500.0, "y": 250.0 },
+          "transform": { "x": 1500.0, "y": 250.0, "scaleX": 0.25, "scaleY": 0.25 },
           "zIndex": 2
         }
       ]
@@ -66,9 +66,9 @@
         },
         {
           "id": 32,
-          "name": "Logo (scaled 2x, centered)",
+          "name": "Logo (half scale, centered)",
           "mediaId": 2,
-          "transform": { "x": 960.0, "y": 540.0, "scaleX": 2.0, "scaleY": 2.0 },
+          "transform": { "x": 960.0, "y": 540.0, "scaleX": 0.5, "scaleY": 0.5 },
           "zIndex": 1
         }
       ]
