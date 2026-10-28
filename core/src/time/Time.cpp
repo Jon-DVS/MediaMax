@@ -146,7 +146,8 @@ Time Time::fromFrames(std::int64_t frames, const FrameRate& fps)
 
 double Time::toSeconds() const
 {
-    return static_cast<long double>(m_Value) / static_cast<long double>(m_Scale);
+    return static_cast<double>(static_cast<long double>(m_Value) /
+                                static_cast<long double>(m_Scale));
 }
 
 std::int64_t Time::toMicroseconds() const
@@ -237,7 +238,7 @@ Time Time::operator%(const Time& mod) const
     }
     const long double quotient = toSeconds() / mod.toSeconds();
     const long double n = std::floor(quotient);
-    return fromSeconds(toSeconds() - n * mod.toSeconds());
+    return fromSeconds(toSeconds() - static_cast<double>(n) * mod.toSeconds());
 }
 
 bool Time::operator<(const Time& other) const

@@ -19,7 +19,7 @@ struct StringMaker<mediamax::Time>
     static String convert(const mediamax::Time& t)
     {
         const std::string s = std::to_string(t.value()) + "/" + std::to_string(t.scale()) + " s";
-        return String(s.c_str(), s.size());
+        return String(s.c_str(), static_cast<String::size_type>(s.size()));
     }
 };
 } // namespace doctest

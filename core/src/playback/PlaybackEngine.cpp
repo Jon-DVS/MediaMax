@@ -396,26 +396,26 @@ void PlaybackEngine::applyLayerCues(Id layerId, const Time& showTime, LayerFrame
                 out.opacity = a->value;
             }
         }
-        else if (const auto* a = std::get_if<SetLayerVisible>(&cue.action))
+        else if (const auto* b = std::get_if<SetLayerVisible>(&cue.action))
         {
-            if (a->layer == layerId)
+            if (b->layer == layerId)
             {
-                out.visible = a->value;
+                out.visible = b->value;
             }
         }
-        else if (const auto* a = std::get_if<SetLayerBlend>(&cue.action))
+        else if (const auto* c = std::get_if<SetLayerBlend>(&cue.action))
         {
-            if (a->layer == layerId)
+            if (c->layer == layerId)
             {
-                out.blend = a->mode;
+                out.blend = c->mode;
             }
         }
-        else if (const auto* a = std::get_if<SetLayerPosition>(&cue.action))
+        else if (const auto* d = std::get_if<SetLayerPosition>(&cue.action))
         {
-            if (a->layer == layerId)
+            if (d->layer == layerId)
             {
-                out.x = a->x;
-                out.y = a->y;
+                out.x = d->x;
+                out.y = d->y;
             }
         }
     }
