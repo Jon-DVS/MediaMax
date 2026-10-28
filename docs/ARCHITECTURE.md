@@ -165,14 +165,19 @@ GPU display pass samples (see below).
 
 ### `overlay/` — status overlay text
 
-`overlay::renderText` rasterizes ASCII text (a built-in 5x7 bitmap font,
-ASCII 32..126) into a tightly packed RGBA8 buffer: white glyphs on
-transparent, straight alpha, integer pixel scale, `\n` lines. Pure data +
-CPU pixels (no GPU, no window), so the whole font + layout is unit-testable.
-The playback app calls it once per frame for each display with
-`statusOverlay` set, pastes the result into a fixed canvas and uploads it
-through the scene renderer's overlay texture pool; the display pass blends
-it on top (see above).
+`overlay::renderText` rasterizes ASCII text (a built-in 8x11 monospace
+bitmap font, ASCII 32..126) into a tightly packed RGBA8 buffer: white
+glyphs on transparent, straight alpha, integer pixel scale, `\n` lines.
+Pure data + CPU pixels (no GPU, no window), so the whole font + layout is
+unit-testable.
+The playback app calls it twice per frame for each display with
+`statusOverlay` set: a "MediaMax" header at scale 2 and a body (system IP,
+display name/number, physical output, resolution, and a fps / CPU ms / GPU
+ms stats block with the rolling min/max/avg of each metric) at scale 1.
+The two rasters are pasted into a canvas that is half the display's pixel
+size (clamped to 256..4096 x 160..2048), so the text keeps a constant
+on-screen size at any resolution, and uploaded through the scene renderer's
+overlay texture pool; the display pass blends it on top (see above).
 
 ## Render library (`render/`)
 

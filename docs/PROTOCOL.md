@@ -409,10 +409,11 @@ Update any subset of a display's properties.
 
 `statusOverlay` toggles the per-display status overlay: when true, the
 playback engine draws a small screen-aligned text block over that output
-(showing the system IP address, the display name and number, the physical
-output, the measured frame rate and resolution, and the per-frame CPU/GPU
-render time in ms). The overlay is display UI — it is not part of the scene
-and is not affected by the display's warp.
+(a "MediaMax" header, the system IP address, the display name and number,
+the physical output, the resolution, and a fps / CPU ms / GPU ms stats
+block showing the current value plus the rolling min/max/avg of each
+metric, and the total dropped video frames). The overlay is display UI —
+it is not part of the scene and is not affected by the display's warp.
 
 A geometry update reinitializes the playback engine's display for that
 record: the engine's window is moved/resized to the new geometry, the

@@ -47,6 +47,7 @@
 #include "mediamax/display/DisplayManager.h"
 #include "mediamax/media/MediaLibrary.h"
 #include "mediamax/net/ControlServer.h"
+#include "mediamax/playback/MetricStats.h"
 #include "mediamax/playback/PlaybackEngine.h"
 #include "mediamax/protocol/CommandServer.h"
 #include "mediamax/render/SceneRenderer.h"
@@ -193,6 +194,11 @@ private:
     // Exponential moving average of the measured frame period (renderFrame
     // cadence); 0 until the second frame.
     double m_FrameFps = 0.0;
+    // Rolling min/max/avg windows behind the status overlay's stats block
+    // (current + min/max/avg over the last ~10 s of samples each).
+    MetricStats m_FpsStats;
+    MetricStats m_CpuMsStats;
+    MetricStats m_GpuMsStats;
     // Total video frames dropped so far (high water, all layers; from the
     // media pump's FrameDropCounters). Shown in the status overlay and
     // reported in the status protocol result.

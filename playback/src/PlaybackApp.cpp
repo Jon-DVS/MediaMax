@@ -761,6 +761,7 @@ void PlaybackApp::renderFrame(const FrameSnapshot& snap)
         {
             const double inst = 1.0 / period;
             m_FrameFps = m_FrameFps == 0.0 ? inst : 0.9 * m_FrameFps + 0.1 * inst;
+            m_FpsStats.record(m_FrameFps);
         }
     }
     m_LastFrameTime = frameNow;
@@ -818,6 +819,7 @@ void PlaybackApp::renderFrame(const FrameSnapshot& snap)
     if (m_FrameQuery && device->pollTimerQuery(m_FrameQuery.Get()))
     {
         m_GpuFrameMs = device->getTimerQueryTime(m_FrameQuery.Get());
+        m_GpuMsStats.record(m_GpuFrameMs);
     }
 
     // 2. Acquire back buffers synchronously and start state tracking.
@@ -901,6 +903,7 @@ void PlaybackApp::renderFrame(const FrameSnapshot& snap)
     }
     m_CpuFrameMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - cpuStart)
                        .count();
+    m_CpuMsStats.record(m_CpuFrameMs);
     cmdList->close();
 
     // 4. Submit the render, then an empty submit per display that signals the
@@ -943,59 +946,95 @@ void PlaybackApp::updateWarpTexture(DisplaySurface& ds, const Display& display)
 
 void PlaybackApp::updateStatusOverlay(DisplaySurface& ds, const Display& display)
 {
-    // Canvas: 512 px wide; the height follows the display aspect so the
-    // display pass's stretch to the whole window scales the glyphs
-    // uniformly (no distortion). The text is left/top aligned within the
-    // canvas (see overlay::renderText).
-    constexpr std::uint32_t kOverlayWidth = 512;
-    constexpr std::uint32_t kOverlayMaxHeight = 512;
-    std::uint32_t ch = 128;
+    // Canvas: half the display's pixel size (clamped), so the text keeps a
+    // constant on-screen size at any display resolution - the display pass
+    // stretches the canvas over the whole window, so a proportional canvas
+    // stretches every pixel by ~2x (a fixed 512 px canvas used to stretch
+    // scale-3 glyphs to ~80 px on a 1080p window).
+    constexpr std::uint32_t kOverlayMinWidth = 256;
+    constexpr std::uint32_t kOverlayMaxWidth = 4096;
+    constexpr std::uint32_t kOverlayMinHeight = 160;
+    constexpr std::uint32_t kOverlayMaxHeight = 2048;
+    std::uint32_t cw = kOverlayMinWidth;
+    std::uint32_t ch = kOverlayMinHeight;
     if (ds.width > 0 && ds.height > 0)
     {
-        ch = static_cast<std::uint32_t>(
-            std::llround(static_cast<double>(kOverlayWidth) * ds.height / ds.width));
-        // At least four lines at scale 2 (64 px), at most a square canvas.
-        ch = std::min<std::uint32_t>(std::max<std::uint32_t>(ch, 96), kOverlayMaxHeight);
+        const std::uint32_t w = static_cast<std::uint32_t>(ds.width);
+        const std::uint32_t h = static_cast<std::uint32_t>(ds.height);
+        cw = std::min<std::uint32_t>(std::max<std::uint32_t>(w / 2u, kOverlayMinWidth), kOverlayMaxWidth);
+        ch = std::min<std::uint32_t>(std::max<std::uint32_t>(h / 2u, kOverlayMinHeight), kOverlayMaxHeight);
     }
-    // Six lines are 6 * (7 + 1) * scale px tall: 144 px at scale 3, 96 px
-    // at scale 2 - both fit the canvas minimum (96 px).
-    const int scale = (ch < 144) ? 2 : 3;
 
-    char line3[80];
-    char line4[80];
-    char line5[80];
-    std::snprintf(line3, sizeof(line3), "%.1f fps  %dx%d", m_FrameFps, ds.width, ds.height);
-    std::snprintf(line4, sizeof(line4), "frame %.2f ms  gpu %.2f ms", m_CpuFrameMs, m_GpuFrameMs);
-    std::snprintf(line5, sizeof(line5), "vid drop %llu",
+    // Stats block: a 3-char label, then now/min/max/avg right-aligned in
+    // 5-wide fields one space apart (monospace, so the columns line up;
+    // the rolling windows keep min/max/avg readable while "now" jitters).
+    char statsHeader[48];
+    char statsFps[48];
+    char statsCpu[48];
+    char statsGpu[48];
+    char lineRes[32];
+    char lineDrop[40];
+    std::snprintf(statsHeader, sizeof(statsHeader), "%4s%5s %5s %5s %5s", " ", "now", "min", "max", "avg");
+    std::snprintf(statsFps, sizeof(statsFps), "fps %5.1f %5.1f %5.1f %5.1f", m_FpsStats.current(),
+                  m_FpsStats.min(), m_FpsStats.max(), m_FpsStats.avg());
+    std::snprintf(statsCpu, sizeof(statsCpu), "cpu %5.1f %5.1f %5.1f %5.1f", m_CpuMsStats.current(),
+                  m_CpuMsStats.min(), m_CpuMsStats.max(), m_CpuMsStats.avg());
+    std::snprintf(statsGpu, sizeof(statsGpu), "gpu %5.1f %5.1f %5.1f %5.1f", m_GpuMsStats.current(),
+                  m_GpuMsStats.min(), m_GpuMsStats.max(), m_GpuMsStats.avg());
+    std::snprintf(lineRes, sizeof(lineRes), "%dx%d", ds.width, ds.height);
+    std::snprintf(lineDrop, sizeof(lineDrop), "vid drop %llu",
                   static_cast<unsigned long long>(m_DroppedVideoFrames));
 
-    std::string text;
-    text.reserve(256);
-    text += "System " + m_SystemIp + "\n";
-    text += "Display " + display.name + " (" + std::to_string(display.id) + ")\n";
-    text += (display.monitor.empty() ? "off-screen" : display.monitor) + "\n";
-    text += std::string(line3) + "\n";
-    text += std::string(line4) + "\n";
-    text += line5;
+    std::string body;
+    body.reserve(256);
+    body += "System " + m_SystemIp + "\n";
+    body += "Display " + display.name + " (" + std::to_string(display.id) + ")\n";
+    body += (display.monitor.empty() ? "off-screen" : display.monitor) + "\n";
+    body += std::string(lineRes) + "\n";
+    body += std::string(statsHeader) + "\n";
+    body += std::string(statsFps) + "\n";
+    body += std::string(statsCpu) + "\n";
+    body += std::string(statsGpu) + "\n";
+    body += lineDrop;
 
-    std::vector<std::uint8_t> glyphRgba;
-    std::uint32_t gw = 0, gh = 0;
+    // The "MediaMax" header renders at scale 2 above the scale-1 body, with
+    // a 4-px gap.
+    std::vector<std::uint8_t> headerRgba;
+    std::uint32_t hw = 0, hh = 0;
     std::string error;
-    if (!overlay::renderText(text, scale, glyphRgba, gw, gh, error) || gw == 0 || gh == 0)
+    if (!overlay::renderText("MediaMax", 2, headerRgba, hw, hh, error) || hw == 0 || hh == 0)
+    {
+        return;
+    }
+    std::vector<std::uint8_t> bodyRgba;
+    std::uint32_t bw = 0, bh = 0;
+    if (!overlay::renderText(body, 1, bodyRgba, bw, bh, error) || bw == 0 || bh == 0)
     {
         return;
     }
 
-    m_Scene.ensureOverlayTexture(display.id, kOverlayWidth, ch);
-    // Paste the tight text bitmap into a transparent canvas (the pool
-    // texture keeps one fixed size per display; the text length changes
-    // with the numbers, not the canvas).
-    std::vector<std::uint8_t> canvas(static_cast<size_t>(kOverlayWidth) * ch * 4, 0);
-    for (std::uint32_t y = 0; y < gh && y < ch; ++y)
+    m_Scene.ensureOverlayTexture(display.id, cw, ch);
+    // Paste the tight text bitmaps into a transparent canvas, top-left
+    // aligned and clipped to the canvas (a long display name or monitor may
+    // exceed the canvas width; the text length changes with the name, not
+    // the canvas).
+    std::vector<std::uint8_t> canvas(static_cast<size_t>(cw) * ch * 4, 0);
+    auto paste = [&](const std::vector<std::uint8_t>& rgba, std::uint32_t w, std::uint32_t h, std::uint32_t y0)
     {
-        std::copy_n(glyphRgba.data() + static_cast<size_t>(y) * gw * 4, gw * 4,
-                    canvas.data() + static_cast<size_t>(y) * kOverlayWidth * 4);
-    }
+        for (std::uint32_t y = 0; y < h; ++y)
+        {
+            const std::uint32_t ty = y0 + y;
+            if (ty >= ch)
+            {
+                break;
+            }
+            const std::uint32_t cols = std::min(w, cw);
+            std::copy_n(rgba.data() + static_cast<size_t>(y) * w * 4, static_cast<size_t>(cols) * 4,
+                        canvas.data() + static_cast<size_t>(ty) * cw * 4);
+        }
+    };
+    paste(headerRgba, hw, hh, 0);
+    paste(bodyRgba, bw, bh, hh + 4);
     m_Scene.updateOverlayTexture(display.id, canvas);
 }
 
