@@ -85,6 +85,16 @@ Full snapshot of the system.
 | `displays` | array of display objects (below) |
 | `scenes` | `[{"id","name","layers":<count>}]` |
 
+`time` and `timecode` are sampled when the poll is answered. A client that
+renders a continuous clock between polls (the control GUI's Playback tab)
+should extrapolate from the last poll while `state` is `"playing"`: convert
+the reported timecode to a frame index, add `round(elapsed s * frameRate)`,
+and format back - `timecodeToFrames` / `framesToTimecode` /
+`parseFrameRateString` (core `mediamax/time/Timecode.h`) do exactly this in
+string space, so the client never needs the show's exact rational frame
+rate. Freeze the extrapolation when no good poll has arrived for a couple
+of poll periods, so a dead connection does not keep the clock running.
+
 ### `system.set`
 
 Rename the system (reflected in `status`/`ping`).

@@ -1,8 +1,11 @@
 // Time and FrameRate: exact rational time math.
 
+#include <cmath>
+
 #include <doctest/doctest.h>
 
 #include "TestFixtures.h" // Time StringMaker
+#include "mediamax/time/Timecode.h"
 
 using namespace mediamax;
 
@@ -196,6 +199,93 @@ TEST_CASE("Time: fromSeconds microsecond precision boundary")
     const Time t = Time::fromSeconds(0.1);
     CHECK(t.toMicroseconds() == 100000);
     CHECK(t.toSeconds() == doctest::Approx(0.1).epsilon(1e-9));
+}
+
+TEST_CASE("Time: wire timecode round trip matches the engine for every standard rate")
+{
+    const FrameRate rates[] = {FrameRate::fps24(),  FrameRate::fps25(),  FrameRate::fps2997(),
+                               FrameRate::fps30(),  FrameRate::fps50(),  FrameRate::fps5994(),
+                               FrameRate::fps60()};
+    for (const auto& fps : rates)
+    {
+        const std::int64_t nominal = fps.nominalFramesPerSecond();
+        const std::int64_t probes[] = {0, 1, nominal - 1, nominal, nominal + 1,
+                                       nominal * 60 + 15,
+                                       nominal * 3600 + nominal * 60 + 2,
+                                       nominal * (3600 * 99 + 59 * 60 + 59) + (nominal - 1)};
+        for (const std::int64_t frames : probes)
+        {
+            const Time t = Time::fromFrames(frames, fps);
+            const std::string tc = t.toTimecode(fps);
+            CHECK_EQ(timecodeToFrames(tc, nominal), frames);
+            CHECK_EQ(framesToTimecode(frames, nominal), tc);
+        }
+    }
+}
+
+TEST_CASE("Time: wire timecode parsing rejects malformed strings")
+{
+    CHECK_EQ(timecodeToFrames("?", 30), -1);
+    CHECK_EQ(timecodeToFrames("", 30), -1);
+    CHECK_EQ(timecodeToFrames("00:00:00", 30), -1);
+    CHECK_EQ(timecodeToFrames("00:00:00:00:00", 30), -1);
+    CHECK_EQ(timecodeToFrames("00:00:00x00", 30), -1);
+    CHECK_EQ(timecodeToFrames("-00:00:00:00", 30), -1);
+    CHECK_EQ(timecodeToFrames("00:60:00:00", 30), -1);
+    CHECK_EQ(timecodeToFrames("00:00:60:00", 30), -1);
+    CHECK_EQ(timecodeToFrames("00:00:00:30", 30), -1); // ff must be < nominal
+    CHECK_EQ(timecodeToFrames("00:00:00:00", 0), -1);
+    CHECK_EQ(timecodeToFrames("00:00:00:00", -1), -1);
+    CHECK_EQ(framesToTimecode(-1, 30), std::string("-00:00:00:00"));
+    CHECK_EQ(framesToTimecode(0, 30), std::string("00:00:00:00"));
+    CHECK_EQ(framesToTimecode(30 * 3661, 30), std::string("01:01:01:00"));
+}
+
+TEST_CASE("Time: frame rate string parsing recovers the standard rates")
+{
+    const FrameRate rates[] = {FrameRate::fps24(),  FrameRate::fps25(),  FrameRate::fps2997(),
+                               FrameRate::fps30(),  FrameRate::fps50(),  FrameRate::fps5994(),
+                               FrameRate::fps60()};
+    for (const auto& fps : rates)
+    {
+        double parsed = 0.0;
+        std::int64_t nominal = 0;
+        CHECK(parseFrameRateString(fps.toString(), parsed, nominal));
+        CHECK_EQ(nominal, fps.nominalFramesPerSecond());
+        // The parsed double matches the exact rate within the string's
+        // 2-decimal resolution.
+        CHECK(parsed > fps.framesPerSecond() - 0.005);
+        CHECK(parsed < fps.framesPerSecond() + 0.005);
+    }
+}
+
+TEST_CASE("Time: frame rate string parsing rejects malformed rates")
+{
+    double parsed = 0.0;
+    std::int64_t nominal = 0;
+    CHECK_FALSE(parseFrameRateString("?", parsed, nominal));
+    CHECK_FALSE(parseFrameRateString("", parsed, nominal));
+    CHECK_FALSE(parseFrameRateString("0", parsed, nominal));
+    CHECK_FALSE(parseFrameRateString("-5", parsed, nominal));
+    CHECK_FALSE(parseFrameRateString("inf", parsed, nominal));
+}
+
+TEST_CASE("Time: the parsed frame rate is accurate enough for sub-poll extrapolation")
+{
+    // The control GUI re-anchors on the engine's timecode at most one poll
+    // period (500 ms) apart: the frame error from the parsed double rate
+    // over such a delta must stay a tiny fraction of a frame.
+    const FrameRate rates[] = {FrameRate::fps24(),  FrameRate::fps25(),  FrameRate::fps2997(),
+                               FrameRate::fps30(),  FrameRate::fps50(),  FrameRate::fps5994(),
+                               FrameRate::fps60()};
+    for (const auto& fps : rates)
+    {
+        double parsed = 0.0;
+        std::int64_t nominal = 0;
+        CHECK(parseFrameRateString(fps.toString(), parsed, nominal));
+        const double delta = 0.5; // one poll period
+        CHECK(std::fabs(delta * parsed - delta * fps.framesPerSecond()) < 1e-3);
+    }
 }
 
 } // TEST_SUITE("Time")

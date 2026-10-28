@@ -1,6 +1,7 @@
 #include "gui/ControlGui.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cfloat>
 #include <cmath>
 #include <cstdio>
@@ -18,6 +19,7 @@
 
 #include "gui/GuiCrash.h"
 #include "mediamax/net/ControlClient.h"
+#include "mediamax/time/Timecode.h"
 #include "mediamax/util/File.h"
 
 namespace mediamax::gui
@@ -39,6 +41,11 @@ constexpr size_t kLogLineLimit = 400; // max characters kept per console line
 // engine's state; for this long the snapshot's position is not trusted as a
 // resync source for that layer (must exceed one 500 ms poll period).
 constexpr auto kLayerPosSettle = std::chrono::seconds(2);
+// The Playback tab extrapolates the timecode between 500 ms status polls;
+// once the last good poll is older than this (4 missed polls) the poll is
+// considered stale and the displayed clock is frozen instead of running on
+// a dead connection.
+constexpr double kStalePollSeconds = 2.0;
 
 const ImVec4 kOkColor = {0.35f, 0.9f, 0.4f, 1.0f};
 const ImVec4 kBadColor = {0.9f, 0.35f, 0.35f, 1.0f};
@@ -1033,6 +1040,41 @@ void ControlGuiApp::renderTransportBlock(const SystemConnection::Snapshot& snap)
     const std::string frameRate = st.value("frameRate", "?");
     const Id sceneId = static_cast<Id>(st.value("scene", 0u));
 
+    // Smooth timecode: the poll thread only refreshes the snapshot every
+    // 500 ms, but the clock should advance every UI frame. While the engine
+    // is playing, the reported time and timecode are extrapolated forward
+    // with the UI's own wall clock, anchored on the engine's last reported
+    // timecode (see mediamax/time/Timecode.h) so the frame field stays
+    // exact. The extrapolation freezes once the last good poll is older
+    // than kStalePollSeconds, so a dead connection cannot keep the clock
+    // running; when the engine is not playing the clock shows the reported
+    // values unchanged.
+    double shownTime = time;
+    std::string shownTimecode = timecode;
+    if (state == "playing")
+    {
+        double fps = 0.0;
+        std::int64_t nominalFps = 0;
+        if (parseFrameRateString(frameRate, fps, nominalFps))
+        {
+            const double age = std::chrono::duration<double>(
+                                   std::chrono::steady_clock::now().time_since_epoch())
+                                   .count() -
+                               snap.lastUpdate;
+            if (age >= 0.0 && age < kStalePollSeconds)
+            {
+                const std::int64_t baseFrames = timecodeToFrames(timecode, nominalFps);
+                if (baseFrames >= 0)
+                {
+                    shownTime = time + age;
+                    shownTimecode =
+                        framesToTimecode(baseFrames + static_cast<std::int64_t>(std::llround(age * fps)),
+                                         nominalFps);
+                }
+            }
+        }
+    }
+
     // Current scene: the id plus its name (looked up from scene.list), so
     // the operator sees what is playing, not just a number. With several
     // scenes active at once this is the engine's primary scene; the full
@@ -1060,17 +1102,17 @@ void ControlGuiApp::renderTransportBlock(const SystemConnection::Snapshot& snap)
         }
     }
 
-    ImGui::Text("State: %s     %s     %s fps     %s", state.c_str(), timecode.c_str(),
+    ImGui::Text("State: %s     %s     %s fps     %s", state.c_str(), shownTimecode.c_str(),
                 frameRate.c_str(), sceneLabel.c_str());
     if (duration < 0.0)
     {
         ImGui::SameLine();
-        ImGui::TextDisabled("%.2f s / unlimited", time);
+        ImGui::TextDisabled("%.2f s / unlimited", shownTime);
     }
     else
     {
         ImGui::SameLine();
-        ImGui::TextDisabled("%.2f / %.2f s", time, duration);
+        ImGui::TextDisabled("%.2f / %.2f s", shownTime, duration);
     }
 
     if (ImGui::Button("Play", ImVec2(64, 0)))
@@ -1095,7 +1137,7 @@ void ControlGuiApp::renderTransportBlock(const SystemConnection::Snapshot& snap)
     {
         if (!m_SeekHeld)
         {
-            m_Seek = time; // follow the live time while not dragging
+            m_Seek = shownTime; // follow the live time while not dragging
         }
         float seek = static_cast<float>(m_Seek);
         if (ImGui::SliderFloat("t##seek", &seek, 0.0f, static_cast<float>(duration), "%.2f s"))

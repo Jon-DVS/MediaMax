@@ -47,7 +47,12 @@ exactly 10000/29.97 s; doubles or fixed-point accumulate error that breaks
 cue triggering, timecode and lip-sync over long shows. `FrameRate` is a
 reduced rational too. `Time::fromSeconds` (rounds to the nearest
 microsecond) is the single documented precision boundary for external
-values; all internal math stays exact.
+values; all internal math stays exact. `Timecode.h` holds the wire-format
+companion: it converts the protocol's "HH:MM:SS:FF" and frame-rate strings
+to/from absolute frame indexes at the *nominal* whole frame rate, which is
+all a client needs to advance a polled timecode between polls (the control
+GUI's smooth Playback-tab clock) without reconstructing the exact rational
+rate.
 
 ### `math/` — geometry
 
