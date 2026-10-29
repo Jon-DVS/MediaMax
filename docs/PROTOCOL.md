@@ -215,6 +215,26 @@ bits/second.
 - Params: `id` (int, required).
 - Result: `{"id":<id>}`
 
+#### `media.thumbnail`
+
+A preview image of a loaded media asset: the engine decodes a
+representative frame (the first frame for images; ~10% into the clip, capped
+at 5 s, for video), aspect-fits it into the request box without upscaling,
+and returns it as base64-encoded RGBA8 (top-left origin, 4 bytes/pixel).
+
+- Params: `id` (int, required — a loaded media id), `width` (int, optional,
+  default 320, clamped to 16..640), `height` (int, optional, default 180,
+  clamped to 16..360).
+- Result: `{"id":<id>,"width":<w>,"height":<h>,"data":"<base64 rgba>"}`
+  where `width`/`height` are the actual (aspect-fit) dimensions.
+- The decode runs outside the engine's state lock (a 4K seek + decode must
+  not freeze the frame loop), on a fresh source instance — the library's
+  own instance is untouched.
+- Fails when the id is unknown, the media has no video content, or the
+  system was built without a source factory (no FFmpeg).
+- The control GUI uses this for the show view's layer previews; at the
+  default size the payload is ~310 KB, well under the 8 MB line limit.
+
 ### Playback
 
 #### `playback.play`
@@ -467,6 +487,54 @@ node's target position and is C1 continuous between them (boundary nodes are
 clamped, keeping the surface anchored to the grid edges). The display object
 reports the current mode (and grid) in its `warp` field, so clients can
 restore their warp editor state from `display.list` / `status`.
+
+### Frame
+
+#### `frame.state`
+
+The resolved, per-layer state of the frame the engine is currently (or
+would) render: the display wall plus every visible layer with its content
+footprint in **output space** (pixels, origin top-left, y down). This is the
+data the control GUI's 2D show view draws from — one command gives a client
+everything it needs to picture the output without decoding any media.
+
+- Params: none.
+- Result:
+
+```json
+{"sceneSize":{"width":1920,"height":1080},
+ "displays":[{"id":1,"name":"Display 1","x":0,"y":0,
+              "width":1920,"height":1080,"enabled":true}],
+ "layers":[{"id":11,"name":"clouds","content":"video",
+            "corners":[[0,0],[1920,0],[1920,1080],[0,1080]],
+            "opacity":1.0,"zIndex":0,"mediaId":2},
+           {"id":10,"name":"red","content":"color",
+            "color":[1,0,0,1],
+            "corners":[[0,0],[1920,0],[1920,1080],[0,1080]],
+            "opacity":0.5,"zIndex":1}]}
+```
+
+- `sceneSize` is the output bounds (the union of the enabled displays) —
+  what the playback engine renders into.
+- `displays` is the wall exactly as `status` reports it (geometry plus the
+  `enabled` flag), so the view can draw the full wall including disabled
+  panels.
+- `layers` lists only what the frame shows: hidden layers and layers with
+  zero opacity are filtered, and media layers whose asset is gone from the
+  library (or has no video content — audio-only) are omitted.
+- A layer's `corners` are its **content footprint** transformed to output
+  space (the engine's effective transform applied), as four `[x, y]` points
+  clockwise from the top-left — the client draws a single quad from them.
+  Color layers fill the output bounds; media layers are placed at their
+  native media size (width x height from the metadata), the same convention
+  the playback renderer uses, so a 1920x1080 clip on a 1920x1080 wall
+  reports the full-screen quad.
+- `content` is `"color"`, `"image"` or `"video"` (color layers carry
+  `color` [r,g,b,a]; media layers carry `mediaId` instead).
+- Layers are in draw order (zIndex ascending, stable for ties) — the same
+  order the renderer composites them.
+- The command is read-only and cheap (no decode); clients may poll it at
+  high frequency while a preview is on screen (the GUI polls at 10 Hz).
 
 ## Examples
 

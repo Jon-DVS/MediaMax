@@ -608,7 +608,11 @@ bool GuiVulkan::beginFrame()
     {
         return false;
     }
+    return true;
+}
 
+void GuiVulkan::beginRenderPass()
+{
     VkRenderPassBeginInfo passInfo{};
     passInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
     passInfo.renderPass = m_RenderPass;
@@ -617,7 +621,6 @@ bool GuiVulkan::beginFrame()
     passInfo.clearValueCount = 1;
     passInfo.pClearValues = &kClearValue;
     vkCmdBeginRenderPass(m_CommandBuffer, &passInfo, VK_SUBPASS_CONTENTS_INLINE);
-    return true;
 }
 
 void GuiVulkan::endFrame(VkResult& presentResult)

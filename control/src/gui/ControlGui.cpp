@@ -5,7 +5,9 @@
 #include <cfloat>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
+#include <functional>
 #include <utility>
 
 #include <imgui.h>
@@ -33,14 +35,55 @@ namespace
 constexpr const char* kBlendModes[] = {"normal", "add", "subtract", "multiply", "screen"};
 constexpr int kBlendModeCount = 5;
 
+// A minimal 24-bit BMP (top half red, bottom half blue) for the live
+// self-test's media.thumbnail check: it exercises the engine's real image
+// decode path (the "mediamax:testpattern:" sources exist only in the
+// engine's own --self-test mode).
+bool writeThumbnailTestBmp(const std::string& path)
+{
+    constexpr int width = 320;
+    constexpr int height = 180;
+    const int rowPadded = ((width * 3) + 3) & ~3; // rows padded to 4 bytes
+    const std::size_t dataSize = static_cast<std::size_t>(rowPadded) * height;
+    std::string file;
+    file.resize(54 + dataSize, '\0');
+    auto putU32 = [&file](std::size_t at, std::uint32_t v) {
+        std::memcpy(file.data() + at, &v, 4);
+    };
+    auto putU16 = [&file](std::size_t at, std::uint16_t v) {
+        std::memcpy(file.data() + at, &v, 2);
+    };
+    file[0] = 'B';
+    file[1] = 'M';
+    putU32(2, static_cast<std::uint32_t>(file.size()));
+    putU32(10, 54); // offset of the pixel data
+    putU32(14, 40); // BITMAPINFOHEADER
+    putU32(18, static_cast<std::uint32_t>(width));
+    putU32(22, static_cast<std::uint32_t>(height)); // positive = bottom-up rows
+    putU16(26, 1);                                  // planes
+    putU16(28, 24);                                 // bits per pixel
+    putU32(34, static_cast<std::uint32_t>(dataSize)); // BI_RGB (no compression)
+    auto* pixels = file.data() + 54;
+    for (int y = 0; y < height; ++y)
+    {
+        // Bottom-up storage: the first stored row is the bottom of the
+        // image, so the red half ends up on top when displayed.
+        const bool redHalf = (height - 1 - y) * 2 >= height;
+        auto* row = pixels + static_cast<std::size_t>(y) * rowPadded;
+        for (int x = 0; x < width; ++x)
+        {
+            row[static_cast<std::size_t>(x) * 3 + 0] = redHalf ? 0 : 128;  // B
+            row[static_cast<std::size_t>(x) * 3 + 1] = redHalf ? 0 : 0;    // G
+            row[static_cast<std::size_t>(x) * 3 + 2] = redHalf ? 200 : 0;  // R
+        }
+    }
+    return writeBinaryFile(path, file.data(), file.size());
+}
+
 constexpr const char* kInterpolations[] = {"linear", "step"};
 constexpr int kInterpolationCount = 2;
 
 constexpr size_t kLogLineLimit = 400; // max characters kept per console line
-// After the UI sends a layer's position, the polled snapshot lags the
-// engine's state; for this long the snapshot's position is not trusted as a
-// resync source for that layer (must exceed one 500 ms poll period).
-constexpr auto kLayerPosSettle = std::chrono::seconds(2);
 // The Playback tab extrapolates the timecode between 500 ms status polls;
 // once the last good poll is older than this (4 missed polls) the poll is
 // considered stale and the displayed clock is frozen instead of running on
@@ -193,6 +236,12 @@ void ControlGuiApp::frame()
         m_LastActive = m_Active;
         m_HaveNameEdit = false;
         m_SeekHeld = false;
+        // The show view's camera is fitted to the previous system's wall:
+        // refit (the next renderShowViewWindow sees a new display
+        // signature), and clear the fitted signature so even an identical
+        // wall on the new system refits cleanly.
+        m_ShowCam.fitted = false;
+        m_ShowFittedSignature.clear();
     }
     // Invisible host for the modal dialogs (see kModalHostName). It is Begun
     // before the menu bar so the popup ids exist by the time a menu item can
@@ -220,11 +269,19 @@ void ControlGuiApp::frame()
     renderDockspace();
     renderSystemsWindow();
     renderDisplaysWindow();
+    renderShowViewWindow();
     renderPlaybackWindow();
     renderShowEditorWindow();
     renderConsoleWindow();
     renderModals();
     ImGui::End();
+    // The show view wants live data (frame.state at 10 Hz) only while it is
+    // visible; every other window is fine with the 500 ms status cadence.
+    for (int i = 0; i < static_cast<int>(m_Systems.size()); ++i)
+    {
+        m_Systems[static_cast<size_t>(i)]->setLivePoll(
+            m_ShowViewVisible && i == m_Active);
+    }
     // The Open / Save As file dialogs own their windows; render them
     // top-level, outside the modal host. No-op while none is open.
     renderFileDialogs();
@@ -340,44 +397,6 @@ bool ControlGuiApp::sendActive(const std::string& method, const json& params, st
         *outResult = std::move(result);
     }
     return true;
-}
-
-bool ControlGuiApp::sendToAllConnected(const std::string& method, const json& params, std::string& error)
-{
-    std::vector<SystemConnection*> targets;
-    for (auto& system : m_Systems)
-    {
-        if (system->pollConnected())
-        {
-            targets.push_back(system.get());
-        }
-    }
-    log("> " + method + (params.empty() ? "" : " " + params.dump()) +
-        " -> " + std::to_string(targets.size()) + " connected");
-    if (targets.empty())
-    {
-        return true; // nothing connected: nothing to apply
-    }
-    bool allOk = true;
-    for (SystemConnection* target : targets)
-    {
-        json result;
-        std::string sendError;
-        if (target->send(method, params, result, sendError))
-        {
-            log("  <= " + target->name() + " ok");
-        }
-        else
-        {
-            log("  <= " + target->name() + " failed: " + sendError);
-            if (error.empty())
-            {
-                error = target->name() + ": " + sendError;
-            }
-            allOk = false;
-        }
-    }
-    return allOk;
 }
 
 void ControlGuiApp::consoleSubmit()
@@ -611,16 +630,21 @@ void ControlGuiApp::renderDockspace()
         ImGui::DockBuilderSplitNode(center, ImGuiDir_Right, 0.28f, &right, &center);
         ImGuiID bottom = 0;
         ImGui::DockBuilderSplitNode(center, ImGuiDir_Down, 0.30f, &bottom, &center);
+        // The center (above the console) splits vertically: the 2D show
+        // view on top, the transport + scenes playback pane below.
+        ImGuiID centerBottom = 0;
+        ImGui::DockBuilderSplitNode(center, ImGuiDir_Down, 0.42f, &centerBottom, &center);
 
-        // The left column holds the system list (top) and the cross-system
-        // display list (bottom).
+        // The left column holds the system list (top) and the
+        // displays/media window (bottom).
         ImGuiID leftBottom = 0;
         ImGui::DockBuilderSplitNode(left, ImGuiDir_Down, 0.5f, &leftBottom, &left);
 
         ImGui::DockBuilderDockWindow("Systems", left);
         ImGui::DockBuilderDockWindow("Displays", leftBottom);
+        ImGui::DockBuilderDockWindow("Show view", center);
+        ImGui::DockBuilderDockWindow("Playback", centerBottom);
         ImGui::DockBuilderDockWindow("Show Editor", right);
-        ImGui::DockBuilderDockWindow("Playback", center);
         ImGui::DockBuilderDockWindow("Console", bottom);
         // Finish with the root ID (the one given to DockBuilderAddNode);
         // DockSpace() below must receive the same root every frame.
@@ -805,7 +829,7 @@ void ControlGuiApp::renderSystemsWindow()
     // Begin() may return false (collapsed/fully clipped window) but the
     // window is already on the stack: a matching End() is still required
     // (ImGui's Begin/End are asymmetric, unlike BeginPopup/EndPopup etc.).
-    if (!ImGui::Begin("Systems"))
+    if (!ImGui::Begin("Systems", nullptr, ImGuiWindowFlags_HorizontalScrollbar))
     {
         ImGui::End();
         return;
@@ -948,69 +972,38 @@ void ControlGuiApp::renderSystemsWindow()
     ImGui::End();
 }
 
-// --- displays window (cross-system) ---------------------------------------------------
+// --- displays window (active system: displays + media in tabs) -------------------------
 
 void ControlGuiApp::renderDisplaysWindow()
 {
     // Begin() may return false; End() must still be called (see above).
-    if (!ImGui::Begin("Displays"))
+    if (!ImGui::Begin("Displays", nullptr, ImGuiWindowFlags_HorizontalScrollbar))
     {
         ImGui::End();
         return;
     }
-    // Every display of every online system, with the system it is linked to
-    // and the physical output its window is on (issue 15). A display's
-    // settings dialog (Edit...) can relink it to another system (issue 14)
-    // and rename it.
-    int shown = 0;
-    if (ImGui::BeginTable("alldisplays", 8,
-                          ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_BordersOuter))
+    SystemConnection* active = activeConnection();
+    if (!active || !active->snapshot().haveStatus)
     {
-        ImGui::TableSetupColumn("system");
-        ImGui::TableSetupColumn("output");
-        ImGui::TableSetupColumn("display");
-        ImGui::TableSetupColumn("##id", ImGuiTableColumnFlags_WidthFixed, 32.0f);
-        ImGui::TableSetupColumn("x", ImGuiTableColumnFlags_WidthFixed, 52.0f);
-        ImGui::TableSetupColumn("y", ImGuiTableColumnFlags_WidthFixed, 52.0f);
-        ImGui::TableSetupColumn("w", ImGuiTableColumnFlags_WidthFixed, 52.0f);
-        ImGui::TableSetupColumn("h", ImGuiTableColumnFlags_WidthFixed, 52.0f);
-        for (size_t i = 0; i < m_Systems.size(); ++i)
-        {
-            const SystemConnection::Snapshot snap = m_Systems[i]->snapshot();
-            if (!snap.haveStatus || !snap.status.contains("displays") ||
-                !snap.status["displays"].is_array())
-            {
-                continue;
-            }
-            for (const auto& d : snap.status["displays"])
-            {
-                const std::string name = d.value("name", "display");
-                const std::string output = d.value("monitor", "");
-                ImGui::TableNextRow();
-                ImGui::TableNextColumn();
-                ImGui::TextUnformatted(m_Systems[i]->name().c_str());
-                ImGui::TableNextColumn();
-                ImGui::TextUnformatted(output.empty() ? "off-screen" : output.c_str());
-                ImGui::TableNextColumn();
-                ImGui::TextUnformatted(name.c_str());
-                ImGui::TableNextColumn();
-                ImGui::Text("%u", static_cast<unsigned>(d.value("id", 0u)));
-                ImGui::TableNextColumn();
-                ImGui::Text("%d", static_cast<int>(d.value("x", 0)));
-                ImGui::TableNextColumn();
-                ImGui::Text("%d", static_cast<int>(d.value("y", 0)));
-                ImGui::TableNextColumn();
-                ImGui::Text("%d", static_cast<int>(d.value("width", 0)));
-                ImGui::TableNextColumn();
-                ImGui::Text("%d", static_cast<int>(d.value("height", 0)));
-                ++shown;
-            }
-        }
-        ImGui::EndTable();
+        ImGui::TextDisabled(active ? "Waiting for status..."
+                                   : "Select a system (left) and make sure it is online.");
+        ImGui::End();
+        return;
     }
-    if (shown == 0)
+    const auto snap = active->snapshot();
+    if (ImGui::BeginTabBar("##displaystab"))
     {
-        ImGui::TextDisabled("(no displays on any online system)");
+        if (ImGui::BeginTabItem("Displays"))
+        {
+            renderDisplaysBlock(snap);
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("Media"))
+        {
+            renderMediaBlock(snap);
+            ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
     }
     ImGui::End();
 }
@@ -1020,7 +1013,7 @@ void ControlGuiApp::renderDisplaysWindow()
 void ControlGuiApp::renderPlaybackWindow()
 {
     // Begin() may return false; End() must still be called (see above).
-    if (!ImGui::Begin("Playback"))
+    if (!ImGui::Begin("Playback", nullptr, ImGuiWindowFlags_HorizontalScrollbar))
     {
         ImGui::End();
         return;
@@ -1050,12 +1043,6 @@ void ControlGuiApp::renderPlaybackWindow()
     renderTransportBlock(snap);
     ImGui::Separator();
     renderScenesBlock(snap);
-    ImGui::Separator();
-    renderLayersBlock(snap);
-    ImGui::Separator();
-    renderDisplaysBlock(snap);
-    ImGui::Separator();
-    renderMediaBlock(snap);
     ImGui::End();
 }
 
@@ -1259,122 +1246,6 @@ void ControlGuiApp::renderScenesBlock(const SystemConnection::Snapshot& snap)
     {
         std::string error;
         sendActive("scene.clear", json::object(), error);
-    }
-}
-
-void ControlGuiApp::renderLayersBlock(const SystemConnection::Snapshot& snap)
-{
-    ImGui::TextUnformatted("Layers (live overrides, active scene)");
-    // The values shown are the active system's; a change below is applied to
-    // every connected system (issue 13).
-    ImGui::TextDisabled("changes apply to every connected system");
-    const json* activeScene = nullptr;
-    if (snap.scenes.contains("scenes") && snap.scenes["scenes"].is_array())
-    {
-        for (const auto& s : snap.scenes["scenes"])
-        {
-            if (s.value("active", false))
-            {
-                activeScene = &s;
-                break;
-            }
-        }
-    }
-    if (!activeScene || !activeScene->contains("layers"))
-    {
-        ImGui::TextDisabled("(no active scene)");
-        return;
-    }
-    for (const auto& layer : (*activeScene)["layers"])
-    {
-        const Id layerId = static_cast<Id>(layer.value("id", 0u));
-        const std::string name = layer.value("name", "?");
-        const bool overridden = layer.value("override", false);
-        ImGui::PushID(static_cast<int>(layerId));
-        ImGui::Text("Layer %u - %s", layerId, name.c_str());
-        if (overridden)
-        {
-            ImGui::SameLine();
-            ImGui::TextColored(kWarnColor, "manual");
-        }
-        LayerLive& lv = m_LayerLive[layerId];
-        if (ImGui::SliderFloat("Opacity##op", &lv.opacity, 0.0f, 1.0f, "%.2f"))
-        {
-            std::string error;
-            sendToAllConnected("layer.set", {{"layer", layerId}, {"opacity", lv.opacity}}, error);
-        }
-        ImGui::SameLine();
-        if (ImGui::Checkbox("Visible##vis", &lv.visible))
-        {
-            std::string error;
-            sendToAllConnected("layer.set", {{"layer", layerId}, {"visible", lv.visible}}, error);
-        }
-        ImGui::SameLine();
-        if (ImGui::Combo("Blend##blend", &lv.blend, kBlendModes, kBlendModeCount))
-        {
-            std::string error;
-            sendToAllConnected("layer.set", {{"layer", layerId}, {"blend", kBlendModes[lv.blend]}}, error);
-        }
-        ImGui::SameLine();
-        // Enabled only when the layer actually has overrides to clear.
-        ImGui::BeginDisabled(!overridden);
-        if (ImGui::Button("Clear##clr"))
-        {
-            std::string error;
-            if (sendToAllConnected("layer.clear", {{"layer", layerId}}, error))
-            {
-                // The engine's position is valid again (snapshot catches up
-                // at the next poll).
-                m_LayerPosSentAt.erase(layerId);
-            }
-        }
-        ImGui::EndDisabled();
-        // The position is sent on commit (Enter or focus loss), both values
-        // together (the engine applies x/y as a pair). No extra button:
-        // committing a field is the send.
-        auto commitPosition = [&lv, &layerId, this]()
-        {
-            std::string error;
-            if (sendToAllConnected("layer.set", {{"layer", layerId}, {"x", lv.x}, {"y", lv.y}}, error))
-            {
-                m_LayerPosSentAt[layerId] = std::chrono::steady_clock::now();
-            }
-        };
-        ImGui::InputFloat("x##lx", &lv.x, 10.0f, 50.0f);
-        bool xBusy = ImGui::IsItemActive();
-        if (ImGui::IsItemDeactivatedAfterEdit())
-        {
-            commitPosition();
-            xBusy = true; // also busy for this frame's resync
-        }
-        ImGui::SameLine();
-        ImGui::InputFloat("y##ly", &lv.y, 10.0f, 50.0f);
-        const bool yBusy = ImGui::IsItemActive() || ImGui::IsItemDeactivatedAfterEdit();
-        if (ImGui::IsItemDeactivatedAfterEdit())
-        {
-            commitPosition();
-        }
-        // Resync from the engine's control position (scene.list reports it
-        // for the active scene): the authored value with cues and manual
-        // overrides applied, without keyframe-track animation - stable while
-        // a track plays. Never resync while a field is being edited, and
-        // not while a just-sent value is still catching up in the polled
-        // snapshot (which lags by up to one poll period).
-        if (!xBusy && !yBusy && layer.contains("x") && layer.contains("y"))
-        {
-            const float sx = layer["x"].get<float>();
-            const float sy = layer["y"].get<float>();
-            const auto sent = m_LayerPosSentAt.find(layerId);
-            const bool settling =
-                sent != m_LayerPosSentAt.end() &&
-                std::chrono::steady_clock::now() - sent->second < kLayerPosSettle;
-            if (!settling && (lv.x != sx || lv.y != sy))
-            {
-                lv.x = sx;
-                lv.y = sy;
-            }
-        }
-        ImGui::PopID();
     }
 }
 
@@ -1605,8 +1476,6 @@ void ControlGuiApp::openWarpEdit(const json& display, SystemConnection* target)
 
 void ControlGuiApp::renderDisplaysBlock(const SystemConnection::Snapshot& snap)
 {
-    ImGui::TextUnformatted("Displays");
-
     // Multi-display: add a panel to this system (tiled right of the current
     // wall at 1920x1080 by the server's defaults). Shown even when the
     // system has no displays left, so it is possible to recover.
@@ -1728,7 +1597,6 @@ void ControlGuiApp::renderDisplaysBlock(const SystemConnection::Snapshot& snap)
 
 void ControlGuiApp::renderMediaBlock(const SystemConnection::Snapshot& snap)
 {
-    ImGui::TextUnformatted("Media (engine library)");
     if (snap.status.contains("media"))
     {
         if (ImGui::BeginTable("media", 7,
@@ -1800,12 +1668,309 @@ void ControlGuiApp::renderMediaBlock(const SystemConnection::Snapshot& snap)
     }
 }
 
+// --- show view window (2D render) -----------------------------------------------------
+
+void ControlGuiApp::initShowView(VkDevice device, VkPhysicalDevice physicalDevice)
+{
+    std::string error;
+    if (!m_ShowTexPool.init(device, physicalDevice, error))
+    {
+        log("show view: " + error);
+    }
+}
+
+void ControlGuiApp::shutdownShowView()
+{
+    m_ShowTexPool.shutdown();
+}
+
+void ControlGuiApp::flushShowTextureUploads(VkCommandBuffer cmd)
+{
+    m_ShowTexPool.flushUploads(cmd);
+}
+
+void ControlGuiApp::fitShowViewCamera(const ImVec2& childSize, const std::string& signature)
+{
+    // Fit the union of ALL displays (disabled ones included - the operator
+    // wants to see the whole wall) with ~10% margin, centered. An unknown
+    // wall shows a default 1920x1080 box so the view is never empty.
+    float minX = 0.f, minY = 0.f, maxX = 0.f, maxY = 0.f;
+    bool have = false;
+    for (const auto& d : m_ShowScene.displays)
+    {
+        if (d.w <= 0.f || d.h <= 0.f)
+        {
+            continue;
+        }
+        if (!have)
+        {
+            minX = d.x;
+            minY = d.y;
+            maxX = d.x + d.w;
+            maxY = d.y + d.h;
+            have = true;
+        }
+        else
+        {
+            minX = std::min(minX, d.x);
+            minY = std::min(minY, d.y);
+            maxX = std::max(maxX, d.x + d.w);
+            maxY = std::max(maxY, d.y + d.h);
+        }
+    }
+    const float spanX = have ? maxX - minX : 1920.f;
+    const float spanY = have ? maxY - minY : 1080.f;
+    const float centerX = have ? (minX + maxX) * 0.5f : 960.f;
+    const float centerY = have ? (minY + maxY) * 0.5f : 540.f;
+    const float fitW = spanX * 1.2f; // span + 10% margin per side
+    const float fitH = spanY * 1.2f;
+    if (childSize.x <= 0.f || childSize.y <= 0.f || fitW <= 0.f || fitH <= 0.f)
+    {
+        m_ShowCam.scale = 0.25f;
+        m_ShowCam.offsetX = 0.f;
+        m_ShowCam.offsetY = 0.f;
+    }
+    else
+    {
+        m_ShowCam.scale = std::min(childSize.x / fitW, childSize.y / fitH);
+        m_ShowCam.offsetX = childSize.x * 0.5f - centerX * m_ShowCam.scale;
+        m_ShowCam.offsetY = childSize.y * 0.5f - centerY * m_ShowCam.scale;
+    }
+    m_ShowCam.fitted = true;
+    m_ShowFittedSignature = signature;
+}
+
+void ControlGuiApp::renderShowViewWindow()
+{
+    // The scene fills the window content edge to edge (NoBackground); the
+    // "Reset view" button is the only ImGui widget over it.
+    const bool visible =
+        ImGui::Begin("Show view", nullptr, ImGuiWindowFlags_NoBackground);
+    m_ShowViewVisible = false;
+    if (!visible)
+    {
+        ImGui::End();
+        return;
+    }
+    m_ShowViewVisible = true;
+
+    // The "Reset view" overlay's screen rect (drawn after the child, but
+    // computed now so the camera input below can ignore clicks on it).
+    const ImVec2 winSize = ImGui::GetWindowSize();
+    const float resetWidth =
+        ImGui::CalcTextSize("Reset view").x + ImGui::GetStyle().FramePadding.x * 2.f;
+    const ImVec2 contentOrigin = ImGui::GetCursorScreenPos();
+    const ImVec2 resetMin(contentOrigin.x + winSize.x - resetWidth - 8.f,
+                          contentOrigin.y + 8.f);
+    const ImVec2 resetMax(resetMin.x + resetWidth, resetMin.y + ImGui::GetFrameHeight());
+
+    SystemConnection* active = activeConnection();
+    const SystemConnection::Snapshot snap =
+        active ? active->snapshot() : SystemConnection::Snapshot{};
+    m_ShowScene = buildShowViewScene(snap);
+
+    if (!ImGui::BeginChild("##showscene", ImVec2(0.0f, 0.0f)))
+    {
+        ImGui::EndChild();
+        ImGui::End();
+        return;
+    }
+    const ImVec2 childMin = ImGui::GetCursorScreenPos();
+    const ImVec2 childSize = ImGui::GetContentRegionAvail();
+    m_ShowViewRectMin = childMin;
+    m_ShowViewRectMax = ImVec2(childMin.x + childSize.x, childMin.y + childSize.y);
+
+    // Request the thumbnails of the media layers (the poll thread fetches
+    // them; the request is idempotent with backoff inside the connection)
+    // and drop the textures of media that left the scene.
+    std::vector<std::uint32_t> liveMedia;
+    if (active && active->pollConnected() && !m_ShowScene.layers.empty())
+    {
+        std::map<std::uint32_t, std::string> mediaPaths;
+        if (snap.status.contains("media") && snap.status["media"].is_array())
+        {
+            for (const auto& m : snap.status["media"])
+            {
+                mediaPaths[static_cast<std::uint32_t>(m.value("id", 0u))] =
+                    m.value("path", std::string());
+            }
+        }
+        for (const auto& layer : m_ShowScene.layers)
+        {
+            if (layer.mediaId == 0)
+            {
+                continue;
+            }
+            liveMedia.push_back(layer.mediaId);
+            const auto it = mediaPaths.find(layer.mediaId);
+            if (it != mediaPaths.end())
+            {
+                active->requestThumbnail(layer.mediaId, it->second);
+            }
+        }
+    }
+    if (m_ShowTexPool.ready())
+    {
+        m_ShowTexPool.evictAllExcept(liveMedia);
+    }
+
+    // Camera: fit on the first frame of a system, and again whenever the
+    // display wall changes (a display moved or the system switched). User
+    // zoom/pan below is transient: it survives until the next such change.
+    const std::string signature = m_ShowScene.displaySignature();
+    if (!m_ShowCam.fitted || signature != m_ShowFittedSignature)
+    {
+        fitShowViewCamera(childSize, signature);
+    }
+
+    // Input: wheel-zoom around the cursor, left-drag pan (the child owns
+    // none of these otherwise). The Reset button's rect is excluded so a
+    // click on it does not also start a pan.
+    if (m_ShowCam.scale > 0.0f && ImGui::IsWindowHovered() &&
+        !ImGui::IsMouseHoveringRect(resetMin, resetMax))
+    {
+        const ImGuiIO& io = ImGui::GetIO();
+        if (io.MouseWheel != 0.0f)
+        {
+            const ImVec2 mouse = ImGui::GetMousePos();
+            const float wx = (mouse.x - childMin.x - m_ShowCam.offsetX) / m_ShowCam.scale;
+            const float wy = (mouse.y - childMin.y - m_ShowCam.offsetY) / m_ShowCam.scale;
+            m_ShowCam.scale =
+                ImClamp(m_ShowCam.scale * std::pow(1.15f, io.MouseWheel), 0.01f, 32.0f);
+            m_ShowCam.offsetX = mouse.x - childMin.x - wx * m_ShowCam.scale;
+            m_ShowCam.offsetY = mouse.y - childMin.y - wy * m_ShowCam.scale;
+        }
+        if (ImGui::IsMouseDragging(ImGuiMouseButton_Left))
+        {
+            m_ShowCam.offsetX += io.MouseDelta.x;
+            m_ShowCam.offsetY += io.MouseDelta.y;
+        }
+    }
+
+    // Draw the scene on the child's draw list (auto-clipped to the child
+    // rect; no manual scissor needed). World = output-space pixels (y
+    // down); screen = childMin + world * scale + offset.
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 origin = childMin;
+    auto project = [this, origin](float wx, float wy) -> ImVec2 {
+        return ImVec2(origin.x + wx * m_ShowCam.scale + m_ShowCam.offsetX,
+                      origin.y + wy * m_ShowCam.scale + m_ShowCam.offsetY);
+    };
+    dl->AddRectFilled(childMin, m_ShowViewRectMax,
+                      ImGui::ColorConvertFloat4ToU32(ImVec4(0.10f, 0.10f, 0.12f, 1.0f)));
+
+    // The display wall.
+    for (const auto& d : m_ShowScene.displays)
+    {
+        if (d.w <= 0.f || d.h <= 0.f)
+        {
+            continue;
+        }
+        const ImVec2 p1 = project(d.x, d.y);
+        const ImVec2 p2 = project(d.x + d.w, d.y + d.h);
+        const ImU32 col = d.enabled ? ImGui::GetColorU32(ImGuiCol_Text)
+                                    : ImGui::GetColorU32(ImGuiCol_TextDisabled);
+        dl->AddRect(p1, p2, col, 0.0f, ImDrawFlags_None, d.enabled ? 2.0f : 1.0f);
+        if (!d.name.empty())
+        {
+            dl->AddText(ImVec2(p1.x + 4.f, p1.y + 2.f),
+                        ImGui::GetColorU32(ImGuiCol_Text), d.name.c_str());
+        }
+    }
+
+    // The visible layers (in draw order).
+    for (const auto& layer : m_ShowScene.layers)
+    {
+        ImVec2 c[4];
+        for (int i = 0; i < 4; ++i)
+        {
+            c[i] = project(layer.corners[static_cast<size_t>(2 * i)],
+                           layer.corners[static_cast<size_t>(2 * i + 1)]);
+        }
+        const ImU32 outline = ImGui::GetColorU32(ImGuiCol_TextDisabled);
+        if (layer.content == "color")
+        {
+            const ImU32 fill = ImGui::ColorConvertFloat4ToU32(ImVec4(
+                layer.color[0], layer.color[1], layer.color[2],
+                layer.color[3] * layer.opacity));
+            dl->AddQuadFilled(c[0], c[1], c[2], c[3], fill);
+            dl->AddQuad(c[0], c[1], c[2], c[3], outline);
+        }
+        else if (m_ShowTexPool.ready())
+        {
+            // Media: the thumbnail texture (a white fallback until it
+            // arrives). The pool keys the texture on the asset path, so a
+            // file reload replaces it.
+            ImTextureRef tex = m_ShowTexPool.whiteTexture();
+            int tw = 0;
+            int th = 0;
+            std::vector<std::uint8_t> rgba;
+            if (active && active->thumbnailFor(layer.mediaId, tw, th, rgba))
+            {
+                std::string path;
+                if (snap.status.contains("media") && snap.status["media"].is_array())
+                {
+                    for (const auto& m : snap.status["media"])
+                    {
+                        if (m.value("id", 0u) == layer.mediaId)
+                        {
+                            path = m.value("path", std::string());
+                            break;
+                        }
+                    }
+                }
+                tex = m_ShowTexPool.textureFor(layer.mediaId, path, rgba, tw, th);
+            }
+            const ImU32 tint =
+                ImGui::ColorConvertFloat4ToU32(ImVec4(1.f, 1.f, 1.f, layer.opacity));
+            dl->PushTextureID(tex);
+            dl->PrimQuadUV(c[0], c[1], c[2], c[3], ImVec2(0.f, 0.f), ImVec2(1.f, 0.f),
+                           ImVec2(1.f, 1.f), ImVec2(0.f, 1.f), tint);
+            dl->PopTextureID();
+            dl->AddQuad(c[0], c[1], c[2], c[3], outline);
+            if (layer.content == "video")
+            {
+                // Play badge: screen-constant (a world-space size would
+                // zoom with the camera), at the projected top-left corner.
+                const ImVec2 b(c[0].x + 5.f, c[0].y + 5.f);
+                dl->AddTriangleFilled(b, ImVec2(b.x + 11.f, b.y + 7.f),
+                                      ImVec2(b.x + 5.f, b.y + 14.f),
+                                      ImGui::GetColorU32(ImGuiCol_Text));
+            }
+        }
+        else
+        {
+            // The pool is not ready (init failure): a neutral quad keeps the
+            // layer visible.
+            dl->AddQuadFilled(c[0], c[1], c[2], c[3],
+                              ImGui::ColorConvertFloat4ToU32(
+                                  ImVec4(0.5f, 0.5f, 0.5f, layer.opacity)));
+            dl->AddQuad(c[0], c[1], c[2], c[3], outline);
+        }
+        if (!layer.name.empty())
+        {
+            dl->AddText(ImVec2(c[0].x + 3.f, c[0].y + 2.f),
+                        ImGui::GetColorU32(ImGuiCol_Text), layer.name.c_str());
+        }
+    }
+    ImGui::EndChild();
+
+    // The "Reset view" overlay, top-right of the content area (window
+    // content coordinates start below the title bar).
+    ImGui::SetCursorPos(ImVec2(winSize.x - resetWidth - 8.f, 8.f));
+    if (ImGui::Button("Reset view##showreset"))
+    {
+        fitShowViewCamera(childSize, m_ShowScene.displaySignature());
+    }
+    ImGui::End();
+}
+
 // --- show editor window ---------------------------------------------------------------
 
 void ControlGuiApp::renderShowEditorWindow()
 {
     // Begin() may return false; End() must still be called (see above).
-    if (!ImGui::Begin("Show Editor"))
+    if (!ImGui::Begin("Show Editor", nullptr, ImGuiWindowFlags_HorizontalScrollbar))
     {
         ImGui::End();
         return;
@@ -2608,7 +2773,7 @@ void ControlGuiApp::renderCueAction(Cue& cue)
 void ControlGuiApp::renderConsoleWindow()
 {
     // Begin() may return false; End() must still be called (see above).
-    if (!ImGui::Begin("Console"))
+    if (!ImGui::Begin("Console", nullptr, ImGuiWindowFlags_HorizontalScrollbar))
     {
         ImGui::End();
         return;
@@ -3623,20 +3788,38 @@ void ControlGuiApp::testGiveEditorALayer()
     layer.name = "red";
     layer.color = {1.0f, 0.0f, 0.0f, 1.0f};
     scene.layers.push_back(layer);
+    if (!m_SelfTestBmpPath.empty())
+    {
+        // A media layer over the self-test BMP (320x180, scaled to cover the
+        // 1920x1080 wall): the auto-push delivers it to the engine, so the
+        // frame phases exercise the show view's media path (thumbnail +
+        // texture + textured quad) against a real system.
+        MediaReference ref;
+        ref.id = 1;
+        ref.path = m_SelfTestBmpPath;
+        show.media.push_back(ref);
+        Layer mediaLayer;
+        mediaLayer.id = 12;
+        mediaLayer.name = "testbmp";
+        mediaLayer.mediaId = 1;
+        mediaLayer.transform.x = 960.f;
+        mediaLayer.transform.y = 540.f;
+        mediaLayer.transform.scaleX = 6.f;
+        mediaLayer.transform.scaleY = 6.f;
+        scene.layers.push_back(mediaLayer);
+    }
     show.scenes.push_back(std::move(scene));
     m_Editor.touch();
 }
 
-bool ControlGuiApp::testBroadcastLayerSet(Id layerId, float x, float y)
+void ControlGuiApp::testRemoveSelfTestBmp()
 {
-    std::string error;
-    return sendToAllConnected("layer.set", {{"layer", layerId}, {"x", x}, {"y", y}}, error);
-}
-
-bool ControlGuiApp::testBroadcastLayerClear(Id layerId)
-{
-    std::string error;
-    return sendToAllConnected("layer.clear", {{"layer", layerId}}, error);
+    if (!m_SelfTestBmpPath.empty())
+    {
+        std::error_code fsError;
+        std::filesystem::remove(m_SelfTestBmpPath, fsError); // best effort
+        m_SelfTestBmpPath.clear();
+    }
 }
 
 void ControlGuiApp::testSelectDisplayEditSystem(int index)
@@ -3864,6 +4047,22 @@ bool ControlGuiApp::selfTestSystem(const std::string& host, std::uint16_t port, 
     step("scene.clear returns to timeline (scene 1)", result.value("scene", 0u) == 1u,
          "scene=" + std::to_string(result.value("scene", 0u)));
 
+    // frame.state: the show view's live data - the wall plus the resolved
+    // layer quads (scene 1 is active: one solid-color layer).
+    const bool fsSent = conn.send("frame.state", json::object(), result, error);
+    const bool fsShape = fsSent &&
+                         result.contains("sceneSize") &&
+                         result["sceneSize"].value("width", 0) > 0 &&
+                         result.contains("displays") && result["displays"].is_array() &&
+                         !result["displays"].empty() &&
+                         result.contains("layers") && result["layers"].is_array() &&
+                         !result["layers"].empty() &&
+                         result["layers"][0].value("content", "") == "color" &&
+                         result["layers"][0].contains("corners") &&
+                         result["layers"][0]["corners"].size() == 4;
+    step("frame.state (wall + resolved layer quads)", fsShape,
+         fsSent ? (fsShape ? std::string() : result.dump()) : error);
+
     step("layer.set opacity 0.5",
          conn.send("layer.set", {{"layer", 10}, {"opacity", 0.5}}, result, error), error);
     step("layer.clear", conn.send("layer.clear", {{"layer", 10}}, result, error), error);
@@ -3885,9 +4084,50 @@ bool ControlGuiApp::selfTestSystem(const std::string& host, std::uint16_t port, 
     }
 
     step("media.list", conn.send("media.list", json::object(), result, error), error);
-    step("media.load failure path (expected error)",
-         !conn.send("media.load", {{"path", "definitely_missing_media_xyz.mp4"}}, result, error),
-         error);
+    const bool missingLoadFailed =
+        !conn.send("media.load", {{"path", "definitely_missing_media_xyz.mp4"}}, result, error);
+    step("media.load failure path (expected error)", missingLoadFailed, error);
+
+    // media.thumbnail: the show view's preview path - load a real image
+    // (a small BMP written for this check; "mediamax:testpattern:" exists
+    // only in the engine's own --self-test mode) and request a 160x90
+    // thumbnail (base64 RGBA payload).
+    const std::string bmpPath = (std::filesystem::temp_directory_path() /
+                                 ("mm_gui_selftest_" +
+                                  std::to_string(std::hash<std::thread::id>{}(
+                                      std::this_thread::get_id())) +
+                                  ".bmp"))
+                                    .string();
+    // Kept on disk through the frame phases: the auto-pushed show (see
+    // testGiveEditorALayer) references it, and the engine loads it from the
+    // path when it processes the push. testRemoveSelfTestBmp() removes it.
+    m_SelfTestBmpPath = bmpPath;
+    const bool bmpWritten = writeThumbnailTestBmp(bmpPath);
+    const bool bmpLoadOk =
+        bmpWritten && conn.send("media.load", {{"path", bmpPath}}, result, error);
+    // Read `error` only after the send (function-argument evaluation order
+    // is unspecified; the detail must reflect this call, not the previous).
+    step("media.load (test bmp)", bmpLoadOk,
+         bmpWritten ? error : "could not write the test bmp");
+    const int thumbId = result.value("id", -1);
+    {
+        const bool sent = conn.send("media.thumbnail",
+                                    {{"id", thumbId}, {"width", 160}, {"height", 90}}, result,
+                                    error);
+        const bool ok = sent && result.value("width", 0) > 0 &&
+                        result.value("height", 0) > 0 && !result.value("data", "").empty();
+        step("media.thumbnail (160x90, base64 rgba)",
+             ok,
+             ok ? std::to_string(result.value("width", 0)) + "x" +
+                      std::to_string(result.value("height", 0))
+                : error);
+        if (thumbId > 0)
+        {
+            // Leave the engine's media library as we found it (the file
+            // itself stays for the frame phases - testRemoveSelfTestBmp).
+            conn.send("media.unload", {{"id", thumbId}}, result, error);
+        }
+    }
 
     step("system.set", conn.send("system.set", {{"name", "gui-self-test"}}, result, error), error);
     step("system.set restored",

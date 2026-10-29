@@ -68,11 +68,18 @@ public:
     bool swapchainValid() const { return m_Swapchain != VK_NULL_HANDLE; }
 
     // Begins the in-flight frame: waits for the previous frame's present,
-    // acquires an image, begins the command buffer and render pass. Returns
-    // false when the swapchain is out of date or suboptimal (call
-    // recreateSwapchain() and retry) or missing; the frame is then not
-    // active and endFrame() must not run.
+    // acquires an image and begins the command buffer (the render pass is
+    // NOT opened yet - transfer commands such as texture uploads must go
+    // between beginFrame() and beginRenderPass()). Returns false when the
+    // swapchain is out of date or suboptimal (call recreateSwapchain() and
+    // retry) or missing; the frame is then not active and endFrame() must
+    // not run.
     bool beginFrame();
+
+    // Opens the frame's render pass on the command buffer. Call after
+    // beginFrame() (and any pre-pass transfer commands) and before the UI
+    // draw data; endFrame() closes it.
+    void beginRenderPass();
 
     // Ends the frame: closes the render pass, submits and presents.
     void endFrame(VkResult& presentResult);

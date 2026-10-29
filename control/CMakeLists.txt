@@ -26,6 +26,7 @@ add_executable(mediamax_control
     src/gui/GuiMain.cpp
     src/gui/GuiVulkan.cpp
     src/gui/ShowEditor.cpp
+    src/gui/ShowView.cpp
     src/gui/SystemConnection.cpp)
 add_executable(mediamax::control ALIAS mediamax_control)
 

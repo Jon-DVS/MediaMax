@@ -5,10 +5,13 @@
 #include <cmath>
 #include <filesystem>
 #include <map>
+#include <unordered_map>
 #include <unordered_set>
 
 #include "mediamax/blend/Blend.h"
+#include "mediamax/math/Transform2D.h"
 #include "mediamax/time/FrameRate.h"
+#include "mediamax/util/Base64.h"
 #include "mediamax/util/File.h"
 #include "mediamax/util/Logger.h"
 
@@ -117,6 +120,7 @@ std::vector<std::string> CommandServer::supportedMethods()
 {
     return {"ping",
             "status",
+            "frame.state",
             "system.set",
             "show.load",
             "show.loadJson",
@@ -125,6 +129,7 @@ std::vector<std::string> CommandServer::supportedMethods()
             "media.load",
             "media.list",
             "media.unload",
+            "media.thumbnail",
             "playback.play",
             "playback.pause",
             "playback.stop",
@@ -154,6 +159,10 @@ Response CommandServer::handle(const Command& cmd) const
         else if (cmd.method == "status")
         {
             result = handleStatus();
+        }
+        else if (cmd.method == "frame.state")
+        {
+            result = handleFrameState();
         }
         else if (cmd.method == "system.set")
         {
@@ -186,6 +195,10 @@ Response CommandServer::handle(const Command& cmd) const
         else if (cmd.method == "media.unload")
         {
             result = handleMediaUnload(cmd.params);
+        }
+        else if (cmd.method == "media.thumbnail")
+        {
+            result = handleMediaThumbnail(cmd.params);
         }
         else if (cmd.method == "playback.play")
         {
@@ -319,6 +332,118 @@ nlohmann::json CommandServer::handleStatus() const
         {"media", mediaArr},
         {"displays", displayArr},
         {"scenes", sceneArr},
+    };
+}
+
+nlohmann::json CommandServer::handleFrameState() const
+{
+    // The resolved, per-layer state of the frame the engine is currently
+    // (or would) render: the display wall plus every visible layer with its
+    // content footprint in output space. This is the data the control GUI's
+    // 2D "show view" draws from (PROTOCOL.md: frame.state).
+    const FrameState state = m_Engine.frameState();
+    const Rect2i bounds = m_Displays.outputBounds();
+
+    // Layer names are not carried by LayerFrame; map them from the show.
+    std::unordered_map<Id, const Layer*> byId;
+    for (const auto& scene : m_Engine.show().scenes)
+    {
+        for (const auto& layer : scene.layers)
+        {
+            byId[layer.id] = &layer;
+        }
+    }
+
+    nlohmann::json displayArr = nlohmann::json::array();
+    for (const auto& d : m_Displays.displays())
+    {
+        displayArr.push_back({
+            {"id", d.id},
+            {"name", d.name},
+            {"x", d.x},
+            {"y", d.y},
+            {"width", d.width},
+            {"height", d.height},
+            {"enabled", d.enabled},
+        });
+    }
+
+    nlohmann::json layerArr = nlohmann::json::array();
+    for (const auto& layer : state.layers)
+    {
+        const bool isColor = layer.mediaId == kInvalidId;
+        const MediaAsset* asset = nullptr;
+        if (!isColor)
+        {
+            if (const auto found = m_Media.find(layer.mediaId))
+            {
+                asset = *found;
+            }
+        }
+        // Layers without video content (audio-only media, or media that
+        // disappeared from the library) have nothing to preview.
+        if (!isColor && (asset == nullptr || !asset->metadata.hasVideo))
+        {
+            continue;
+        }
+
+        // The content footprint: a color layer fills the output space, a
+        // media layer is placed at its native media size - the same
+        // convention the playback renderer uses.
+        Size2i mediaSize = bounds.size();
+        std::string content = "color";
+        if (!isColor)
+        {
+            if (asset->metadata.width > 0 && asset->metadata.height > 0)
+            {
+                mediaSize = {static_cast<std::int32_t>(asset->metadata.width),
+                             static_cast<std::int32_t>(asset->metadata.height)};
+            }
+            content = asset->metadata.type == MediaType::Image ? "image" : "video";
+        }
+
+        Transform2D t;
+        t.x = layer.x;
+        t.y = layer.y;
+        t.rotation = layer.rotation;
+        t.scaleX = layer.scaleX;
+        t.scaleY = layer.scaleY;
+        t.anchorX = layer.anchorX;
+        t.anchorY = layer.anchorY;
+
+        // The transformed corners, clockwise from the top-left in output
+        // space (y down): the client draws a single quad from these.
+        nlohmann::json corners = nlohmann::json::array();
+        const float uvs[4][2] = {{0.f, 0.f}, {1.f, 0.f}, {1.f, 1.f}, {0.f, 1.f}};
+        for (const auto& uv : uvs)
+        {
+            const auto [px, py] = t.toOutputSpace(uv[0], uv[1], mediaSize);
+            corners.push_back({px, py});
+        }
+
+        nlohmann::json layerJson = {
+            {"id", layer.layerId},
+            {"name", byId.count(layer.layerId) ? byId.at(layer.layerId)->name : std::string()},
+            {"content", content},
+            {"corners", corners},
+            {"opacity", layer.opacity},
+            {"zIndex", layer.zIndex},
+        };
+        if (isColor)
+        {
+            layerJson["color"] = {layer.color.r, layer.color.g, layer.color.b, layer.color.a};
+        }
+        else
+        {
+            layerJson["mediaId"] = layer.mediaId;
+        }
+        layerArr.push_back(std::move(layerJson));
+    }
+
+    return {
+        {"sceneSize", {{"width", bounds.width}, {"height", bounds.height}}},
+        {"displays", displayArr},
+        {"layers", layerArr},
     };
 }
 
@@ -519,6 +644,35 @@ nlohmann::json CommandServer::handleMediaUnload(const nlohmann::json& params) co
         throw ParameterError("no media with id " + std::to_string(id));
     }
     return {{"id", id}};
+}
+
+nlohmann::json CommandServer::handleMediaThumbnail(const nlohmann::json& params) const
+{
+    const Id id = static_cast<Id>(requireInt(params, "id"));
+    // Request box for the aspect-fit result (PROTOCOL.md: media.thumbnail).
+    // Defaults are the control GUI's preview size; the caps keep the base64
+    // payload well under the line limit even for large requests.
+    const int width = std::clamp(optionalInt(params, "width").value_or(320), 16, 640);
+    const int height = std::clamp(optionalInt(params, "height").value_or(180), 16, 360);
+    if (!m_Thumbnail)
+    {
+        throw ParameterError("media thumbnails are not available on this system");
+    }
+
+    std::vector<std::uint8_t> rgba;
+    int outWidth = 0;
+    int outHeight = 0;
+    std::string error;
+    if (!m_Thumbnail(id, width, height, rgba, outWidth, outHeight, error))
+    {
+        throw ParameterError(error.empty() ? "thumbnail failed" : error);
+    }
+    return {
+        {"id", id},
+        {"width", outWidth},
+        {"height", outHeight},
+        {"data", mediamax::util::base64Encode(rgba)},
+    };
 }
 
 nlohmann::json CommandServer::handlePlaybackPlay(const nlohmann::json& params) const
@@ -911,6 +1065,19 @@ std::optional<std::string> CommandServer::optionalString(const nlohmann::json& p
         return params[key].get<std::string>();
     }
     return std::nullopt;
+}
+
+std::optional<int> CommandServer::optionalInt(const nlohmann::json& params, const char* key)
+{
+    if (!params.contains(key) || params[key].is_null())
+    {
+        return std::nullopt;
+    }
+    if (!params[key].is_number())
+    {
+        throw ParameterError(std::string("invalid parameter: ") + key + " must be a number");
+    }
+    return static_cast<int>(params[key].get<double>());
 }
 
 bool CommandServer::optionalBool(const nlohmann::json& params, const char* key)

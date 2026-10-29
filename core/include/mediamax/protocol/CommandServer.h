@@ -37,6 +37,16 @@ using MediaLoadFunction = std::function<Id(const std::string& path, std::string&
 using DisplayAddedFunction = std::function<void(const Display& display)>;
 using DisplayRemovedFunction = std::function<void(Id displayId)>;
 
+// Host callback for media.thumbnail: the app decodes the frame (it owns the
+// source factory and the asset lookup, and a decode must not run under the
+// caller's state lock - the playback app dispatches this command without it
+// and re-locks only around the short library lookup). Unlike the display
+// callbacks this one may block for the duration of the decode. Tests
+// implement it with media::makeThumbnail directly.
+using ThumbnailFunction = std::function<bool(Id mediaId, int maxWidth, int maxHeight,
+                                             std::vector<std::uint8_t>& outRgba, int& outWidth,
+                                             int& outHeight, std::string& error)>;
+
 class CommandServer
 {
 public:
@@ -55,6 +65,10 @@ public:
     // Sets the display add/remove callbacks (see above).
     void setDisplayAddedFunction(DisplayAddedFunction fn) { m_DisplayAdded = std::move(fn); }
     void setDisplayRemovedFunction(DisplayRemovedFunction fn) { m_DisplayRemoved = std::move(fn); }
+
+    // Sets the media-thumbnail callback (see ThumbnailFunction). media.
+    // thumbnail fails with a clean error until one is installed.
+    void setThumbnailFunction(ThumbnailFunction fn) { m_Thumbnail = std::move(fn); }
 
     // The machine identity reported in "status": the computer name
     // (`hostname`) and primary IPv4 address (`ip`) of the machine running
@@ -86,6 +100,7 @@ private:
 
     nlohmann::json handlePing() const;
     nlohmann::json handleStatus() const;
+    nlohmann::json handleFrameState() const;
     nlohmann::json handleSystemSet(const nlohmann::json& params) const;
     nlohmann::json handleShowLoad(const nlohmann::json& params) const;
     nlohmann::json handleShowLoadJson(const nlohmann::json& params) const;
@@ -94,6 +109,7 @@ private:
     nlohmann::json handleMediaLoad(const nlohmann::json& params) const;
     nlohmann::json handleMediaList() const;
     nlohmann::json handleMediaUnload(const nlohmann::json& params) const;
+    nlohmann::json handleMediaThumbnail(const nlohmann::json& params) const;
     nlohmann::json handlePlaybackPlay(const nlohmann::json& params) const;
     nlohmann::json handlePlaybackPause() const;
     nlohmann::json handlePlaybackStop() const;
@@ -127,6 +143,7 @@ private:
     static double requireNumber(const nlohmann::json& params, const char* key);
     static int requireInt(const nlohmann::json& params, const char* key);
     static std::optional<std::string> optionalString(const nlohmann::json& params, const char* key);
+    static std::optional<int> optionalInt(const nlohmann::json& params, const char* key);
     static bool optionalBool(const nlohmann::json& params, const char* key);
 
     PlaybackEngine& m_Engine;
@@ -139,6 +156,7 @@ private:
     MediaLoadFunction m_LoadMedia;
     DisplayAddedFunction m_DisplayAdded;
     DisplayRemovedFunction m_DisplayRemoved;
+    ThumbnailFunction m_Thumbnail;
 };
 
 // Thrown by parameter helpers; caught by handle() and turned into a failure

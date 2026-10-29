@@ -9,6 +9,7 @@
 #include "LocalAddress.h"
 #include "WindowSurface.h"
 #include "mediamax/media/FFmpegSupport.h"
+#include "mediamax/media/MediaThumbnail.h"
 #include "mediamax/overlay/StatusOverlay.h"
 #include "mediamax/show/Show.h"
 #include "mediamax/util/Logger.h"
@@ -1182,6 +1183,16 @@ void PlaybackApp::pollWindowEvents()
 
 protocol::Response PlaybackApp::handleCommand(const protocol::Command& cmd)
 {
+    // media.thumbnail decodes a frame; a 4K seek + decode takes long enough
+    // that holding the state mutex for it would freeze the frame loop (and
+    // the output wall) for the whole decode. Its handler does all library
+    // access through the thumbnail callback, which takes the state mutex
+    // only around the short asset lookup and decodes outside it. Every other
+    // command is cheap and lock-free of I/O, so it runs under the mutex.
+    if (cmd.method == "media.thumbnail")
+    {
+        return m_CommandServer->handle(cmd);
+    }
     std::lock_guard lock(m_StateMutex);
     return m_CommandServer->handle(cmd);
 }
@@ -1231,6 +1242,33 @@ bool PlaybackApp::initEngine()
         op.displayId = displayId;
         m_PendingSurfaceOps.push_back(std::move(op));
     });
+
+    // media.thumbnail: handleCommand dispatches this command without the
+    // state lock (see there), so the callback takes the lock only around the
+    // short asset lookup (path + metadata + factory copy, the same pattern
+    // as the media pump's decode workers) and decodes the frame outside it.
+    // makeThumbnail opens a fresh source instance; the library's own
+    // instance (the pump's probing copy) is never decoded.
+    m_CommandServer->setThumbnailFunction(
+        [this](Id id, int maxW, int maxH, std::vector<std::uint8_t>& rgba, int& w, int& h,
+               std::string& error) {
+            MediaSourceFactory factory;
+            std::string path;
+            MediaMetadata metadata;
+            {
+                std::lock_guard lock(m_StateMutex);
+                const auto asset = m_Library.find(id);
+                if (!asset)
+                {
+                    error = "no media with id " + std::to_string(id);
+                    return false;
+                }
+                path = (*asset)->path;
+                metadata = (*asset)->metadata;
+                factory = m_Library.sourceFactory();
+            }
+            return media::makeThumbnail(factory, path, metadata, maxW, maxH, rgba, w, h, error);
+        });
 
     // Startup show: go through the same command handler as the network
     // protocol (media loading + id remapping + loadShow).

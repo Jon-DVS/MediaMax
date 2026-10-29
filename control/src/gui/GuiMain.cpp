@@ -121,6 +121,10 @@ bool GuiRuntime::init(GLFWwindow* window, ControlGuiApp* app, std::string& error
         m_Vulkan.shutdown();
         return false;
     }
+    // The show view's texture pool (its AddTexture needs the back end's
+    // state, hence after ImGui_ImplVulkan_Init; a failure degrades the view
+    // to untextured previews, it does not abort the GUI).
+    app->initShowView(m_Vulkan.device(), m_Vulkan.physicalDevice());
     m_ImGuiReady = true;
     return true;
 }
@@ -130,6 +134,9 @@ void GuiRuntime::shutdown()
     if (m_ImGuiReady)
     {
         vkDeviceWaitIdle(m_Vulkan.device()); // no frame in flight
+        // The pool's RemoveTexture uses the back end's state: release the
+        // pool before the back end goes, and both before the device.
+        m_App->shutdownShowView();
         ImGui_ImplVulkan_Shutdown();
         ImGui_ImplGlfw_Shutdown();
         ImGui::DestroyContext();
@@ -158,6 +165,18 @@ bool GuiRuntime::renderFrame()
         m_ResizePending = false;
     }
 
+    // The window is per-monitor-DPI-aware (GLFW enables PMv2 at init):
+    // scale the UI to the system scale so text and widgets keep their
+    // intended physical size (the dockspace fills the viewport, so the
+    // layout ratios are unaffected).
+    if (GLFWmonitor* monitor = glfwGetPrimaryMonitor())
+    {
+        float xScale = 1.0f;
+        float yScale = 1.0f;
+        glfwGetMonitorContentScale(monitor, &xScale, &yScale);
+        ImGui::GetIO().FontGlobalScale = yScale;
+    }
+
     // NewFrame order as in the official example (the Vulkan back end's
     // NewFrame is a no-op in this ImGui version but kept for parity).
     ImGui_ImplVulkan_NewFrame();
@@ -180,6 +199,12 @@ bool GuiRuntime::renderFrame()
         m_ResizePending = true;
         return false;
     }
+    // The show view's thumbnail uploads (created during frame()): transfer
+    // commands, so they must be recorded outside the render pass - after
+    // beginFrame(), before beginRenderPass() - and before the UI draw data
+    // that samples them.
+    m_App->flushShowTextureUploads(m_Vulkan.commandBuffer());
+    m_Vulkan.beginRenderPass();
     ImGui_ImplVulkan_RenderDrawData(drawData, m_Vulkan.commandBuffer());
     VkResult presentResult = VK_SUCCESS;
     m_Vulkan.endFrame(presentResult);
@@ -324,9 +349,10 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
             // the edit (issue 8).
             autoPushName = "AutoPush self-test";
             app.testTouchEditor(autoPushName);
-            // A deterministic layer (step 4b target): the auto-push below
-            // delivers this show to the engine, which the live-override
-            // broadcast check then overrides and clears (issue 13).
+            // A deterministic layer: the auto-push below delivers this show
+            // to the engine, so the frame phases render a real layer in the
+            // show view (the live check above inspected the same command
+            // path via frame.state).
             app.testGiveEditorALayer();
         }
     }
@@ -443,6 +469,27 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
                   << (arrived ? autoPushName : "<not received>") << std::endl;
         liveOk = liveOk && arrived;
 
+        // The pushed show's media layer must be live in the engine's frame:
+        // it is what the show view renders (thumbnail + texture) during the
+        // frame phases, so its absence would mean the view never drew media.
+        nlohmann::json fsResult;
+        std::string fsCmdError;
+        bool haveMediaLayer = false;
+        if (arrived && check.send("frame.state", nlohmann::json::object(), fsResult, fsCmdError))
+        {
+            for (const auto& l : fsResult.value("layers", nlohmann::json::array()))
+            {
+                if (l.value("name", "") == "testbmp" && l.value("mediaId", 0u) != 0)
+                {
+                    haveMediaLayer = true;
+                    break;
+                }
+            }
+        }
+        liveReport += std::string(haveMediaLayer ? "PASS " : "FAIL ") +
+                      "pushed show's media layer is live in frame.state (show view data)\n";
+        liveOk = liveOk && haveMediaLayer;
+
         // Issue 18: the pushed document carries the GUI's system list (the
         // show file is where the systems live). The engine stores the field
         // and show.save writes the document back - pull it and check the
@@ -485,12 +532,9 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
         liveOk = liveOk && systemsInDoc;
     }
 
-    // 4b) Live-override broadcast (issue 13): the Layers block applies
-    //     layer.set / layer.clear to every connected system, not only the
-    //     active one. A second system entry on the same engine proves the
-    //     fan-out; the engine-side check reads scene.list, whose x reports
-    //     the override (issue 11) and returns to the authored 0 after the
-    //     broadcast layer.clear.
+    // 4b) A second system entry on the same engine: proves multi-system
+    //     polling and - since addSystem activates the entry it adds - makes
+    //     this the active system the display-move check in 4c needs.
     if (haveLiveSystem && !autoPushName.empty() && liveOk)
     {
         app.testAddSystem("self-test-2", liveHost, livePort);
@@ -505,86 +549,8 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
             }
         }
         liveReport += std::string(secondUp ? "PASS " : "FAIL ") +
-                      "second system connected (fan-out target)\n";
+                      "second system connected (display-move target)\n";
         liveOk = liveOk && secondUp;
-
-        // The exact position commit the Layers block sends on Enter /
-        // focus loss: an idempotent set, fanned out to both systems (both
-        // of which reach the same engine).
-        const bool setOk = secondUp && app.testBroadcastLayerSet(10, 123.5f, 67.25f);
-        auto readLayer10 = [](const nlohmann::json& scenes, double& x, bool& overridden) {
-            for (const auto& s : scenes.value("scenes", nlohmann::json::array()))
-            {
-                if (!s.value("active", false))
-                {
-                    continue;
-                }
-                for (const auto& l : s.value("layers", nlohmann::json::array()))
-                {
-                    if (l.value("id", 0u) == 10u)
-                    {
-                        x = l.value("x", -1.0);
-                        overridden = l.value("override", false);
-                        return true;
-                    }
-                }
-            }
-            return false;
-        };
-        auto pollLayer10 = [&](double expectedX, bool expectedOverride, double& x, bool& overridden,
-                               bool& found) {
-            SystemConnection verify("self-test-verify", liveHost, livePort);
-            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-            found = false;
-            while (std::chrono::steady_clock::now() < deadline)
-            {
-                x = -1.0;
-                overridden = false;
-                nlohmann::json r;
-                std::string e;
-                if (verify.send("scene.list", nlohmann::json::object(), r, e) &&
-                    readLayer10(r, x, overridden) && x == expectedX &&
-                    overridden == expectedOverride)
-                {
-                    found = true;
-                    break;
-                }
-                std::this_thread::sleep_for(std::chrono::milliseconds(150));
-            }
-        };
-
-        double xSet = -1.0;
-        bool overSet = false;
-        bool setArrived = false;
-        if (setOk)
-        {
-            pollLayer10(123.5, true, xSet, overSet, setArrived);
-        }
-        liveReport += std::string(setOk && setArrived ? "PASS " : "FAIL ") +
-                      "layer.set broadcast reached all systems (x=" + std::to_string(xSet) +
-                      ", override=" + std::string(overSet ? "true" : "false") + ")\n";
-        liveOk = liveOk && setOk && setArrived;
-
-        // The Clear button's exact send. layer.clear is not idempotent and
-        // both systems target the same engine, so the second system's clear
-        // legitimately fails ("no override set") after the first one has
-        // released it - judge the broadcast by the engine's state, not by
-        // per-system success.
-        if (setArrived)
-        {
-            app.testBroadcastLayerClear(10);
-        }
-        double xClear = -1.0;
-        bool overClear = true;
-        bool clearArrived = false;
-        if (setArrived)
-        {
-            pollLayer10(0.0, false, xClear, overClear, clearArrived);
-        }
-        liveReport += std::string(clearArrived ? "PASS " : "FAIL ") +
-                      "layer.clear broadcast released the override (x=" + std::to_string(xClear) +
-                      ")\n";
-        liveOk = liveOk && clearArrived;
     }
 
     // 4c) Display settings dialog (issues 14 + 15): the dialog's System
@@ -978,6 +944,10 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
             liveOk = liveOk && retargetOk;
         }
     }
+
+    // The live check is over (the engine loaded the pushed show's media from
+    // the test bmp's path); remove the scratch file. No-op headless.
+    app.testRemoveSelfTestBmp();
 
     runtime.shutdown();
     glfwDestroyWindow(window);

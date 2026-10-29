@@ -14,8 +14,11 @@
 
 #include <doctest/doctest.h>
 
+#include "mediamax/math/Transform2D.h"
+#include "mediamax/media/MediaThumbnail.h"
 #include "mediamax/protocol/CommandServer.h"
 #include "mediamax/protocol/Protocol.h"
+#include "mediamax/util/Base64.h"
 #include "mediamax/util/File.h"
 
 #include "TestFixtures.h"
@@ -96,6 +99,21 @@ std::string readTempFile(const std::filesystem::path& path)
     std::string contents((std::istreambuf_iterator<char>(in)),
                          std::istreambuf_iterator<char>());
     return contents;
+}
+
+// The corner array frame.state reports for a transform + media size (the
+// same projection the command uses; the tests check the wiring, not the
+// math, which Transform2D's own tests cover).
+nlohmann::json cornerJson(const Transform2D& t, const Size2i& mediaSize)
+{
+    nlohmann::json corners = nlohmann::json::array();
+    const float uvs[4][2] = {{0.f, 0.f}, {1.f, 0.f}, {1.f, 1.f}, {0.f, 1.f}};
+    for (const auto& uv : uvs)
+    {
+        const auto [px, py] = t.toOutputSpace(uv[0], uv[1], mediaSize);
+        corners.push_back({px, py});
+    }
+    return corners;
 }
 
 } // namespace
@@ -1246,6 +1264,217 @@ TEST_CASE("show.info summarizes the loaded show")
     CHECK(resp.result.at("cues").get<std::uint64_t>() == 5);
 }
 
+TEST_CASE("frame.state reports the wall and the current frame's layers")
+{
+    Fixture f;
+    const Response resp = f.run("frame.state");
+    REQUIRE(resp.ok);
+    const nlohmann::json& r = resp.result;
+
+    // The wall: two 1920x1080 displays tiled side by side.
+    CHECK(r.at("sceneSize") == nlohmann::json({{"width", 3840}, {"height", 1080}}));
+    const nlohmann::json& displays = r.at("displays");
+    REQUIRE(displays.size() == 2);
+    CHECK(displays[0].at("id") == f.displayA);
+    CHECK(displays[0].at("name").get<std::string>() == "main");
+    CHECK(displays[0].at("x") == 0);
+    CHECK(displays[0].at("width") == 1920);
+    CHECK(displays[0].at("enabled").get<bool>());
+    CHECK(displays[1].at("x") == 1920);
+
+    // At t=0 the show plays scene 1: the color background (z 0) under the
+    // video layer (z 1).
+    const nlohmann::json& layers = r.at("layers");
+    REQUIRE(layers.size() == 2);
+
+    const nlohmann::json& bg = layers[0];
+    CHECK(bg.at("id") == 11);
+    CHECK(bg.at("name").get<std::string>() == "bg");
+    CHECK(bg.at("content").get<std::string>() == "color");
+    const nlohmann::json& color = bg.at("color");
+    REQUIRE(color.size() == 4);
+    CHECK(color[0].get<double>() == doctest::Approx(0.1f));
+    CHECK(color[1].get<double>() == doctest::Approx(0.2f));
+    CHECK(color[2].get<double>() == doctest::Approx(0.3f));
+    CHECK(color[3].get<double>() == doctest::Approx(1.0f));
+    CHECK(bg.at("opacity").get<double>() == doctest::Approx(1.0f));
+    CHECK(bg.at("zIndex") == 0);
+    CHECK(!bg.contains("mediaId"));
+    // A color layer fills the output space (identity transform, centered
+    // anchor at the origin of a 3840x1080 wall would be off-center, but the
+    // fixture layer has the default transform: anchor 0.5 at x=y=0).
+    CHECK(bg.at("corners") == cornerJson(Transform2D::identity(), Size2i{3840, 1080}));
+
+    const nlohmann::json& video = layers[1];
+    CHECK(video.at("id") == 10);
+    CHECK(video.at("name").get<std::string>() == "videoA");
+    CHECK(video.at("content").get<std::string>() == "video");
+    CHECK(video.at("mediaId") == kMediaA);
+    CHECK(!video.contains("color"));
+    // The media sits at its native 640x360 size under the default transform.
+    CHECK(video.at("corners") == cornerJson(Transform2D::identity(), Size2i{640, 360}));
+}
+
+TEST_CASE("frame.state projects rotated and scaled layers")
+{
+    MediaLibrary media;
+    DisplayManager displays;
+    displays.addDisplay("wall", 0, 0, 100, 100);
+    PlaybackEngine engine(media);
+
+    Show show;
+    show.name = "frame-state test";
+    show.frameRate = FrameRate::fps30();
+    show.duration = Time::fromSeconds(5.0);
+    Scene scene;
+    scene.id = 1;
+    scene.name = "S";
+    Layer layer;
+    layer.id = 7;
+    layer.name = "rot";
+    layer.color = {1.f, 0.f, 0.f, 1.f};
+    layer.transform.x = 50.f;
+    layer.transform.y = 50.f;
+    layer.transform.rotation = 0.7853981634f; // ~45 degrees
+    layer.transform.scaleX = 2.0f;
+    layer.transform.scaleY = 2.0f;
+    layer.transform.anchorX = 0.25f;
+    layer.transform.anchorY = 0.75f;
+    scene.layers.push_back(layer);
+    show.scenes.push_back(scene);
+    show.addCue(Cue{Time::zero(), "start", PlayScene{1}});
+    engine.loadShow(show);
+
+    CommandServer server(engine, media, displays, "t");
+    const Response resp =
+        server.handle(Command{1, "frame.state", nlohmann::json::object()});
+    REQUIRE(resp.ok);
+    const nlohmann::json& r = resp.result;
+    CHECK(r.at("sceneSize") == nlohmann::json({{"width", 100}, {"height", 100}}));
+    const nlohmann::json& layers = r.at("layers");
+    REQUIRE(layers.size() == 1);
+    CHECK(layers[0].at("content").get<std::string>() == "color");
+
+    // A color layer is projected at the output-space size.
+    Transform2D expected;
+    expected.x = 50.f;
+    expected.y = 50.f;
+    expected.rotation = 0.7853981634f;
+    expected.scaleX = 2.0f;
+    expected.scaleY = 2.0f;
+    expected.anchorX = 0.25f;
+    expected.anchorY = 0.75f;
+    const nlohmann::json want = cornerJson(expected, Size2i{100, 100});
+    const nlohmann::json& got = layers[0].at("corners");
+    REQUIRE(got.size() == 4);
+    for (int i = 0; i < 4; ++i)
+    {
+        CHECK(got[static_cast<std::size_t>(i)][0].get<double>() ==
+              doctest::Approx(want[static_cast<std::size_t>(i)][0].get<double>()));
+        CHECK(got[static_cast<std::size_t>(i)][1].get<double>() ==
+              doctest::Approx(want[static_cast<std::size_t>(i)][1].get<double>()));
+    }
+
+    // The rotation actually turned the quad (not the flat box) and preserved
+    // its area (200x200 = 40000).
+    Transform2D flat = expected;
+    flat.rotation = 0.f;
+    const nlohmann::json flatCorners = cornerJson(flat, Size2i{100, 100});
+    bool differs = false;
+    for (int i = 0; i < 4; ++i)
+    {
+        differs = differs || (got[static_cast<std::size_t>(i)] !=
+                              flatCorners[static_cast<std::size_t>(i)]);
+    }
+    CHECK(differs);
+    double area = 0.0;
+    for (int i = 0; i < 4; ++i)
+    {
+        const int j = (i + 1) % 4;
+        area += got[static_cast<std::size_t>(i)][0].get<double>() *
+                    got[static_cast<std::size_t>(j)][1].get<double>() -
+                got[static_cast<std::size_t>(j)][0].get<double>() *
+                    got[static_cast<std::size_t>(i)][1].get<double>();
+    }
+    CHECK(std::abs(area * 0.5) == doctest::Approx(40000.0).epsilon(1e-3));
+}
+
+TEST_CASE("frame.state omits hidden layers")
+{
+    Fixture f;
+    REQUIRE(f.run("layer.set", {{"layer", 11}, {"visible", false}}).ok);
+    const Response resp = f.run("frame.state");
+    REQUIRE(resp.ok);
+    const nlohmann::json& layers = resp.result.at("layers");
+    REQUIRE(layers.size() == 1);
+    CHECK(layers[0].at("id") == 10);
+}
+
+TEST_CASE("media.thumbnail decodes through the app callback")
+{
+    Fixture f;
+    // The app-side implementation: library lookup + makeThumbnail (the
+    // playback app re-locks around the lookup; nothing to lock here).
+    f.server.setThumbnailFunction(
+        [&f](Id id, int maxW, int maxH, std::vector<std::uint8_t>& rgba, int& w, int& h,
+             std::string& error) {
+            const auto asset = f.media.find(id);
+            if (!asset)
+            {
+                error = "no media with id " + std::to_string(id);
+                return false;
+            }
+            return media::makeThumbnail(f.media.sourceFactory(), (*asset)->path,
+                                        (*asset)->metadata, maxW, maxH, rgba, w, h, error);
+        });
+
+    // Explicit size: the 640x360 source fits 160x90 exactly.
+    const Response r1 = f.run("media.thumbnail",
+                              {{"id", kMediaA}, {"width", 160}, {"height", 90}});
+    REQUIRE(r1.ok);
+    CHECK(r1.result.at("id") == kMediaA);
+    CHECK(r1.result.at("width") == 160);
+    CHECK(r1.result.at("height") == 90);
+    std::vector<std::uint8_t> pixels;
+    REQUIRE(util::base64Decode(r1.result.at("data").get<std::string>(), pixels));
+    CHECK(pixels.size() == static_cast<std::size_t>(160) * 90 * 4);
+
+    // Defaults: 320x180.
+    const Response r2 = f.run("media.thumbnail", {{"id", kMediaA}});
+    REQUIRE(r2.ok);
+    CHECK(r2.result.at("width") == 320);
+    CHECK(r2.result.at("height") == 180);
+
+    // Out-of-range sizes are clamped, not errors.
+    const Response r3 =
+        f.run("media.thumbnail", {{"id", kMediaA}, {"width", 4000}, {"height", 9000}});
+    REQUIRE(r3.ok);
+    CHECK(r3.result.at("width") == 640);
+    CHECK(r3.result.at("height") == 360);
+
+    // Unknown media id: clean failure from the callback.
+    const Response r4 = f.run("media.thumbnail", {{"id", 99}});
+    CHECK_FALSE(r4.ok);
+    CHECK(r4.error.find("no media with id 99") != std::string::npos);
+}
+
+TEST_CASE("media.thumbnail fails cleanly without a callback or with bad params")
+{
+    Fixture f; // no thumbnail callback installed
+
+    const Response r1 = f.run("media.thumbnail", {{"id", kMediaA}});
+    CHECK_FALSE(r1.ok);
+    CHECK(r1.error.find("not available") != std::string::npos);
+
+    const Response r2 = f.run("media.thumbnail"); // missing id
+    CHECK_FALSE(r2.ok);
+    CHECK(r2.error.find("id") != std::string::npos);
+
+    const Response r3 = f.run("media.thumbnail", {{"id", kMediaA}, {"width", "big"}});
+    CHECK_FALSE(r3.ok);
+    CHECK(r3.error.find("width") != std::string::npos);
+}
+
 TEST_CASE("every supported method is dispatched")
 {
     // Guard against a handler falling through to "unknown method" for a
@@ -1253,9 +1482,9 @@ TEST_CASE("every supported method is dispatched")
     Fixture f;
     for (const auto& method : CommandServer::supportedMethods())
     {
-        if (method == "ping" || method == "status" || method == "scene.list" ||
-            method == "scene.clear" || method == "media.list" || method == "display.list" ||
-            method == "show.info" || method == "layer.clear")
+        if (method == "ping" || method == "status" || method == "frame.state" ||
+            method == "scene.list" || method == "scene.clear" || method == "media.list" ||
+            method == "display.list" || method == "show.info" || method == "layer.clear")
         {
             // These succeed with no parameters at all.
             CHECK(f.run(method).ok);

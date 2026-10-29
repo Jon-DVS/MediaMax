@@ -305,8 +305,10 @@ modes link the core only — they can even validate command syntax offline
 against `CommandServer`.
 
 `--gui` runs the operator interface (Dear ImGui docking on GLFW + a minimal
-raw-Vulkan surface): one dockspace with Systems (left), Show Editor (right),
-Playback (center) and Console (bottom). The initial layout is built once by
+raw-Vulkan surface): one dockspace with Systems (top-left) and the
+Displays/Media tabs (bottom-left), a center column split into the 2D Show
+view (top) over the Playback transport/scenes (bottom), Show Editor (right)
+and Console (bottom). The initial layout is built once by
 `DockBuilder` on the first frame; `DockSpace()` is then called with the
 *dockspace root* ID every frame. (The builder's split calls replace the node
 they split, so the "remaining" node ID must be tracked in a separate
@@ -315,6 +317,26 @@ variable — passing the root ID as a split out-parameter clobbers it, makes
 plus a private, never-again-submitted host window; the pane renders into the
 dead window and the process crashes once ImGui's 60 s memory compaction
 frees that host's draw-list channels.)
+
+The **Show view** is a live 2D render of the active system's output, drawn
+on the ImGui draw list of its scene child (no custom pipeline: the control
+app links the core only, and a second vk-hpp default dispatcher for NVRHI
+is forbidden by the single-dispatcher rule). Its scene model
+(`ShowViewScene`) is rebuilt every frame from the `frame.state` poll — the
+poll connection switches from its 500 ms status cadence to a 10 Hz live poll
+only while the view is visible — and the free camera (wheel-zoom, drag-pan,
+reset) auto-refits when the display wall changes. Layer previews draw the
+engine's `media.thumbnail` payloads: the poll thread fetches them (one in
+flight, with backoff) and `ShowTexturePool` keeps one VkImage + ImGui
+descriptor set per media (plus the shared 1x1 white fallback, entry 0) and
+evicts ids that left the scene. The pixel uploads are recorded into the
+frame's command buffer **before the render pass opens** —
+`GuiVulkan::beginRenderPass()` is deliberately split out of `beginFrame()`
+so the transfer commands (staging copy +
+UNDEFINED→TRANSFER_DST→SHADER_READ_ONLY barriers) sit outside the ImGui
+render pass, which has no self-dependency. Since `beginFrame()` waits for
+the previous frame's *present* before recording (single in-flight frame),
+destroying a texture during the next frame's CPU phase is safe.
 
 The raw-Vulkan surface follows the official ImGui GLFW+Vulkan example: the
 swapchain is recreated when the framebuffer size changes (polled per frame;

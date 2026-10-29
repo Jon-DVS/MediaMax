@@ -2,14 +2,15 @@
 
 // The control GUI: application state + per-frame rendering (Dear ImGui).
 //
-// Layout (dockspace): Systems + Displays (left), Playback (center), Show
-// Editor (right) and Console (bottom). Every protocol method is reachable
-// from the UI:
-// transport, scene set/clear, live layer overrides, displays + warp grid,
-// media load/unload, system name, show authoring (saved or pushed live via
-// show.loadJson) and a raw command console as the catch-all. The Displays
-// window lists every display of every online system (with its owning
-// system) and can move a display to another system.
+// Layout (dockspace): Systems (top-left) + Displays/Media tabs
+// (bottom-left), a center column with the 2D Show view (top) over the
+// Playback transport/scenes (bottom), Show Editor (right) and Console
+// (bottom). Every protocol method is reachable from the UI:
+// transport, scene set/clear, displays + warp grid, media load/unload,
+// system name, show authoring (saved or pushed live via show.loadJson) and
+// a raw command console as the catch-all. The Show view is a live 2D render
+// of the active system's frame (frame.state) with a free camera; the
+// Displays window lists the active system's displays and media in tabs.
 
 #include <array>
 #include <chrono>
@@ -20,6 +21,7 @@
 #include <vector>
 
 #include "gui/ShowEditor.h"
+#include "gui/ShowView.h"
 #include "gui/SystemConnection.h"
 
 namespace mediamax::gui
@@ -41,6 +43,15 @@ public:
     void frame();
 
     bool shutdownRequested() const { return m_ShutdownRequested; }
+
+    // --- show view (2D render) -------------------------------------------------
+    // GPU texture pool setup/teardown (the runtime calls them around the
+    // Dear ImGui Vulkan back end's lifetime; see ShowView.h).
+    void initShowView(VkDevice device, VkPhysicalDevice physicalDevice);
+    void shutdownShowView();
+    // Records the pool's pending thumbnail uploads into the frame's command
+    // buffer (the runtime calls this after beginFrame, before the UI draw).
+    void flushShowTextureUploads(VkCommandBuffer cmd);
 
     // Self-test (see GuiMain): drives the same command path the UI uses
     // against a running playback engine; returns true when every step passed
@@ -81,13 +92,15 @@ public:
     bool testSystemConnected(const std::string& name) const;
     // Gives the fresh self-test editor a deterministic scene (id 1) with one
     // color layer (id 10) and marks it edited: the live self-test's
-    // auto-push then delivers a show with a real layer for the
-    // live-override broadcast check to target (issue 13).
+    // auto-push then delivers the show the live checks inspect. When the
+    // self-test BMP exists (see selfTestSystem), the scene also carries a
+    // media layer over it: the frame phases then render the show view's
+    // media path (thumbnail fetch + texture upload + textured quad).
     void testGiveEditorALayer();
-    // The exact sends the Layers block makes for a layer's position commit
-    // and Clear button, aimed at every connected system (issue 13).
-    bool testBroadcastLayerSet(Id layerId, float x, float y);
-    bool testBroadcastLayerClear(Id layerId);
+    // Removes the self-test BMP from disk (the live check is over; the
+    // engine already loaded it from the path the pushed show carries).
+    // No-op in the headless run (no BMP was created).
+    void testRemoveSelfTestBmp();
     // Sets the Display settings dialog's System dropdown (index into
     // m_Systems; the same state the combo sets) - the live self-test's
     // display-move check (issue 14).
@@ -173,19 +186,24 @@ private:
     // One-shot ping against a not-yet-registered address (the "Test" button);
     // blocking (<= ~2 s), run from the UI thread on explicit user action.
     void testSystemAddress(const std::string& host, int port);
-    // Cross-system display list: every display of every online system with
-    // the system it is linked to. Relinking a display to another system is
-    // done from its Display settings dialog's System dropdown (issue 14).
+    // The Displays window (left column, bottom): the active system's
+    // displays and media library in tabs. Relinking a display to another
+    // system is done from its Display settings dialog's System dropdown
+    // (issue 14).
     void renderDisplaysWindow();
     void renderPlaybackWindow();
     void renderTransportBlock(const SystemConnection::Snapshot& snap);
     void renderScenesBlock(const SystemConnection::Snapshot& snap);
-    // Live-override block of the playback pane: shows the active system's
-    // active scene; its controls broadcast layer.set / layer.clear to every
-    // connected system (issue 13) so a live adjustment reaches all players,
-    // while the displayed values keep resyncing from the active system.
-    void renderLayersBlock(const SystemConnection::Snapshot& snap);
     void renderDisplaysBlock(const SystemConnection::Snapshot& snap);
+    // The 2D show view (center, top): the active system's current frame as
+    // a free-camera 2D picture - the display wall, the visible layers (color
+    // quads, media with thumbnails, video badges) and the "Reset view"
+    // overlay. Draws on the scene child's draw list (see ShowView.h).
+    void renderShowViewWindow();
+    // Fits the show view camera to the whole display wall (union of all
+    // displays, ~10% margin; an unknown wall shows a 1920x1080 box),
+    // centered in the scene child (childSize in screen px).
+    void fitShowViewCamera(const ImVec2& childSize, const std::string& signature);
     // Opens the "Display settings" / "Projection warp" dialog for the given
     // display record. The settings dialog starts on `target` (the system the
     // record came from) and can relink the display to another system via its
@@ -254,15 +272,6 @@ private:
     // `outResult` is non-null the result JSON is also returned.
     bool sendActive(const std::string& method, const nlohmann::json& params, std::string& error,
                     nlohmann::json* outResult = nullptr);
-    // Sends a command to every connected system (not just the active one)
-    // and logs the exchange per system. The Layers block's live-override
-    // controls use it: an operator adjusting a live layer expects the whole
-    // wall to follow, not only the system the playback pane is showing.
-    // Returns true when every connected system accepted the command (also
-    // when none is connected - nothing to apply); `error` carries the first
-    // failure.
-    bool sendToAllConnected(const std::string& method, const nlohmann::json& params,
-                            std::string& error);
     void consoleSubmit();
     // Builds the show.loadJson params for pushing the editor's document to a
     // system: the document plus the directory of the file it was opened
@@ -356,25 +365,6 @@ private:
     bool m_HaveNameEdit = false;
     std::string m_MediaPathInput;
 
-    // Per-layer widget state. Opacity/visible/blend keep the last values the
-    // UI sent (the engine reports no effective values for them). x/y are
-    // resynced from scene.list (it reports the active scene's effective
-    // positions), except while a field is being edited or while a just-sent
-    // value is still catching up in the polled snapshot.
-    struct LayerLive
-    {
-        float opacity = 1.0f;
-        bool visible = true;
-        int blend = 0; // index into kBlendModes
-        float x = 0.0f;
-        float y = 0.0f;
-    };
-    std::map<Id, LayerLive> m_LayerLive;
-    // When the UI last sent a layer's position (or cleared it: erased). The
-    // polled snapshot lags the send, so the engine's reported position is
-    // not trusted as a resync source until it has had time to arrive.
-    std::map<Id, std::chrono::steady_clock::time_point> m_LayerPosSentAt;
-
     // "Display settings" dialog (Edit... in the Displays block). The working
     // values live in m_DisplayEdits, resynced from the snapshot every time
     // the dialog opens; Apply sends display.set to the selected system (or
@@ -413,6 +403,33 @@ private:
     // Show editor selection (scenes tab).
     int m_SelectedSceneIdx = 0;
     int m_LastActive = -1; // to reset transient playback state on switch
+
+    // Show view (2D render) state. m_ShowScene is rebuilt every frame from
+    // the active system's snapshot; the camera is in output-space pixels
+    // (y down): screen = childOrigin + world * scale + offset. fitted is
+    // false until the first fit (or a system switch); m_ShowFittedSignature
+    // is the display signature the camera was last fitted to (a changed
+    // wall auto-refits).
+    struct ShowViewCamera
+    {
+        float scale = 0.f;
+        float offsetX = 0.f;
+        float offsetY = 0.f;
+        bool fitted = false;
+    };
+    ShowViewCamera m_ShowCam;
+    std::string m_ShowFittedSignature;
+    ShowViewScene m_ShowScene;
+    // The scene child's rect (screen px; zero when the window is hidden) -
+    // the camera math's origin and the drawing bounds.
+    ImVec2 m_ShowViewRectMin{0.f, 0.f};
+    ImVec2 m_ShowViewRectMax{0.f, 0.f};
+    bool m_ShowViewVisible = false; // the window was Begun this frame
+    ShowTexturePool m_ShowTexPool;
+
+    // The live self-test's scratch BMP (written by selfTestSystem, removed
+    // by testRemoveSelfTestBmp after the frame phases).
+    std::string m_SelfTestBmpPath;
 
     // Media tab probe result (last probe, shown under the list).
     std::string m_MediaProbeResult;
