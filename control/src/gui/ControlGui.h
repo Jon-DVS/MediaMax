@@ -22,6 +22,8 @@
 #include <string>
 #include <vector>
 
+#include <imgui.h>
+
 #include "gui/ShowEditor.h"
 #include "gui/ShowView.h"
 #include "gui/SystemConnection.h"
@@ -314,6 +316,35 @@ private:
     // run inside frame() while the modal host window is current.
     void openModal(const std::string& which);
 
+    // --- hotkeys -------------------------------------------------------------
+
+    // One hotkey binding: what it does (the Help > Hot Keys list) and the
+    // key chord that triggers it. The table below is the single source of
+    // truth - remap-ready by design: a future binding editor writes into
+    // the entries (and persists them); both the per-frame processing and
+    // the Hot Keys list read the table, so adding a hotkey is a one-row
+    // change plus one performHotkey() case.
+    struct HotkeyBinding
+    {
+        const char* id; // stable identifier (the performHotkey() switch)
+        const char* label; // the action's name (Hot Keys list)
+        const char* help; // what it does (Hot Keys list)
+        ImGuiKey key; // the chord's main key
+        int mods; // ImGuiMod_* mask (0 = no modifiers)
+    };
+    // The current bindings (see HotkeyBinding).
+    static const std::vector<HotkeyBinding>& hotkeyBindings();
+    // Per-frame hotkey processing: fires a binding's action when its chord
+    // is pressed and no widget owns the keyboard (text fields, open
+    // popups). Runs at the top of frame().
+    void processHotkeys();
+    // Dispatches a fired binding to its action (one case per id).
+    void performHotkey(const HotkeyBinding& binding);
+    // The "play_pause" action: toggles playback on the active system (play
+    // when it is not playing, pause when it is) - the transport's Play and
+    // Pause buttons in one chord.
+    void togglePlayback();
+
     // --- helpers -------------------------------------------------------------
 
     void log(const std::string& line);
@@ -372,6 +403,7 @@ private:
     bool m_PullModal = false;
     std::string m_PullPath;
     bool m_AboutModal = false;
+    bool m_HotKeysModal = false;
     // "System settings" dialog (settings... in the Systems pane, issue 16):
     // the entry's identity and address (name / host / port - the same
     // fields the show file's `systems` list stores). m_SysSettingsIndex is

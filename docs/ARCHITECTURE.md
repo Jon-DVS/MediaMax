@@ -312,7 +312,11 @@ system that currently runs a same-named live display, or *unmapped*), a
 center column split into the 2D Show
 view (top) over the Playback + Console tab block (bottom — the two windows
 share one dock node, tabbed in the order Playback, Console), and Show
-Editor (right). The initial layout is built once by
+Editor (right). Hotkeys (currently Space = play/pause on the active
+system) come from one binding table (`ControlGuiApp::hotkeyBindings`),
+fired per frame only while no widget owns the keyboard; Help > Hot Keys
+lists the same table (remap-ready: bindings are data). The initial
+layout is built once by
 `DockBuilder` on the first frame; `DockSpace()` is then called with the
 *dockspace root* ID every frame. (The builder's split calls replace the node
 they split, so the "remaining" node ID must be tracked in a separate

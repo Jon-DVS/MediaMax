@@ -62,6 +62,11 @@ public:
     bool init(GLFWwindow* window, ControlGuiApp* app, std::string& error);
     void shutdown();
     bool renderFrame();
+    // Runs just before ImGui::NewFrame() (after the back end has polled the
+    // real input): the self-test uses it to inject synthetic key events
+    // (ImGuiIO::AddKeyEvent must land before NewFrame) so the hotkey path
+    // can be exercised without physical input.
+    std::function<void()> preNewFrameHook;
 
 private:
     GLFWwindow* m_Window = nullptr;
@@ -185,6 +190,10 @@ bool GuiRuntime::renderFrame()
     // NewFrame is a no-op in this ImGui version but kept for parity).
     ImGui_ImplVulkan_NewFrame();
     ImGui_ImplGlfw_NewFrame();
+    if (preNewFrameHook)
+    {
+        preNewFrameHook(); // self-test key injection (see the member)
+    }
     ImGui::NewFrame();
     m_App->frame();
     ImGui::Render();
@@ -441,7 +450,7 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
                        "offline display entry is marked unmapped\n";
     }
     std::vector<const char*> modalNames = {"about", "open", "saveas", "media", "pull", "edit",
-                                           "warp", "mediadetails"};
+                                           "warp", "mediadetails", "hotkeys"};
     if (haveLiveSystem)
     {
         // The System settings dialog's button sits on a system row; the
@@ -594,6 +603,49 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
                   << " auto-pushed document carries the system list (show.save round-trip)"
                   << (systemsInDoc ? std::string() : " - " + systemsDetail) << std::endl;
         liveOk = liveOk && systemsInDoc;
+    }
+
+    // 4e) Space hotkey (play/pause): inject the real key event into
+    //     ImGui's input queue for the next frames (the same path the
+    //     backend uses for physical keys - AddKeyEvent must land before
+    //     NewFrame, hence the runtime hook) and verify the active engine's
+    //     playback state toggles. Bindings only fire when no widget owns
+    //     the keyboard; nothing is focused at this point.
+    if (haveLiveSystem && liveOk)
+    {
+        SystemConnection hk("hotkey-check", liveHost, livePort);
+        nlohmann::json st;
+        std::string stError;
+        const bool haveState =
+            hk.send("status", nlohmann::json::object(), st, stError) && st.contains("state");
+        const std::string s0 = haveState ? st["state"].get<std::string>() : std::string();
+        const std::string expect = (s0 == "playing") ? "paused" : "playing";
+        bool hotkeyOk = false;
+        std::string s1;
+        if (haveState)
+        {
+            // A press is a down->up pair: the down edge fires the binding
+            // on the frame where it is seen.
+            runtime.preNewFrameHook = [] { ImGui::GetIO().AddKeyEvent(ImGuiKey_Space, true); };
+            glfwPollEvents();
+            runtime.renderFrame();
+            runtime.preNewFrameHook = [] { ImGui::GetIO().AddKeyEvent(ImGuiKey_Space, false); };
+            glfwPollEvents();
+            runtime.renderFrame();
+            runtime.preNewFrameHook = nullptr;
+            // The toggle command is synchronous (sent during the frame), so
+            // the engine has applied it by now.
+            nlohmann::json st1;
+            std::string st1Error;
+            s1 = hk.send("status", nlohmann::json::object(), st1, st1Error) && st1.contains("state")
+                     ? st1["state"].get<std::string>()
+                     : std::string();
+            hotkeyOk = (s1 == expect);
+        }
+        liveReport += std::string(hotkeyOk ? "PASS " : "FAIL ") +
+                      "space hotkey toggled playback (" + s0 + " -> " +
+                      (hotkeyOk ? expect : "<" + s1 + ">") + ")\n";
+        liveOk = liveOk && hotkeyOk;
     }
 
     // 4a) Loading a show (File > Open) pushes it to every connected system

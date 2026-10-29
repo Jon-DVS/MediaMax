@@ -209,6 +209,10 @@ const char* modalPopupName(const std::string& which)
     {
         return "Media details";
     }
+    if (which == "hotkeys")
+    {
+        return "Hot Keys";
+    }
     return nullptr;
 }
 
@@ -219,6 +223,23 @@ std::string truncate(const std::string& s, size_t limit)
 
 } // namespace
 
+// The hotkey table (Help > Hot Keys lists it; processHotkeys() fires it).
+// See HotkeyBinding in ControlGui.h for the remap-ready design: bindings
+// are data, so a future "edit bindings" UI only writes into these (and
+// persists them).
+const std::vector<ControlGuiApp::HotkeyBinding>& ControlGuiApp::hotkeyBindings()
+{
+    static const std::vector<HotkeyBinding> kBindings = {
+        {"play_pause",
+         "Play / Pause",
+         "Toggle playback on the active system (play when stopped or paused, pause when "
+         "playing).",
+         ImGuiKey_Space,
+         0},
+    };
+    return kBindings;
+}
+
 ControlGuiApp::ControlGuiApp()
 {
 }
@@ -228,8 +249,56 @@ ControlGuiApp::~ControlGuiApp()
     // SystemConnection destructors stop and join their poll threads.
 }
 
+void ControlGuiApp::processHotkeys()
+{
+    // A binding fires only when nothing else owns the keyboard: a text
+    // field being typed into, a menu open, or any active widget sets
+    // WantCaptureKeyboard (the previous frame's value - the input ground
+    // truth for this frame).
+    if (ImGui::GetIO().WantCaptureKeyboard)
+    {
+        return;
+    }
+    for (const HotkeyBinding& binding : hotkeyBindings())
+    {
+        // Exact chord (IsKeyChordPressed compares the modifier state
+        // exactly): the main key pressed on its first frame (no
+        // auto-repeat), a bare binding not firing under Ctrl+key.
+        const ImGuiKeyChord chord = static_cast<ImGuiKeyChord>(binding.key | binding.mods);
+        if (ImGui::IsKeyChordPressed(chord))
+        {
+            performHotkey(binding);
+        }
+    }
+}
+
+void ControlGuiApp::performHotkey(const HotkeyBinding& binding)
+{
+    if (std::strcmp(binding.id, "play_pause") == 0)
+    {
+        togglePlayback();
+    }
+    // New hotkeys: add the binding to hotkeyBindings() and a case here.
+}
+
+void ControlGuiApp::togglePlayback()
+{
+    SystemConnection* active = activeConnection();
+    if (active == nullptr || !active->snapshot().haveStatus)
+    {
+        return; // nothing to toggle (same gate as the transport's buttons)
+    }
+    const auto snap = active->snapshot();
+    const bool playing = snap.status.value("state", std::string()) == "playing";
+    std::string error;
+    sendActive(playing ? "playback.pause" : "playback.play", json::object(), error);
+}
+
 void ControlGuiApp::frame()
 {
+    // Hotkeys first: key state and the previous frame's keyboard capture
+    // (text fields, open popups) are the frame's input ground truth.
+    processHotkeys();
     if (m_Active != m_LastActive)
     {
         // Reset the transient playback edit state on system switch.
@@ -621,6 +690,11 @@ void ControlGuiApp::renderMenuBar()
     }
     if (ImGui::BeginMenu("Help"))
     {
+        if (ImGui::MenuItem("Hot Keys"))
+        {
+            m_HotKeysModal = true;
+            ImGui::OpenPopup(modalPopupId("Hot Keys"));
+        }
         if (ImGui::MenuItem("About"))
         {
             m_AboutModal = true;
@@ -3228,6 +3302,44 @@ void ControlGuiApp::renderModals()
             ImGui::EndPopup();
         }
     }
+    if (m_HotKeysModal)
+    {
+        modalStartSize(560.0f);
+        if (ImGui::BeginPopupModal("Hot Keys", &m_HotKeysModal))
+        {
+            ImGui::TextWrapped(
+                "Global shortcuts. They fire when no text field or popup has the keyboard - "
+                "typing in a field or the console is never intercepted.");
+            ImGui::Spacing();
+            // One row per binding (hotkeyBindings() is the single source of
+            // truth, so the list tracks the table).
+            if (ImGui::BeginTable("##hotkeys", 3,
+                                  ImGuiTableFlags_BordersOuter | ImGuiTableFlags_SizingStretchProp))
+            {
+                ImGui::TableSetupColumn("key", ImGuiTableColumnFlags_WidthFixed, 120.0f);
+                ImGui::TableSetupColumn("action");
+                ImGui::TableSetupColumn("what it does");
+                ImGui::TableHeadersRow();
+                for (const HotkeyBinding& binding : hotkeyBindings())
+                {
+                    ImGui::TableNextRow();
+                    ImGui::TableNextColumn();
+                    ImGui::TextUnformatted(ImGui::GetKeyChordName(
+                        static_cast<ImGuiKeyChord>(binding.key | binding.mods)));
+                    ImGui::TableNextColumn();
+                    ImGui::TextUnformatted(binding.label);
+                    ImGui::TableNextColumn();
+                    ImGui::TextWrapped("%s", binding.help);
+                }
+                ImGui::EndTable();
+            }
+            if (ImGui::Button("Close##hotkeysclose"))
+            {
+                m_HotKeysModal = false;
+            }
+            ImGui::EndPopup();
+        }
+    }
     if (m_SysSettingsModal)
     {
         modalStartSize(440.0f);
@@ -3989,6 +4101,10 @@ void ControlGuiApp::openModal(const std::string& which)
         openSystemSettings(index);
         return;
     }
+    else if (which == "hotkeys")
+    {
+        m_HotKeysModal = true;
+    }
     else
     {
         m_AboutModal = true;
@@ -4062,6 +4178,11 @@ bool ControlGuiApp::testCloseModal(const std::string& which)
     if (which == "about")
     {
         m_AboutModal = false;
+        return true;
+    }
+    if (which == "hotkeys")
+    {
+        m_HotKeysModal = false;
         return true;
     }
     if (which == "mediadetails")
