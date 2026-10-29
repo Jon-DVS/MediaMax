@@ -93,6 +93,11 @@ private:
         // sync reconciles it with the record, like enabled/geometry).
         bool appliedAlwaysOnTop = true;
 
+        // Last vsync state applied to the swapchain (present mode). The
+        // per-frame sync reconciles it with the record; a change recreates
+        // the swapchain (FIFO = vsync on, MAILBOX = vsync off).
+        bool appliedVsync = true;
+
         // Last record geometry applied to the window. pollWindowEvents()
         // keeps window and DisplayManager record in sync in both directions;
         // these values tell which side changed last, and applyGraceFrames

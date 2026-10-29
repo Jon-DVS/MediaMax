@@ -78,6 +78,7 @@ nlohmann::json displayToJson(const Display& d)
         {"enabled", d.enabled},
         {"alwaysOnTop", d.alwaysOnTop},
         {"statusOverlay", d.statusOverlay},
+        {"vsync", d.vsync},
         {"monitor", d.monitor},
         // The current projection warp (display.warp.set's `points` layout:
         // absolute positions in display-local UV, row-major). Clients use
@@ -954,6 +955,10 @@ nlohmann::json CommandServer::handleDisplaySet(const nlohmann::json& params) con
     if (params.contains("statusOverlay"))
     {
         m_Displays.setDisplayStatusOverlay(id, params["statusOverlay"].get<bool>());
+    }
+    if (params.contains("vsync"))
+    {
+        m_Displays.setDisplayVsync(id, params["vsync"].get<bool>());
     }
     if (params.contains("name") && params["name"].is_string())
     {

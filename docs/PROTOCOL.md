@@ -372,7 +372,8 @@ Display object shape (used by `display.list`, `display.set`, `status`):
 ```json
 {"id":1, "name":"Wall A", "x":0, "y":0,
  "width":1920, "height":1080, "brightness":1.0, "enabled":true,
- "alwaysOnTop":true, "statusOverlay":false, "monitor":"NVIDIA GeForce RTX 4090",
+ "alwaysOnTop":true, "statusOverlay":false, "vsync":true,
+ "monitor":"NVIDIA GeForce RTX 4090",
  "warp":{"mode":"grid", "rows":2, "cols":2,
          "points":[[0,0],[1,0],[0,1],[1,1]]}}
 ```
@@ -383,7 +384,14 @@ of enabled display rectangles defines the scene size.
 `name` is the display's label (shown in the control GUI and the status
 overlay); `display.set` can change it. `alwaysOnTop` (default `true`) keeps
 the display's window above all other windows on the engine machine;
-`display.set` can change it. `monitor` is the physical output the display's
+`display.set` can change it. `vsync` (default `true`) controls the
+display's swapchain present mode: `true` = `FIFO` (one image queued per
+refresh boundary, compositor-paced), `false` = `MAILBOX` (the acquire does
+not block on a full image queue, so a fresh frame reaches the next refresh
+boundary sooner; surfaces that do not support mailbox fall back to `FIFO`).
+The display rate is the monitor's refresh rate either way — vsync off is
+lower-latency, not uncapped. A change recreates the display's swapchain on
+the engine's next frame (the command result already reports the new value). `monitor` is the physical output the display's
 window is on (the OS monitor name, empty when the window is not on a
 monitor); the playback engine maintains it — it follows the window when
 the window manager moves it to another output — and clients treat it as
@@ -400,12 +408,12 @@ Displays block carries the per-display **on** checkbox (a `display.set`
 with `enabled`) and **Enable all / Disable all** buttons for the whole
 wall. The Display settings dialog (Edit...) shows the display's location -
 the system and the physical output - plus an editable **Name** field, an
-**Always on top** checkbox, and a **System** dropdown: the system a display
-is linked to. Applying settings to the current system is a plain
-`display.set`; applying them to a different system **moves** the display
-there — `display.add` + `display.set` (brightness/enabled/alwaysOnTop,
-which `display.add` does not carry) on the target, then `display.remove`
-on the source.
+**Always on top** checkbox, a **Vsync** checkbox, and a **System** dropdown:
+the system a display is linked to. Applying settings to the current system
+is a plain `display.set`; applying them to a different system **moves** the
+display there — `display.add` + `display.set` (brightness/enabled/
+alwaysOnTop/vsync, which `display.add` does not carry) on the target, then
+`display.remove` on the source.
 
 #### `display.add`
 
@@ -446,8 +454,13 @@ Update any subset of a display's properties.
 - Params: `display` (int id, required); any of `x`, `y`, `width`, `height`
   (ints, applied as one geometry update), `name` (string, the display's
   label), `brightness` (number, default 1.0), `enabled` (bool),
-  `alwaysOnTop` (bool, default true), `statusOverlay` (bool, default false).
+  `alwaysOnTop` (bool, default true), `statusOverlay` (bool, default false),
+  `vsync` (bool, default true).
 - Result: the updated display object.
+
+`vsync` changes the display's swapchain present mode (FIFO on, MAILBOX
+off with a FIFO fallback where unsupported); the engine applies it by
+recreating the swapchain on its next frame.
 
 `statusOverlay` toggles the per-display status overlay: when true, the
 playback engine draws a small screen-aligned text block over that output

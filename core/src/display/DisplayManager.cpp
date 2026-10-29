@@ -113,6 +113,17 @@ bool DisplayManager::setDisplayStatusOverlay(Id id, bool statusOverlay)
     return true;
 }
 
+bool DisplayManager::setDisplayVsync(Id id, bool vsync)
+{
+    auto display = find(id);
+    if (!display)
+    {
+        return false;
+    }
+    (*display)->vsync = vsync;
+    return true;
+}
+
 bool DisplayManager::setDisplayName(Id id, std::string name)
 {
     auto display = find(id);

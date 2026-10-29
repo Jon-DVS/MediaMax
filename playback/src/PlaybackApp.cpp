@@ -402,6 +402,9 @@ bool PlaybackApp::createSwapchainFor(DisplaySurface& ds, std::string& error)
     desc.nvrhiDevice = m_Vulkan->vulkanDevice();
     desc.width = ds.width;
     desc.height = ds.height;
+    // The per-frame vsync sync recreates the swapchain if the record
+    // disagrees (a display added with vsync off gets its mode on frame 1).
+    desc.vsync = ds.appliedVsync;
     if (!ds.swapchain.create(desc, error))
     {
         return false;
@@ -455,7 +458,7 @@ void PlaybackApp::handleWindowResizes()
         std::string error;
         if (ds.swapchain.valid())
         {
-            if (!ds.swapchain.recreate(ds.width, ds.height, error))
+            if (!ds.swapchain.recreate(ds.width, ds.height, ds.appliedVsync, error))
             {
                 Logger::instance().error("display {} swapchain recreate failed: {}", ds.displayId, error);
             }
@@ -812,6 +815,70 @@ void PlaybackApp::renderFrame(const FrameSnapshot& snap)
                 Logger::instance().warning("frame fence wait timed out (display {})", ds.displayId);
             }
             ds.fencePending = false;
+        }
+    }
+
+    // 1b. Apply pending vsync toggles: the present mode is a swapchain
+    //     creation parameter, so a record/surface mismatch needs a
+    //     recreation. The fence wait above has quiesced each display's own
+    //     render work; the global idle wait below also drains in-flight
+    //     presents (a swapchain whose images the compositor is still
+    //     presenting must not be destroyed).
+    bool anyVsyncPending = false;
+    for (const auto& sp : m_Surfaces)
+    {
+        const DisplaySurface& ds = *sp;
+        if (!ds.swapchain.valid())
+        {
+            continue;
+        }
+        for (const auto& d : snap.displays)
+        {
+            if (d.id == ds.displayId && d.vsync != ds.appliedVsync)
+            {
+                anyVsyncPending = true;
+                break;
+            }
+        }
+    }
+    if (anyVsyncPending)
+    {
+        m_Vulkan->nvrhiDevice()->waitForIdle();
+        for (auto& sp : m_Surfaces)
+        {
+            DisplaySurface& ds = *sp;
+            if (!ds.swapchain.valid())
+            {
+                continue;
+            }
+            bool recordVsync = ds.appliedVsync;
+            bool haveRecord = false;
+            for (const auto& d : snap.displays)
+            {
+                if (d.id == ds.displayId)
+                {
+                    recordVsync = d.vsync;
+                    haveRecord = true;
+                    break;
+                }
+            }
+            if (!haveRecord || recordVsync == ds.appliedVsync)
+            {
+                continue;
+            }
+            std::string error;
+            if (ds.swapchain.recreate(ds.width, ds.height, recordVsync, error))
+            {
+                ds.appliedVsync = recordVsync;
+                Logger::instance().info("display {}: vsync {} (swapchain recreated)", ds.displayId,
+                                        recordVsync ? "on" : "off");
+            }
+            else
+            {
+                Logger::instance().warning(
+                    "display {}: vsync change failed, retrying next frame: {}", ds.displayId,
+                    error);
+            }
         }
     }
 

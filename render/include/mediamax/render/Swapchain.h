@@ -45,16 +45,21 @@ public:
 
         int width = 0;
         int height = 0;
+
+        // Vsync (see Display::vsync): true = FIFO present mode (compositor
+        // paced), false = MAILBOX (FIFO fallback when unsupported).
+        bool vsync = true;
     };
 
-    // Creates the swapchain (FIFO present mode, 3-4 images). Returns false
-    // with `error` set on failure.
+    // Creates the swapchain (present mode per Desc::vsync, 3-4 images).
+    // Returns false with `error` set on failure.
     bool create(const Desc& desc, std::string& error);
 
-    // Destroys and recreates the swapchain at a new size (window resize).
-    // The queue must be idle (call the device's waitForIdle first) or the
-    // destroy blocks on in-flight images.
-    bool recreate(int width, int height, std::string& error);
+    // Destroys and recreates the swapchain at a new size and present mode
+    // (window resize, vsync toggle). The queue must be idle (call the
+    // device's waitForIdle first) or the destroy blocks on in-flight
+    // images.
+    bool recreate(int width, int height, bool vsync, std::string& error);
 
     // Destroys the swapchain (images and wrapped textures are released).
     // The queue must be idle (call the device's waitForIdle first).
@@ -102,6 +107,7 @@ private:
     VkPhysicalDevice m_PhysicalDevice = VK_NULL_HANDLE;
     VkDevice m_Device = VK_NULL_HANDLE;
     nvrhi::vulkan::IDevice* m_NvrhiDevice = nullptr;
+    bool m_Vsync = true;
 };
 
 } // namespace mediamax::render

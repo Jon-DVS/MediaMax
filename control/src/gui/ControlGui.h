@@ -398,6 +398,7 @@ private:
         bool enabled = true; // round-tripped by Apply (the toggle itself lives
                              // in the Displays block, not the dialog)
         bool alwaysOnTop = true;
+        bool vsync = true;
         std::string name; // carried through a move (display.add takes a name)
         std::string monitor; // physical output (read-only in the dialog)
     };

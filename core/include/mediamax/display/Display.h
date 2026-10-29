@@ -45,6 +45,15 @@ struct Display
     // timing) over this output. Off by default; see overlay/StatusOverlay.
     bool statusOverlay = false;
 
+    // Vertical synchronization of this output's swapchain (on by default).
+    // When on the swapchain uses the FIFO present mode (one image queued per
+    // refresh, the compositor paces the output); when off it uses MAILBOX
+    // (falling back to FIFO on surfaces that do not support it) so new
+    // frames reach the next refresh boundary without the acquire blocking
+    // on a full FIFO queue. Changing it at runtime recreates the display's
+    // swapchain.
+    bool vsync = true;
+
     // The physical output (OS monitor name) the display's window is on,
     // e.g. "NVIDIA GeForce RTX 4090". Empty when the window is not on a
     // monitor (off-screen) or the name is unknown. Maintained by the

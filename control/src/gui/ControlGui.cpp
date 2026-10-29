@@ -1308,6 +1308,7 @@ void ControlGuiApp::openDisplayEdit(const json& display, SystemConnection* targe
     de.brightness = static_cast<float>(display.value("brightness", 1.0));
     de.enabled = display.value("enabled", true);
     de.alwaysOnTop = display.value("alwaysOnTop", true);
+    de.vsync = display.value("vsync", true);
     de.name = display.value("name", "");
     de.monitor = display.value("monitor", "");
     m_EditTarget = target;
@@ -1362,11 +1363,12 @@ bool ControlGuiApp::applyDisplayEdit()
             return false;
         }
         const Id newId = static_cast<Id>(result.value("id", 0u));
-        // display.add does not carry brightness/enabled/alwaysOnTop: apply
-        // the dialog's values to the recreated display.
+        // display.add does not carry brightness/enabled/alwaysOnTop/vsync:
+        // apply the dialog's values to the recreated display.
         if (!target->send("display.set",
                           {{"display", newId}, {"brightness", de.brightness},
-                           {"enabled", de.enabled}, {"alwaysOnTop", de.alwaysOnTop}},
+                           {"enabled", de.enabled}, {"alwaysOnTop", de.alwaysOnTop},
+                           {"vsync", de.vsync}},
                           result, error))
         {
             m_EditError = "display.set on '" + target->name() + "' after the move failed: " + error;
@@ -1397,7 +1399,7 @@ bool ControlGuiApp::applyDisplayEdit()
                        {"x", de.x}, {"y", de.y},
                        {"width", de.width}, {"height", de.height},
                        {"brightness", de.brightness}, {"enabled", de.enabled},
-                       {"alwaysOnTop", de.alwaysOnTop}},
+                       {"alwaysOnTop", de.alwaysOnTop}, {"vsync", de.vsync}},
                       result, error))
     {
         m_EditError = error;
@@ -3171,6 +3173,10 @@ void ControlGuiApp::renderModals()
                 // interface); the dialog still round-trips de.enabled so
                 // Apply (and a move) keep the current state.
                 ImGui::Checkbox("Always on top##editaot", &de.alwaysOnTop);
+                // Vsync (swapchain present mode): on = FIFO (compositor
+                // paced), off = MAILBOX. A change recreates the display's
+                // swapchain on the engine (see Display::vsync).
+                ImGui::Checkbox("Vsync##editvsync", &de.vsync);
                 if (ImGui::Button("Apply##editapply"))
                 {
                     applyDisplayEdit();
@@ -4120,6 +4126,18 @@ bool ControlGuiApp::selfTestSystem(const std::string& host, std::uint16_t port, 
         const Id displayId = static_cast<Id>(result["displays"][0].value("id", 0u));
         step("display.set brightness",
              conn.send("display.set", {{"display", displayId}, {"brightness", 1.0}}, result, error),
+             error);
+        // Vsync: the result must carry the new value; the engine reacts on
+        // its next frame by recreating the display's swapchain (FIFO <->
+        // MAILBOX present mode), and the frame phases keep rendering from
+        // the recreated swapchain.
+        step("display.set vsync off (swapchain -> mailbox)",
+             conn.send("display.set", {{"display", displayId}, {"vsync", false}}, result, error) &&
+                 result.value("vsync", true) == false,
+             error);
+        step("display.set vsync on (restore fifo)",
+             conn.send("display.set", {{"display", displayId}, {"vsync", true}}, result, error) &&
+                 result.value("vsync", false) == true,
              error);
         step("display.warp.set identity",
              conn.send("display.warp.set",

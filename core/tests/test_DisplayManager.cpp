@@ -138,6 +138,22 @@ TEST_CASE("Always-on-top is on by default and settable per display")
     CHECK_FALSE(mgr.setDisplayAlwaysOnTop(42, false));
 }
 
+TEST_CASE("Vsync is on by default and settable per display")
+{
+    DisplayManager mgr;
+    const auto a = mgr.addDisplay("a", 0, 0, 100, 100);
+    const auto b = mgr.addDisplay("b", 500, 0, 100, 100);
+    CHECK((*mgr.find(a.id))->vsync == true);
+    CHECK((*mgr.find(b.id))->vsync == true);
+
+    CHECK(mgr.setDisplayVsync(a.id, false));
+    CHECK((*mgr.find(a.id))->vsync == false);
+    CHECK((*mgr.find(b.id))->vsync == true);
+    CHECK(mgr.setDisplayVsync(a.id, true));
+    CHECK((*mgr.find(a.id))->vsync == true);
+    CHECK_FALSE(mgr.setDisplayVsync(42, false));
+}
+
 TEST_CASE("Empty manager has zero bounds")
 {
     DisplayManager mgr;

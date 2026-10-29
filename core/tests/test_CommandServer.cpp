@@ -867,6 +867,31 @@ TEST_CASE("display.set toggles always-on-top (default on)")
     CHECK_FALSE(f.run("display.set", {{"display", 999}, {"alwaysOnTop", true}}).ok);
 }
 
+TEST_CASE("display.set toggles vsync (default on)")
+{
+    Fixture f;
+    // Default: on.
+    const Response list = f.run("display.list");
+    REQUIRE(list.ok);
+    CHECK(list.result.at("displays").at(0).at("vsync").get<bool>() == true);
+
+    // Off (the playback engine reacts by recreating the display's swapchain
+    // in the FIFO->MAILBOX present mode).
+    const Response off = f.run("display.set", {{"display", f.displayA}, {"vsync", false}});
+    REQUIRE(off.ok);
+    CHECK(off.result.at("vsync").get<bool>() == false);
+    const auto display = f.displays.find(f.displayA);
+    REQUIRE(display.has_value());
+    CHECK((*display)->vsync == false);
+
+    // Back on + invalid ids rejected.
+    const Response on = f.run("display.set", {{"display", f.displayA}, {"vsync", true}});
+    REQUIRE(on.ok);
+    CHECK(on.result.at("vsync").get<bool>() == true);
+    CHECK((*display)->vsync == true);
+    CHECK_FALSE(f.run("display.set", {{"display", 999}, {"vsync", true}}).ok);
+}
+
 TEST_CASE("show.save then show.load round trips the show")
 {
     Fixture f;

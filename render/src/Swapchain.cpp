@@ -43,6 +43,7 @@ bool Swapchain::create(const Desc& desc, std::string& error)
     m_PhysicalDevice = desc.physicalDevice;
     m_Device = desc.device;
     m_NvrhiDevice = desc.nvrhiDevice;
+    m_Vsync = desc.vsync;
     return build(desc, desc.width, desc.height, error);
 }
 
@@ -99,6 +100,33 @@ bool Swapchain::build(const Desc& desc, int width, int height, std::string& erro
     }
     imageCount = std::max<std::uint32_t>(imageCount, 3);
 
+    // Present mode: FIFO (vsync on, compositor-paced) or MAILBOX (vsync
+    // off: acquire does not block on a full image queue, so a fresh frame
+    // reaches the next refresh boundary sooner; the compositor still flips
+    // at the display's refresh rate). Surfaces that do not support mailbox
+    // fall back to FIFO.
+    VkPresentModeKHR presentMode = VK_PRESENT_MODE_FIFO_KHR;
+    if (!desc.vsync)
+    {
+        std::uint32_t modeCount = 0;
+        vkGetPhysicalDeviceSurfacePresentModesKHR(desc.physicalDevice, desc.surface, &modeCount,
+                                                  nullptr);
+        if (modeCount > 0)
+        {
+            std::vector<VkPresentModeKHR> modes(modeCount);
+            vkGetPhysicalDeviceSurfacePresentModesKHR(desc.physicalDevice, desc.surface, &modeCount,
+                                                      modes.data());
+            for (const VkPresentModeKHR m : modes)
+            {
+                if (m == VK_PRESENT_MODE_MAILBOX_KHR)
+                {
+                    presentMode = m;
+                    break;
+                }
+            }
+        }
+    }
+
     VkSwapchainCreateInfoKHR info{};
     info.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
     info.surface = desc.surface;
@@ -113,7 +141,7 @@ bool Swapchain::build(const Desc& desc, int width, int height, std::string& erro
     info.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
     info.preTransform = caps.currentTransform;
     info.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-    info.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+    info.presentMode = presentMode;
     info.clipped = VK_TRUE;
 
     res = vkCreateSwapchainKHR(desc.device, &info, nullptr, &m_Swapchain);
@@ -135,6 +163,7 @@ bool Swapchain::build(const Desc& desc, int width, int height, std::string& erro
     m_Format = chosen;
     m_Width = width;
     m_Height = height;
+    m_Vsync = desc.vsync;
     m_Images.clear();
     m_Images.reserve(imageCount);
     for (std::uint32_t i = 0; i < imageCount; ++i)
@@ -158,7 +187,7 @@ bool Swapchain::build(const Desc& desc, int width, int height, std::string& erro
     return true;
 }
 
-bool Swapchain::recreate(int width, int height, std::string& error)
+bool Swapchain::recreate(int width, int height, bool vsync, std::string& error)
 {
     if (width <= 0 || height <= 0)
     {
@@ -178,6 +207,7 @@ bool Swapchain::recreate(int width, int height, std::string& error)
     desc.nvrhiDevice = m_NvrhiDevice;
     desc.width = width;
     desc.height = height;
+    desc.vsync = vsync;
     return build(desc, width, height, error);
 }
 

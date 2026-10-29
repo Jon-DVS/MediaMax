@@ -40,6 +40,8 @@ public:
     bool setDisplayEnabled(Id id, bool enabled);
     bool setDisplayAlwaysOnTop(Id id, bool alwaysOnTop);
     bool setDisplayStatusOverlay(Id id, bool statusOverlay);
+    // Vsync (swapchain present mode) for this output.
+    bool setDisplayVsync(Id id, bool vsync);
     // The display name (shown in the UI and the status overlay).
     bool setDisplayName(Id id, std::string name);
     // The physical output the display's window is on (the playback engine
