@@ -38,6 +38,7 @@ public:
                             std::int32_t height);
     bool setDisplayBrightness(Id id, float brightness);
     bool setDisplayEnabled(Id id, bool enabled);
+    bool setDisplayAlwaysOnTop(Id id, bool alwaysOnTop);
     bool setDisplayStatusOverlay(Id id, bool statusOverlay);
     // The display name (shown in the UI and the status overlay).
     bool setDisplayName(Id id, std::string name);

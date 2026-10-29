@@ -47,6 +47,35 @@ constexpr auto kLayerPosSettle = std::chrono::seconds(2);
 // a dead connection.
 constexpr double kStalePollSeconds = 2.0;
 
+// The identity warp grid: n x n nodes on their ideal positions (the regular
+// lattice from (0,0) to (1,1), row-major). Float division on purpose - the
+// interior nodes sit at fractional positions.
+std::vector<std::array<float, 2>> identityWarpPoints(int n)
+{
+    std::vector<std::array<float, 2>> pts;
+    pts.reserve(static_cast<size_t>(n) * n);
+    for (int row = 0; row < n; ++row)
+    {
+        for (int col = 0; col < n; ++col)
+        {
+            pts.push_back({static_cast<float>(col) / static_cast<float>(n - 1),
+                           static_cast<float>(row) / static_cast<float>(n - 1)});
+        }
+    }
+    return pts;
+}
+
+// One dimension of the Catmull-Rom basis (a uniform cubic B-spline in
+// interpolating form; same math as core display/WarpMap.cpp): the value at
+// t in [0,1] between nodes p1 and p2, given the neighbours p0 and p3.
+float warpCatmullRom(float p0, float p1, float p2, float p3, float t)
+{
+    const float t2 = t * t;
+    const float t3 = t2 * t;
+    return 0.5f * ((2.f * p1) + (-p0 + p2) * t + (2.f * p0 - 5.f * p1 + 4.f * p2 - p3) * t2 +
+                   (-p0 + 3.f * p1 - 3.f * p2 + p3) * t3);
+}
+
 const ImVec4 kOkColor = {0.35f, 0.9f, 0.4f, 1.0f};
 const ImVec4 kBadColor = {0.9f, 0.35f, 0.35f, 1.0f};
 const ImVec4 kWarnColor = {1.0f, 0.8f, 0.3f, 1.0f};
@@ -1362,6 +1391,7 @@ void ControlGuiApp::openDisplayEdit(const json& display, SystemConnection* targe
     de.height = static_cast<int>(display.value("height", 1080));
     de.brightness = static_cast<float>(display.value("brightness", 1.0));
     de.enabled = display.value("enabled", true);
+    de.alwaysOnTop = display.value("alwaysOnTop", true);
     de.name = display.value("name", "");
     de.monitor = display.value("monitor", "");
     m_EditTarget = target;
@@ -1416,11 +1446,11 @@ bool ControlGuiApp::applyDisplayEdit()
             return false;
         }
         const Id newId = static_cast<Id>(result.value("id", 0u));
-        // display.add does not carry brightness/enabled: apply the dialog's
-        // values to the recreated display.
+        // display.add does not carry brightness/enabled/alwaysOnTop: apply
+        // the dialog's values to the recreated display.
         if (!target->send("display.set",
                           {{"display", newId}, {"brightness", de.brightness},
-                           {"enabled", de.enabled}},
+                           {"enabled", de.enabled}, {"alwaysOnTop", de.alwaysOnTop}},
                           result, error))
         {
             m_EditError = "display.set on '" + target->name() + "' after the move failed: " + error;
@@ -1450,7 +1480,8 @@ bool ControlGuiApp::applyDisplayEdit()
                       {{"display", m_EditDisplayId}, {"name", de.name},
                        {"x", de.x}, {"y", de.y},
                        {"width", de.width}, {"height", de.height},
-                       {"brightness", de.brightness}, {"enabled", de.enabled}},
+                       {"brightness", de.brightness}, {"enabled", de.enabled},
+                       {"alwaysOnTop", de.alwaysOnTop}},
                       result, error))
     {
         m_EditError = error;
@@ -1529,12 +1560,42 @@ void ControlGuiApp::openWarpEdit(const json& display, SystemConnection* target)
         it = stillThere ? ++it : m_WarpEdits.erase(it);
     }
     WarpEdit& we = m_WarpEdits[target][static_cast<Id>(display.value("id", 0u))];
+    // The display JSON reports the engine's current warp (mode, grid and
+    // absolute node positions): open the editor on what is actually
+    // applied, not on the last locally used grid.
+    if (display.contains("warp") && display["warp"].is_object())
+    {
+        const json& warp = display["warp"];
+        if (warp.contains("points") && warp["points"].is_array())
+        {
+            const json& pts = warp["points"];
+            const int rows = static_cast<int>(warp.value("rows", 0));
+            if (rows >= 2 && rows * rows == static_cast<int>(pts.size()))
+            {
+                we.n = rows;
+                we.spline = warp.value("mode", "grid") == "spline";
+                we.points.clear();
+                for (const auto& p : pts)
+                {
+                    if (p.is_array() && p.size() == 2)
+                    {
+                        we.points.push_back(
+                            {static_cast<float>(p[0].get<double>()),
+                             static_cast<float>(p[1].get<double>())});
+                    }
+                }
+                we.valid = static_cast<int>(we.points.size()) == rows * rows;
+            }
+        }
+    }
     if (!we.valid)
     {
         we.n = 2;
+        we.spline = false;
         we.points = {{0.0f, 0.0f}, {1.0f, 0.0f}, {0.0f, 1.0f}, {1.0f, 1.0f}};
         we.valid = true;
     }
+    m_WarpDragNode = -1;
     m_WarpTarget = target;
     m_WarpDisplayId = static_cast<Id>(display.value("id", 0u));
     m_WarpError.clear();
@@ -1562,10 +1623,34 @@ void ControlGuiApp::renderDisplaysBlock(const SystemConnection::Snapshot& snap)
     }
     const json& displays = snap.status["displays"];
 
+    // Bulk enable/disable for the whole wall (the per-display toggle is the
+    // "on" checkbox in the table below).
+    if (ImGui::Button("Enable all##dispenall"))
+    {
+        std::string error;
+        for (const auto& d : displays)
+        {
+            sendActive("display.set", {{"display", static_cast<Id>(d.value("id", 0u))},
+                                       {"enabled", true}},
+                       error);
+        }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Disable all##dispenoff"))
+    {
+        std::string error;
+        for (const auto& d : displays)
+        {
+            sendActive("display.set", {{"display", static_cast<Id>(d.value("id", 0u))},
+                                       {"enabled", false}},
+                       error);
+        }
+    }
+
     // The table is a read-only overview: values are read straight from the
     // snapshot (always the engine's current state). Editing happens in the
     // "Display settings" dialog (Edit...) and the warp in its own dialog
-    // (Warp...).
+    // (Warp...); the enabled and overlay checkboxes apply immediately.
     if (ImGui::BeginTable("displays", 10,
                           ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_BordersOuter))
     {
@@ -1576,7 +1661,7 @@ void ControlGuiApp::renderDisplaysBlock(const SystemConnection::Snapshot& snap)
         ImGui::TableSetupColumn("w", ImGuiTableColumnFlags_WidthFixed, 56.0f);
         ImGui::TableSetupColumn("h", ImGuiTableColumnFlags_WidthFixed, 56.0f);
         ImGui::TableSetupColumn("brightness", ImGuiTableColumnFlags_WidthFixed, 64.0f);
-        ImGui::TableSetupColumn("##enabled", ImGuiTableColumnFlags_WidthFixed, 48.0f);
+        ImGui::TableSetupColumn("on", ImGuiTableColumnFlags_WidthFixed, 48.0f);
         ImGui::TableSetupColumn("overlay", ImGuiTableColumnFlags_WidthFixed, 62.0f);
         ImGui::TableSetupColumn("##actions", ImGuiTableColumnFlags_WidthFixed, 196.0f);
         for (const auto& d : displays)
@@ -1600,13 +1685,14 @@ void ControlGuiApp::renderDisplaysBlock(const SystemConnection::Snapshot& snap)
             ImGui::TableNextColumn();
             ImGui::Text("%.2f", static_cast<double>(d.value("brightness", 1.0)));
             ImGui::TableNextColumn();
-            if (d.value("enabled", true))
+            // Enabled toggle (moved here from the Display settings dialog,
+            // which no longer exposes it): state comes from the snapshot, so
+            // a failed command simply snaps back on the next poll.
+            bool enabled = d.value("enabled", true);
+            if (ImGui::Checkbox(("##enabledisp" + std::to_string(id)).c_str(), &enabled))
             {
-                ImGui::TextUnformatted("on");
-            }
-            else
-            {
-                ImGui::TextDisabled("off");
+                std::string error;
+                sendActive("display.set", {{"display", id}, {"enabled", enabled}}, error);
             }
             ImGui::TableNextColumn();
             // Per-display status overlay (system IP, display name/number,
@@ -2875,7 +2961,10 @@ void ControlGuiApp::renderModals()
                 ImGui::InputInt("Width (px)##editw", &de.width);
                 ImGui::InputInt("Height (px)##edith", &de.height);
                 ImGui::SliderFloat("Brightness##editbright", &de.brightness, 0.0f, 1.0f, "%.2f");
-                ImGui::Checkbox("Enabled##editen", &de.enabled);
+                // The Enabled toggle lives in the Displays block (main
+                // interface); the dialog still round-trips de.enabled so
+                // Apply (and a move) keep the current state.
+                ImGui::Checkbox("Always on top##editaot", &de.alwaysOnTop);
                 if (ImGui::Button("Apply##editapply"))
                 {
                     applyDisplayEdit();
@@ -2919,61 +3008,205 @@ void ControlGuiApp::renderModals()
                 if (!we.valid)
                 {
                     we.n = 2;
-                    we.points = {{0.0f, 0.0f}, {1.0f, 0.0f}, {0.0f, 1.0f}, {1.0f, 1.0f}};
+                    we.spline = false;
+                    we.points = identityWarpPoints(we.n);
                     we.valid = true;
                 }
                 ImGui::Text("Display %u on %s", m_WarpDisplayId, m_WarpTarget->name().c_str());
                 ImGui::TextWrapped(
-                    "Grid of points in display-local UV, (0,0) top-left to (1,1) bottom-right; "
-                    "point index = row * grid + col. Identity is an undistorted rectangle.");
-                auto resetToIdentity = [&we]() {
-                    for (size_t p = 0; p < we.points.size(); ++p)
-                    {
-                        const int row = static_cast<int>(p / we.n);
-                        const int col = static_cast<int>(p % we.n);
-                        we.points[p] = {static_cast<float>(col / (we.n - 1)),
-                                        static_cast<float>(row / (we.n - 1))};
-                    }
-                };
-                const char* grids[] = {"2x2", "3x3", "4x4"};
+                    "Drag the nodes to shape the projection (display-local UV, (0,0) top-left "
+                    "to (1,1) bottom-right). Grid mode blends between the nodes linearly; "
+                    "spline mode runs a smooth cubic B-spline through them (the surface passes "
+                    "exactly through each node). Identity is an undistorted rectangle.");
+
+                // Interpolation mode + grid size. Changing the grid size
+                // resets to the identity lattice (nodes cannot be
+                // resampled).
+                const char* modes[] = {"Grid (bilinear)", "Spline (cubic B-spline)"};
+                int mode = we.spline ? 1 : 0;
+                if (ImGui::Combo("Mode##warpmode", &mode, modes, 2))
+                {
+                    we.spline = mode == 1;
+                }
+                ImGui::SameLine();
+                const char* grids[] = {"2x2", "3x3", "4x4", "5x5", "6x6"};
                 int grid = we.n - 2;
-                if (ImGui::Combo("Grid##grid", &grid, grids, 3))
+                if (grid < 0 || grid >= 5)
+                {
+                    grid = 0;
+                }
+                if (ImGui::Combo("Grid##warpgird", &grid, grids, 5))
                 {
                     we.n = grid + 2;
-                    we.points.clear();
-                    for (int row = 0; row < we.n; ++row)
+                    we.points = identityWarpPoints(we.n);
+                    m_WarpDragNode = -1;
+                }
+
+                // --- node pad ------------------------------------------------
+                // A square child region the display's UV space maps onto.
+                // The nodes are hit-tested and dragged with the mouse; the
+                // grid (or the spline isoparametric curves through the
+                // nodes) is drawn behind them.
+                const float padW =
+                    std::clamp(ImGui::GetContentRegionAvail().x, 160.0f, 520.0f);
+                ImGui::BeginChild("warppad##warpmodal", ImVec2(padW, padW), true);
+                {
+                    const float padL = ImGui::GetWindowPos().x;
+                    const float padT = ImGui::GetWindowPos().y;
+                    const float padR = padL + ImGui::GetWindowContentRegionMax().x;
+                    const float padB = padT + ImGui::GetWindowContentRegionMax().y;
+                    auto toPx = [padL, padT, padR, padB](float u, float v) {
+                        return ImVec2(padL + u * (padR - padL), padT + v * (padB - padT));
+                    };
+                    auto toUv = [padL, padT, padR, padB](const ImVec2& p) {
+                        return ImVec2((p.x - padL) / (padR - padL), (p.y - padT) / (padB - padT));
+                    };
+                    const ImVec2 mouse = ImGui::GetIO().MousePos;
+                    const bool mouseInPad =
+                        mouse.x >= padL && mouse.x <= padR && mouse.y >= padT && mouse.y <= padB;
+
+                    // Hit-test (the last node drawn is on top).
+                    int hover = -1;
+                    if (mouseInPad)
                     {
+                        for (int p = static_cast<int>(we.points.size()) - 1; p >= 0; --p)
+                        {
+                            const ImVec2 np = toPx(we.points[p][0], we.points[p][1]);
+                            const float dx = mouse.x - np.x;
+                            const float dy = mouse.y - np.y;
+                            if (dx * dx + dy * dy <= 100.0f) // 10 px
+                            {
+                                hover = p;
+                                break;
+                            }
+                        }
+                    }
+                    if (m_WarpDragNode < 0 && hover >= 0 && ImGui::IsMouseClicked(0) &&
+                        ImGui::IsWindowHovered())
+                    {
+                        m_WarpDragNode = hover;
+                    }
+                    if (m_WarpDragNode >= 0 && m_WarpDragNode < static_cast<int>(we.points.size()))
+                    {
+                        if (!ImGui::IsMouseDown(0))
+                        {
+                            m_WarpDragNode = -1;
+                        }
+                        else
+                        {
+                            // The node follows the mouse, clamped to the
+                            // display's UV space (the cursor may run off the
+                            // pad while dragging).
+                            const ImVec2 uv = toUv(mouse);
+                            we.points[m_WarpDragNode] = {std::clamp<float>(uv.x, 0.f, 1.f),
+                                                         std::clamp<float>(uv.y, 0.f, 1.f)};
+                        }
+                    }
+                    if (hover >= 0)
+                    {
+                        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+                    }
+
+                    ImDrawList* dl = ImGui::GetWindowDrawList();
+                    const ImU32 lineColor = ImGui::GetColorU32(ImGuiCol_Separator);
+                    if (we.spline)
+                    {
+                        // Isoparametric curves: a Catmull-Rom spline through
+                        // each row of nodes and through each column (the
+                        // surface's exact curves at the node rows/columns;
+                        // boundary nodes clamped, like the core samples).
+                        constexpr int kCurveSteps = 16;
+                        auto splineLine = [&](int index, bool horizontal) {
+                            std::vector<ImVec2> pts;
+                            pts.reserve(static_cast<size_t>(we.n - 1) * (kCurveSteps + 1));
+                            for (int seg = 0; seg < we.n - 1; ++seg)
+                            {
+                                for (int s = 0; s <= kCurveSteps; ++s)
+                                {
+                                    if (seg > 0 && s == 0)
+                                    {
+                                        continue; // join, not a duplicate point
+                                    }
+                                    const int i0 = std::max(seg - 1, 0);
+                                    const int i1 = seg;
+                                    const int i2 = seg + 1;
+                                    const int i3 = std::min(seg + 2, we.n - 1);
+                                    const float t = static_cast<float>(s) / kCurveSteps;
+                                    auto node = [&](int i) {
+                                        return horizontal ? we.points[index * we.n + i]
+                                                          : we.points[i * we.n + index];
+                                    };
+                                    const float u = warpCatmullRom(node(i0)[0], node(i1)[0],
+                                                                   node(i2)[0], node(i3)[0], t);
+                                    const float v = warpCatmullRom(node(i0)[1], node(i1)[1],
+                                                                   node(i2)[1], node(i3)[1], t);
+                                    pts.push_back(toPx(u, v));
+                                }
+                            }
+                            dl->AddPolyline(pts.data(), static_cast<int>(pts.size()), lineColor,
+                                            false, 1.0f);
+                        };
+                        for (int i = 0; i < we.n; ++i)
+                        {
+                            splineLine(i, true);
+                            splineLine(i, false);
+                        }
+                    }
+                    else
+                    {
+                        // Straight segments between adjacent nodes.
+                        for (int row = 0; row < we.n; ++row)
+                        {
+                            for (int col = 0; col + 1 < we.n; ++col)
+                            {
+                                const ImVec2 a = toPx(we.points[row * we.n + col][0],
+                                                      we.points[row * we.n + col][1]);
+                                const ImVec2 b = toPx(we.points[row * we.n + col + 1][0],
+                                                      we.points[row * we.n + col + 1][1]);
+                                dl->AddLine(a, b, lineColor, 1.0f);
+                            }
+                        }
                         for (int col = 0; col < we.n; ++col)
                         {
-                            we.points.push_back(
-                                {static_cast<float>(col / (we.n - 1)),
-                                 static_cast<float>(row / (we.n - 1))});
+                            for (int row = 0; row + 1 < we.n; ++row)
+                            {
+                                const ImVec2 a = toPx(we.points[row * we.n + col][0],
+                                                      we.points[row * we.n + col][1]);
+                                const ImVec2 b = toPx(we.points[(row + 1) * we.n + col][0],
+                                                      we.points[(row + 1) * we.n + col][1]);
+                                dl->AddLine(a, b, lineColor, 1.0f);
+                            }
                         }
                     }
-                }
-                if (we.points.size() == static_cast<size_t>(we.n * we.n))
-                {
-                    if (ImGui::BeginTable("warppoints", 3, ImGuiTableFlags_SizingFixedFit))
+                    // The nodes themselves (dragged / hovered ones on top,
+                    // larger).
+                    for (int pass = 0; pass < 2; ++pass)
                     {
-                        ImGui::TableSetupColumn("point");
-                        ImGui::TableSetupColumn("u");
-                        ImGui::TableSetupColumn("v");
-                        for (size_t p = 0; p < we.points.size(); ++p)
+                        for (int p = 0; p < static_cast<int>(we.points.size()); ++p)
                         {
-                            ImGui::TableNextRow();
-                            ImGui::TableNextColumn();
-                            ImGui::Text("%d", static_cast<int>(p));
-                            ImGui::TableNextColumn();
-                            ImGui::InputFloat("##u", &we.points[p][0], 0.05f, 0.2f, "%.3f");
-                            ImGui::TableNextColumn();
-                            ImGui::InputFloat("##v", &we.points[p][1], 0.05f, 0.2f, "%.3f");
+                            const bool hot = (p == hover || p == m_WarpDragNode);
+                            if ((pass == 1) != hot)
+                            {
+                                continue;
+                            }
+                            const ImVec2 np = toPx(we.points[p][0], we.points[p][1]);
+                            const float r = hot ? 5.5f : 4.0f;
+                            dl->AddCircleFilled(np, r,
+                                                hot ? ImGui::GetColorU32(ImGuiCol_ButtonActive)
+                                                    : ImGui::GetColorU32(ImGuiCol_FrameBg));
+                            dl->AddCircle(np, r,
+                                          hot ? ImGui::GetColorU32(ImGuiCol_Text)
+                                              : ImGui::GetColorU32(ImGuiCol_Border),
+                                          12);
                         }
-                        ImGui::EndTable();
                     }
                 }
+                ImGui::EndChild();
+
                 if (ImGui::Button("Identity##warp"))
                 {
-                    resetToIdentity();
+                    we.points = identityWarpPoints(we.n);
+                    m_WarpDragNode = -1;
                 }
                 ImGui::SameLine();
                 if (ImGui::Button("Apply warp##warp"))
@@ -2987,10 +3220,13 @@ void ControlGuiApp::renderModals()
                     nlohmann::json result;
                     std::string error;
                     if (m_WarpTarget->send("display.warp.set",
-                                           {{"display", m_WarpDisplayId}, {"points", pts}},
+                                           {{"display", m_WarpDisplayId}, {"points", pts},
+                                            {"mode", we.spline ? "spline" : "grid"}},
                                            result, error))
                     {
-                        log("warp applied to display " + std::to_string(m_WarpDisplayId) + " on " +
+                        log("warp (" + std::string(we.spline ? "spline" : "grid") +
+                            ", " + std::to_string(we.n) + "x" + std::to_string(we.n) +
+                            ") applied to display " + std::to_string(m_WarpDisplayId) + " on " +
                             m_WarpTarget->name());
                         m_WarpModal = false;
                     }
@@ -3023,6 +3259,7 @@ void ControlGuiApp::renderModals()
         {
             m_WarpTarget = nullptr;
             m_WarpDisplayId = kInvalidId;
+            m_WarpDragNode = -1;
         }
     }
     if (m_MediaDetailsModal)

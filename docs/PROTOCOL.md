@@ -352,28 +352,40 @@ Display object shape (used by `display.list`, `display.set`, `status`):
 ```json
 {"id":1, "name":"Wall A", "x":0, "y":0,
  "width":1920, "height":1080, "brightness":1.0, "enabled":true,
- "statusOverlay":false, "monitor":"NVIDIA GeForce RTX 4090"}
+ "alwaysOnTop":true, "statusOverlay":false, "monitor":"NVIDIA GeForce RTX 4090",
+ "warp":{"mode":"grid", "rows":2, "cols":2,
+         "points":[[0,0],[1,0],[0,1],[1,1]]}}
 ```
 
 Geometry is in the shared output space (pixels, origin top-left). The union
 of enabled display rectangles defines the scene size.
 
 `name` is the display's label (shown in the control GUI and the status
-overlay); `display.set` can change it. `monitor` is the physical output the
-display's window is on (the OS monitor name, empty when the window is not on
-a monitor); the playback engine maintains it — it follows the window when
+overlay); `display.set` can change it. `alwaysOnTop` (default `true`) keeps
+the display's window above all other windows on the engine machine;
+`display.set` can change it. `monitor` is the physical output the display's
+window is on (the OS monitor name, empty when the window is not on a
+monitor); the playback engine maintains it — it follows the window when
 the window manager moves it to another output — and clients treat it as
-read-only.
+read-only. `warp` is the display's current projection warp: `mode` is
+`"grid"` (bilinear) or `"spline"` (a cubic B-spline through the nodes), and
+`points` are the absolute node positions in display-local UV (row-major,
+`rows x cols`) — the same layout `display.warp.set` takes, so a client can
+restore its warp editor from the display object. A display that has never
+been warped reports the 2x2 identity grid.
 
 The control GUI's Displays pane lists every display with the system it is
-linked to and the physical output its window is on. The Display settings
-dialog (Edit... in the pane) shows the same location - the system and the
-physical output - plus an editable **Name** field and a **System** dropdown:
-the system a display is linked to. Applying settings to the current system
-is a plain `display.set`; applying them to a different system **moves** the
-display there — `display.add` + `display.set` (brightness/enabled, which
-`display.add` does not carry) on the target, then `display.remove` on the
-source.
+linked to and the physical output its window is on. The Playback tab's
+Displays block carries the per-display **on** checkbox (a `display.set`
+with `enabled`) and **Enable all / Disable all** buttons for the whole
+wall. The Display settings dialog (Edit...) shows the display's location -
+the system and the physical output - plus an editable **Name** field, an
+**Always on top** checkbox, and a **System** dropdown: the system a display
+is linked to. Applying settings to the current system is a plain
+`display.set`; applying them to a different system **moves** the display
+there — `display.add` + `display.set` (brightness/enabled/alwaysOnTop,
+which `display.add` does not carry) on the target, then `display.remove`
+on the source.
 
 #### `display.add`
 
@@ -414,7 +426,7 @@ Update any subset of a display's properties.
 - Params: `display` (int id, required); any of `x`, `y`, `width`, `height`
   (ints, applied as one geometry update), `name` (string, the display's
   label), `brightness` (number, default 1.0), `enabled` (bool),
-  `statusOverlay` (bool, default false).
+  `alwaysOnTop` (bool, default true), `statusOverlay` (bool, default false).
 - Result: the updated display object.
 
 `statusOverlay` toggles the per-display status overlay: when true, the
@@ -436,16 +448,25 @@ record stays the single source of truth in both directions.
 
 Set the projection warp for a display from a grid of points in
 **display-local UV** (0..1). The grid must be square, >= 2x2; the points are
-ordered row-major. MediaMax builds a dense RG8 warp texture from the grid;
-the display pass remaps every output pixel through it.
+ordered row-major. MediaMax interpolates the grid into a dense RG8 warp
+texture (CPU-side); the display pass remaps every output pixel through it.
 
 - Params: `display` (int id, required), `points` (array of `[u, v]`,
-  required).
-- Result: `{"display":<id>,"rows":<n>,"cols":<n>}`
+  required), `mode` (string, optional: `"grid"` — the default — or
+  `"spline"`; anything else is an error).
+- Result: `{"display":<id>,"rows":<n>,"cols":<n>,"mode":"<grid|spline>"}`
 
 An identity warp is the regular grid `[[0,0],[1,0],[0,1],[1,1]]` (2x2,
 row-major: top-left, top-right, bottom-left, bottom-right) or any full N x N
 grid with every point on its ideal position.
+
+`mode` selects the interpolation between the nodes: `"grid"` is the classic
+bilinear grid warp; `"spline"` is a tensor-product Catmull-Rom cubic
+B-spline through the node offsets — the surface passes exactly through every
+node's target position and is C1 continuous between them (boundary nodes are
+clamped, keeping the surface anchored to the grid edges). The display object
+reports the current mode (and grid) in its `warp` field, so clients can
+restore their warp editor state from `display.list` / `status`.
 
 ## Examples
 

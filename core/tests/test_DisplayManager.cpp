@@ -122,6 +122,22 @@ TEST_CASE("Brightness and enable flags")
     CHECK_FALSE(mgr.setDisplayBrightness(42, 0.5f));
 }
 
+TEST_CASE("Always-on-top is on by default and settable per display")
+{
+    DisplayManager mgr;
+    const auto a = mgr.addDisplay("a", 0, 0, 100, 100);
+    const auto b = mgr.addDisplay("b", 500, 0, 100, 100);
+    CHECK((*mgr.find(a.id))->alwaysOnTop == true);
+    CHECK((*mgr.find(b.id))->alwaysOnTop == true);
+
+    CHECK(mgr.setDisplayAlwaysOnTop(a.id, false));
+    CHECK((*mgr.find(a.id))->alwaysOnTop == false);
+    CHECK((*mgr.find(b.id))->alwaysOnTop == true);
+    CHECK(mgr.setDisplayAlwaysOnTop(a.id, true));
+    CHECK((*mgr.find(a.id))->alwaysOnTop == true);
+    CHECK_FALSE(mgr.setDisplayAlwaysOnTop(42, false));
+}
+
 TEST_CASE("Empty manager has zero bounds")
 {
     DisplayManager mgr;

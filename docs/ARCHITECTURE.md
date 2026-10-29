@@ -166,7 +166,10 @@ clamped to its in/out points, with loop/hold-at-end semantics.
 top-left) plus brightness, enabled flag and the `statusOverlay` toggle. The
 union of display rectangles is the scene size the renderer targets.
 `WarpMap` converts a user grid of points into the dense RG8 warp texture the
-GPU display pass samples (see below).
+GPU display pass samples (see below). The interpolation between the nodes is
+either bilinear (the classic grid warp) or a tensor-product Catmull-Rom
+cubic B-spline that passes exactly through every node (both are CPU-side;
+the GPU always samples the dense texture).
 
 ### `overlay/` — status overlay text
 

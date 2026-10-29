@@ -1,5 +1,6 @@
 // WarpMap: grid warp math and dense texture generation.
 
+#include <cmath>
 #include <stdexcept>
 
 #include <doctest/doctest.h>
@@ -118,6 +119,129 @@ TEST_CASE("WarpMap rejects degenerate grids")
 {
     CHECK_THROWS_AS(WarpMap(1, 1), std::invalid_argument);
     CHECK_THROWS_AS(WarpMap(2, 1), std::invalid_argument);
+}
+
+TEST_CASE("The default interpolation is bilinear")
+{
+    CHECK(WarpMap(3, 3).interpolation() == WarpInterpolation::Bilinear);
+    CHECK(WarpMap(3, 3, WarpInterpolation::Spline).interpolation() ==
+          WarpInterpolation::Spline);
+}
+
+TEST_CASE("Spline warp passes exactly through its nodes")
+{
+    WarpMap warp(4, 4, WarpInterpolation::Spline);
+    // Move the top-right corner, the bottom-left corner and a middle node.
+    warp.setPointPosition(0, 3, 0.9f, 0.05f);
+    warp.setPointPosition(3, 0, 0.05f, 0.95f);
+    warp.setPointPosition(1, 1, 0.25f, 0.28f);
+    warp.setPointPosition(2, 2, 0.66f, 0.64f);
+
+    // At every node's ideal position the surface must land exactly on the
+    // node's target position.
+    for (int r = 0; r < 4; ++r)
+    {
+        for (int c = 0; c < 4; ++c)
+        {
+            const auto [iu, iv] = WarpMap::idealPoint(r, c, 4, 4);
+            const auto [wu, wv] = warp.sample(iu, iv);
+            CHECK(wu == doctest::Approx(warp.pointPositionU(r, c)).epsilon(1e-5));
+            CHECK(wv == doctest::Approx(warp.pointPositionV(r, c)).epsilon(1e-5));
+        }
+    }
+}
+
+TEST_CASE("Spline warp is the identity with zero offsets")
+{
+    const WarpMap warp(5, 5, WarpInterpolation::Spline);
+    CHECK(warp.isIdentity());
+    for (float v = 0.f; v <= 1.f; v += 0.125f)
+    {
+        for (float u = 0.f; u <= 1.f; u += 0.125f)
+        {
+            const auto [wu, wv] = warp.sample(u, v);
+            CHECK(wu == doctest::Approx(u).epsilon(1e-5));
+            CHECK(wv == doctest::Approx(v).epsilon(1e-5));
+        }
+    }
+}
+
+TEST_CASE("Spline warp reproduces linear offsets exactly (interior segment)")
+{
+    // A linear offset ramp along one row: the interior spline segment
+    // (where all four neighbouring nodes are collinear) must reproduce the
+    // linear function exactly.
+    WarpMap warp(4, 4, WarpInterpolation::Spline);
+    for (int c = 0; c < 4; ++c)
+    {
+        warp.setPointOffset(1, c, c * 0.1f, 0.f); // row 1: 0, 0.1, 0.2, 0.3
+    }
+
+    // u = 0.5 sits mid-way between col 1 and col 2 (interior segment);
+    // v = 1/3 sits exactly on row 1.
+    const auto [iu, iv] = WarpMap::idealPoint(1, 0, 4, 4);
+    const auto [wu, wv] = warp.sample(0.5f, iv);
+    CHECK(wu == doctest::Approx(0.5f + 0.15f).epsilon(1e-5));
+    CHECK(wv == doctest::Approx(iv).epsilon(1e-5));
+}
+
+TEST_CASE("Spline and bilinear warps differ between nodes")
+{
+    // The same node offsets, both modes: identical at the nodes, different
+    // in between.
+    const float du = 0.1f;
+    WarpMap bilinear(3, 3, WarpInterpolation::Bilinear);
+    WarpMap spline(3, 3, WarpInterpolation::Spline);
+    bilinear.setPointOffset(1, 1, du, 0.f); // center node only
+    spline.setPointOffset(1, 1, du, 0.f);
+
+    const auto [iu, iv] = WarpMap::idealPoint(1, 1, 3, 3);
+    // Mid-way to the right node: bilinear gives exactly half the center
+    // node's offset at the query point.
+    const float midU = (iu + WarpMap::idealPoint(1, 2, 3, 3).first) * 0.5f;
+    const auto [bu, bv] = bilinear.sample(midU, iv);
+    CHECK(bu == doctest::Approx(midU + du * 0.5f).epsilon(1e-5));
+    const auto [su, sv] = spline.sample(midU, iv);
+    CHECK(su != doctest::Approx(bu).epsilon(1e-3)); // the spline bows
+    // But both pass through the node itself.
+    const auto [snode, snodeV] = spline.sample(iu, iv);
+    CHECK(snode == doctest::Approx(iu + du).epsilon(1e-5));
+    CHECK(snodeV == doctest::Approx(iv).epsilon(1e-5));
+}
+
+TEST_CASE("Spline dense texture follows the spline mode")
+{
+    WarpMap warp(3, 3, WarpInterpolation::Spline);
+    warp.setPointPosition(0, 0, 0.1f, 0.05f);
+    warp.setPointPosition(2, 2, 0.85f, 0.9f);
+
+    std::vector<unsigned char> tex;
+    const int size = 64;
+    warp.buildDenseTexture(tex, size);
+    CHECK(tex.size() == static_cast<size_t>(size) * size * 2);
+
+    // A texel must store what the spline samples at that point.
+    const int x = size / 3, y = size * 2 / 3;
+    const float u = (x + 0.5f) / size, v = (y + 0.5f) / size;
+    const auto [wu, wv] = warp.sample(u, v);
+    CHECK(tex[(y * size + x) * 2] ==
+          doctest::Approx(static_cast<int>(std::lround(wu * 255.f))).epsilon(1));
+    CHECK(tex[(y * size + x) * 2 + 1] ==
+          doctest::Approx(static_cast<int>(std::lround(wv * 255.f))).epsilon(1));
+}
+
+TEST_CASE("The interpolation mode is part of equality")
+{
+    WarpMap a(3, 3, WarpInterpolation::Bilinear);
+    WarpMap b(3, 3, WarpInterpolation::Spline);
+    a.setPointOffset(0, 0, 0.05f, 0.f);
+    b.setPointOffset(0, 0, 0.05f, 0.f);
+    CHECK(a != b); // same grid, same offsets, different mode
+    WarpMap c = a;
+    CHECK(a == c);
+    c = WarpMap(3, 3, WarpInterpolation::Spline);
+    c.setPointOffset(0, 0, 0.05f, 0.f);
+    CHECK(b == c);
 }
 
 } // TEST_SUITE("WarpMap")

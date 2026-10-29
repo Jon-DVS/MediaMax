@@ -7,9 +7,27 @@
 namespace mediamax
 {
 
-WarpMap::WarpMap(int rows, int cols)
+namespace
+{
+
+// One dimension of the Catmull-Rom basis (a uniform cubic B-spline in
+// interpolating form): the value at t in [0, 1] between nodes p1 and p2,
+// given the neighbouring nodes p0 and p3. Exact at the nodes (t = 0 -> p1,
+// t = 1 -> p2) and exact for linear data.
+float catmullRom(float p0, float p1, float p2, float p3, float t)
+{
+    const float t2 = t * t;
+    const float t3 = t2 * t;
+    return 0.5f * ((2.f * p1) + (-p0 + p2) * t + (2.f * p0 - 5.f * p1 + 4.f * p2 - p3) * t2 +
+                   (-p0 + 3.f * p1 - 3.f * p2 + p3) * t3);
+}
+
+} // namespace
+
+WarpMap::WarpMap(int rows, int cols, WarpInterpolation interpolation)
     : m_Rows(rows)
     , m_Cols(cols)
+    , m_Interpolation(interpolation)
     , m_OffsetU(static_cast<size_t>(rows) * cols, 0.f)
     , m_OffsetV(static_cast<size_t>(rows) * cols, 0.f)
 {
@@ -67,7 +85,12 @@ float WarpMap::pointPositionV(int row, int col) const
 
 std::pair<float, float> WarpMap::sample(float u, float v) const
 {
-    // Map the query into grid space.
+    if (m_Interpolation == WarpInterpolation::Spline)
+    {
+        return {u + splineChannel(m_OffsetU, u, v), v + splineChannel(m_OffsetV, u, v)};
+    }
+
+    // Bilinear: map the query into grid space.
     const float gx = std::clamp(u, 0.f, 1.f) * static_cast<float>(m_Cols - 1);
     const float gy = std::clamp(v, 0.f, 1.f) * static_cast<float>(m_Rows - 1);
 
@@ -87,6 +110,37 @@ std::pair<float, float> WarpMap::sample(float u, float v) const
                      (m_OffsetV[i01] * (1.f - fx) + m_OffsetV[i11] * fx) * fy;
 
     return {u + du, v + dv};
+}
+
+float WarpMap::splineChannel(const std::vector<float>& channel, float u, float v) const
+{
+    // Map the query into grid space (same cell convention as the bilinear
+    // path).
+    const float gx = std::clamp(u, 0.f, 1.f) * static_cast<float>(m_Cols - 1);
+    const float gy = std::clamp(v, 0.f, 1.f) * static_cast<float>(m_Rows - 1);
+
+    const int x0 = std::min(static_cast<int>(std::floor(gx)), m_Cols - 2);
+    const int y0 = std::min(static_cast<int>(std::floor(gy)), m_Rows - 2);
+    const float fx = gx - static_cast<float>(x0);
+    const float fy = gy - static_cast<float>(y0);
+
+    // Tensor product: interpolate each of the four surrounding rows across
+    // its (boundary-clamped) column neighbourhood, then interpolate the row
+    // results the same way. Clamping duplicates the edge nodes, so the
+    // surface passes exactly through the boundary nodes too.
+    float rows[4];
+    for (int r = -1; r <= 2; ++r)
+    {
+        const int y = std::clamp(y0 + r, 0, m_Rows - 1);
+        float cols[4];
+        for (int c = -1; c <= 2; ++c)
+        {
+            const int x = std::clamp(x0 + c, 0, m_Cols - 1);
+            cols[static_cast<size_t>(c + 1)] = channel[static_cast<size_t>(y) * m_Cols + x];
+        }
+        rows[static_cast<size_t>(r + 1)] = catmullRom(cols[0], cols[1], cols[2], cols[3], fx);
+    }
+    return catmullRom(rows[0], rows[1], rows[2], rows[3], fy);
 }
 
 void WarpMap::setIdentity()
@@ -147,10 +201,24 @@ std::vector<std::array<float, 2>> WarpMap::pointOffsets() const
     return out;
 }
 
+std::vector<std::array<float, 2>> WarpMap::pointPositions() const
+{
+    std::vector<std::array<float, 2>> out;
+    out.reserve(m_OffsetU.size());
+    for (int r = 0; r < m_Rows; ++r)
+    {
+        for (int c = 0; c < m_Cols; ++c)
+        {
+            out.push_back({pointPositionU(r, c), pointPositionV(r, c)});
+        }
+    }
+    return out;
+}
+
 bool WarpMap::operator==(const WarpMap& o) const
 {
-    return m_Rows == o.m_Rows && m_Cols == o.m_Cols && m_OffsetU == o.m_OffsetU &&
-           m_OffsetV == o.m_OffsetV;
+    return m_Rows == o.m_Rows && m_Cols == o.m_Cols && m_Interpolation == o.m_Interpolation &&
+           m_OffsetU == o.m_OffsetU && m_OffsetV == o.m_OffsetV;
 }
 
 bool WarpMap::operator!=(const WarpMap& o) const { return !(*this == o); }

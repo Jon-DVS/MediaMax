@@ -91,6 +91,17 @@ bool DisplayManager::setDisplayEnabled(Id id, bool enabled)
     return true;
 }
 
+bool DisplayManager::setDisplayAlwaysOnTop(Id id, bool alwaysOnTop)
+{
+    auto display = find(id);
+    if (!display)
+    {
+        return false;
+    }
+    (*display)->alwaysOnTop = alwaysOnTop;
+    return true;
+}
+
 bool DisplayManager::setDisplayStatusOverlay(Id id, bool statusOverlay)
 {
     auto display = find(id);

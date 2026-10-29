@@ -81,4 +81,53 @@ bool createWindowSurface(VkInstance instance, GLFWwindow* window, VkSurfaceKHR& 
     return true;
 }
 
+bool setWindowAlwaysOnTop(GLFWwindow* window, bool alwaysOnTop)
+{
+#if defined(VK_USE_PLATFORM_WIN32_KHR)
+    HWND hwnd = glfwGetWin32Window(window);
+    if (hwnd == nullptr)
+    {
+        return false;
+    }
+    // SetWindowPos with HWND_TOPMOST/NOTOPMOST is the reliable way to move
+    // the window into/out of the topmost z-order band (it also sets/clears
+    // WS_EX_TOPMOST); setting the extended style alone does not take
+    // effect. Geometry is untouched (SWP_NOMOVE | SWP_NOSIZE).
+    const BOOL ok = SetWindowPos(hwnd, alwaysOnTop ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0,
+                                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    return ok != FALSE;
+#elif defined(VK_USE_PLATFORM_XLIB_KHR)
+    // EWMH client message: _NET_WM_STATE {ADD, _NET_WM_STATE_ABOVE}.
+    Display* display = glfwGetX11Display();
+    Window xid = glfwGetX11Window(window);
+    if (display == nullptr || xid == 0)
+    {
+        return false;
+    }
+    const Atom netWmState = XInternAtom(display, "_NET_WM_STATE", False);
+    if (netWmState == 0)
+    {
+        return false;
+    }
+    XEvent event{};
+    event.xclient.type = ClientMessage;
+    event.xclient.display = display;
+    event.xclient.window = xid;
+    event.xclient.message_type = netWmState;
+    event.xclient.format = 32;
+    event.xclient.data.l[0] = alwaysOnTop ? 1 : 0; // _NET_WM_STATE_ADD/REMOVE
+    event.xclient.data.l[1] = 2; // _NET_WM_STATE_ABOVE
+    event.xclient.data.l[2] = 0;
+    event.xclient.data.l[3] = 1; // source indication: application
+    XSendEvent(display, DefaultRootWindow(display), False,
+               SubstructureRedirectMask | SubstructureNotifyMask, &event);
+    XFlush(display);
+    return true;
+#else
+    (void)window;
+    (void)alwaysOnTop;
+    return false;
+#endif
+}
+
 } // namespace mediamax

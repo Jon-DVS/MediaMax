@@ -386,22 +386,29 @@ private:
         int width = 1920;
         int height = 1080;
         float brightness = 1.0f;
-        bool enabled = true;
+        bool enabled = true; // round-tripped by Apply (the toggle itself lives
+                             // in the Displays block, not the dialog)
+        bool alwaysOnTop = true;
         std::string name; // carried through a move (display.add takes a name)
         std::string monitor; // physical output (read-only in the dialog)
     };
     std::map<Id, DisplayEdit> m_DisplayEdits;
 
-    // Warp editor state (Warp... in the Displays block), the last grid and
-    // points per (system, display). The warp is not reported in status, so
-    // the dialog starts from the last locally used values.
+    // Warp editor state (Warp... in the Displays block), the last grid,
+    // points and interpolation per (system, display). Seeded from the
+    // engine's current warp (the display JSON's `warp` object) when the
+    // snapshot reports it, so the dialog opens on what is actually applied.
     struct WarpEdit
     {
         int n = 2;
-        std::vector<std::array<float, 2>> points;
-        bool valid = false; // identity grid filled in
+        std::vector<std::array<float, 2>> points; // absolute positions, row-major
+        bool spline = false;
+        bool valid = false; // grid filled in
     };
     std::map<const SystemConnection*, std::map<Id, WarpEdit>> m_WarpEdits;
+    // Node-based warp pad: the point index currently dragged with the mouse
+    // (-1 when none). Transient - reset when the dialog opens or closes.
+    int m_WarpDragNode = -1;
 
     // Show editor selection (scenes tab).
     int m_SelectedSceneIdx = 0;

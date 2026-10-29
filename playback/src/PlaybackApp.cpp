@@ -247,6 +247,11 @@ bool PlaybackApp::initWindowsAndDisplays()
             return false;
         }
         glfwSetWindowPos(ds->window, specs[i].x, specs[i].y);
+        // The records are created right after with alwaysOnTop = true (the
+        // default), so start the windows above everything else; the
+        // per-frame record sync reconciles the state if a record says
+        // otherwise.
+        setWindowAlwaysOnTop(ds->window, true);
         ds->width = specs[i].width;
         ds->height = specs[i].height;
         ds->lastMonitor = windowMonitor(ds->window);
@@ -499,6 +504,17 @@ void PlaybackApp::addSurfaceForDisplay(const SurfaceOp& op)
 
     // Borderless like the startup windows (see initWindowsAndDisplays).
     glfwWindowHint(GLFW_DECORATED, GLFW_FALSE);
+    // The display record already exists (the command handler created it
+    // before queueing this op): start the window with its always-on-top
+    // state.
+    bool alwaysOnTop = true;
+    {
+        std::lock_guard lock(m_StateMutex);
+        if (const auto display = m_Displays.find(op.displayId))
+        {
+            alwaysOnTop = (*display)->alwaysOnTop;
+        }
+    }
     GLFWwindow* window =
         glfwCreateWindow(op.width, op.height, ("MediaMax - " + op.name).c_str(), nullptr, nullptr);
     if (window == nullptr)
@@ -509,12 +525,14 @@ void PlaybackApp::addSurfaceForDisplay(const SurfaceOp& op)
         return;
     }
     glfwSetWindowPos(window, op.x, op.y);
+    setWindowAlwaysOnTop(window, alwaysOnTop);
 
     auto sp = std::make_unique<DisplaySurface>();
     sp->displayId = op.displayId;
     sp->window = window;
     sp->width = op.width;
     sp->height = op.height;
+    sp->appliedAlwaysOnTop = alwaysOnTop;
 
     std::string error;
     if (!createWindowSurface(m_Vulkan->instance(), sp->window, sp->surface, error))
@@ -932,12 +950,14 @@ void PlaybackApp::renderFrame(const FrameSnapshot& snap)
 
 void PlaybackApp::updateWarpTexture(DisplaySurface& ds, const Display& display)
 {
+    const WarpInterpolation mode = display.warp.interpolation();
     const std::vector<std::array<float, 2>> offsets = display.warp.pointOffsets();
-    if (offsets == ds.lastWarpOffsets)
+    if (offsets == ds.lastWarpOffsets && mode == ds.lastWarpMode)
     {
         return;
     }
     ds.lastWarpOffsets = offsets;
+    ds.lastWarpMode = mode;
     m_Scene.ensureWarpTexture(display.id, kWarpTextureSize);
     std::vector<unsigned char> data;
     display.warp.buildDenseTexture(data, static_cast<int>(kWarpTextureSize));
@@ -1061,6 +1081,7 @@ void PlaybackApp::pollWindowEvents()
             // resized on its own (manual drag) is written back into the
             // record so it is not fought next frame.
             bool enabled = true;
+            bool alwaysOnTop = true;
             bool haveRecord = false;
             std::int32_t rx = 0, ry = 0, rw = 0, rh = 0;
             {
@@ -1068,6 +1089,7 @@ void PlaybackApp::pollWindowEvents()
                 if (const auto display = m_Displays.find(ds.displayId))
                 {
                     enabled = (*display)->enabled;
+                    alwaysOnTop = (*display)->alwaysOnTop;
                     if ((*display)->valid())
                     {
                         rx = (*display)->x;
@@ -1089,6 +1111,13 @@ void PlaybackApp::pollWindowEvents()
                 {
                     glfwHideWindow(ds.window);
                 }
+            }
+            if (alwaysOnTop != ds.appliedAlwaysOnTop)
+            {
+                // Runtime toggle (display.set alwaysOnTop): the window keeps
+                // its geometry, only the stacking attribute changes.
+                ds.appliedAlwaysOnTop = alwaysOnTop;
+                setWindowAlwaysOnTop(ds.window, alwaysOnTop);
             }
             if (!haveRecord)
             {

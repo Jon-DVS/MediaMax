@@ -51,8 +51,19 @@ nlohmann::json mediaToJson(const MediaAsset& asset)
     };
 }
 
+// The wire string for a warp interpolation (PROTOCOL.md display.warp.set).
+const char* warpModeToString(WarpInterpolation mode)
+{
+    return mode == WarpInterpolation::Spline ? "spline" : "grid";
+}
+
 nlohmann::json displayToJson(const Display& d)
 {
+    nlohmann::json points = nlohmann::json::array();
+    for (const auto& p : d.warp.pointPositions())
+    {
+        points.push_back({p[0], p[1]});
+    }
     return {
         {"id", d.id},
         {"name", d.name},
@@ -62,8 +73,14 @@ nlohmann::json displayToJson(const Display& d)
         {"height", d.height},
         {"brightness", d.brightness},
         {"enabled", d.enabled},
+        {"alwaysOnTop", d.alwaysOnTop},
         {"statusOverlay", d.statusOverlay},
         {"monitor", d.monitor},
+        // The current projection warp (display.warp.set's `points` layout:
+        // absolute positions in display-local UV, row-major). Clients use
+        // it to restore the warp editor's state.
+        {"warp", {{"mode", warpModeToString(d.warp.interpolation())}, {"rows", d.warp.rows()},
+                  {"cols", d.warp.cols()}, {"points", points}}},
     };
 }
 
@@ -776,6 +793,10 @@ nlohmann::json CommandServer::handleDisplaySet(const nlohmann::json& params) con
     {
         m_Displays.setDisplayEnabled(id, params["enabled"].get<bool>());
     }
+    if (params.contains("alwaysOnTop"))
+    {
+        m_Displays.setDisplayAlwaysOnTop(id, params["alwaysOnTop"].get<bool>());
+    }
     if (params.contains("statusOverlay"))
     {
         m_Displays.setDisplayStatusOverlay(id, params["statusOverlay"].get<bool>());
@@ -810,7 +831,32 @@ nlohmann::json CommandServer::handleDisplayWarpSet(const nlohmann::json& params)
         throw ParameterError("warp grid must be a square of >= 2x2 points");
     }
 
-    WarpMap warp(rows, cols);
+    // The interpolation between the nodes: "grid" (bilinear, the default,
+    // so existing clients keep their behavior) or "spline" (a cubic
+    // B-spline through the nodes).
+    WarpInterpolation mode = WarpInterpolation::Bilinear;
+    if (params.contains("mode"))
+    {
+        if (!params["mode"].is_string())
+        {
+            throw ParameterError("warp mode must be \"grid\" or \"spline\"");
+        }
+        const std::string m = params["mode"].get<std::string>();
+        if (m == "grid")
+        {
+            mode = WarpInterpolation::Bilinear;
+        }
+        else if (m == "spline")
+        {
+            mode = WarpInterpolation::Spline;
+        }
+        else
+        {
+            throw ParameterError("warp mode must be \"grid\" or \"spline\"");
+        }
+    }
+
+    WarpMap warp(rows, cols, mode);
     for (int r = 0; r < rows; ++r)
     {
         for (int c = 0; c < cols; ++c)
@@ -825,7 +871,7 @@ nlohmann::json CommandServer::handleDisplayWarpSet(const nlohmann::json& params)
         }
     }
     (*display)->warp = std::move(warp);
-    return {{"display", id}, {"rows", rows}, {"cols", cols}};
+    return {{"display", id}, {"rows", rows}, {"cols", cols}, {"mode", warpModeToString(mode)}};
 }
 
 // --- Parameter helpers -----------------------------------------------------

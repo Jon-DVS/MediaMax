@@ -89,6 +89,10 @@ private:
         bool sizeDirty = false;
         bool enabled = true;
 
+        // Last always-on-top state applied to the window (the per-frame
+        // sync reconciles it with the record, like enabled/geometry).
+        bool appliedAlwaysOnTop = true;
+
         // Last record geometry applied to the window. pollWindowEvents()
         // keeps window and DisplayManager record in sync in both directions;
         // these values tell which side changed last, and applyGraceFrames
@@ -102,8 +106,11 @@ private:
         // output. GLFW owns the monitor.
         GLFWmonitor* lastMonitor = nullptr;
 
-        // Last warp offsets uploaded (cheap change detection).
+        // Last warp offsets + interpolation uploaded (cheap change
+        // detection; the mode counts because the same offsets sample
+        // differently per mode).
         std::vector<std::array<float, 2>> lastWarpOffsets;
+        WarpInterpolation lastWarpMode = WarpInterpolation::Bilinear;
     };
 
     // One frame's resolved state, taken under m_StateMutex.

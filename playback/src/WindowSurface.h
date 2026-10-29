@@ -20,4 +20,10 @@ namespace mediamax
 // set on failure. The caller owns (and must destroy) the surface.
 bool createWindowSurface(VkInstance instance, GLFWwindow* window, VkSurfaceKHR& out, std::string& error);
 
+// Keeps the window above all others (Win32 WS_EX_TOPMOST / EWMH
+// _NET_WM_STATE_ABOVE). GLFW 3.4 has no always-on-top window hint, so the
+// platform stacking attribute is toggled directly. Returns false on
+// unsupported platforms or a bad window.
+bool setWindowAlwaysOnTop(GLFWwindow* window, bool alwaysOnTop);
+
 } // namespace mediamax

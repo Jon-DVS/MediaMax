@@ -23,13 +23,22 @@ struct Display
     std::int32_t width = 1920;
     std::int32_t height = 1080;
 
-    // Projection correction applied to this output.
-    WarpMap warp;
+    // Projection correction applied to this output. The default is the
+    // minimal identity grid: a display that has never been warped reports
+    // (and edits from) 2x2 points, and display.warp.set replaces the whole
+    // map (with the grid the client sent).
+    WarpMap warp{2, 2};
 
     // Global brightness multiplier applied to this output (1.0 = 100%).
     float brightness = 1.f;
 
     bool enabled = true;
+
+    // When true the playback engine keeps the display's window above all
+    // other windows (the platform's topmost stacking state, applied by the
+    // playback app). On by default: a playback window is an output surface,
+    // not an application window the user works alongside.
+    bool alwaysOnTop = true;
 
     // When true the playback engine draws a status overlay (system IP,
     // display name/number, measured frame rate, resolution and frame

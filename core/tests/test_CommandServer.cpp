@@ -761,9 +761,11 @@ TEST_CASE("display.warp.set installs a warp grid")
     REQUIRE(resp.ok);
     CHECK(resp.result.at("rows").get<int>() == 2);
     CHECK(resp.result.at("cols").get<int>() == 2);
+    CHECK(resp.result.at("mode").get<std::string>() == "grid"); // default
     const auto display = f.displays.find(f.displayA);
     REQUIRE(display.has_value());
     CHECK((*display)->warp.rows() == 2);
+    CHECK((*display)->warp.interpolation() == WarpInterpolation::Bilinear);
     CHECK((*display)->warp.isIdentity());
 
     // Shear the top-right corner and verify the warp samples accordingly.
@@ -778,6 +780,40 @@ TEST_CASE("display.warp.set installs a warp grid")
     REQUIRE(f.run("display.warp.set", {{"display", f.displayA}, {"points", shear}}).ok);
     CHECK_FALSE((*display)->warp.isIdentity());
 
+    // The interpolation mode: "spline" switches the map, "grid" switches
+    // back, anything else is rejected.
+    const Response spline =
+        f.run("display.warp.set", {{"display", f.displayA}, {"points", shear}, {"mode", "spline"}});
+    REQUIRE(spline.ok);
+    CHECK(spline.result.at("mode").get<std::string>() == "spline");
+    CHECK((*display)->warp.interpolation() == WarpInterpolation::Spline);
+    const Response grid =
+        f.run("display.warp.set", {{"display", f.displayA}, {"points", shear}, {"mode", "grid"}});
+    REQUIRE(grid.ok);
+    CHECK((*display)->warp.interpolation() == WarpInterpolation::Bilinear);
+    CHECK_FALSE(
+        f.run("display.warp.set", {{"display", f.displayA}, {"points", shear}, {"mode", "bezier"}})
+            .ok);
+    CHECK_FALSE(
+        f.run("display.warp.set", {{"display", f.displayA}, {"points", shear}, {"mode", 3}}).ok);
+
+    // The display object reports the current warp (mode, grid, absolute
+    // node positions) so clients can restore their editor state.
+    const Response list = f.run("display.list");
+    REQUIRE(list.ok);
+    const auto& reported =
+        list.result.at("displays")
+            .at(0)
+            .at("warp");
+    CHECK(reported.at("mode").get<std::string>() == "grid");
+    CHECK(reported.at("rows").get<int>() == 2);
+    CHECK(reported.at("cols").get<int>() == 2);
+    REQUIRE(reported.at("points").size() == 4);
+    CHECK(reported.at("points")
+              .at(1)
+              .at(0)
+              .get<double>() == doctest::Approx(0.85).epsilon(1e-6));
+
     // Invalid grids.
     nlohmann::json bad = nlohmann::json::array();
     for (int i = 0; i < 6; ++i)
@@ -787,6 +823,30 @@ TEST_CASE("display.warp.set installs a warp grid")
     CHECK_FALSE(f.run("display.warp.set", {{"display", f.displayA}, {"points", bad}}).ok);
     CHECK_FALSE(f.run("display.warp.set", {{"display", f.displayA}}).ok);
     CHECK_FALSE(f.run("display.warp.set", {{"display", 999}, {"points", points}}).ok);
+}
+
+TEST_CASE("display.set toggles always-on-top (default on)")
+{
+    Fixture f;
+    // Default: on.
+    const Response list = f.run("display.list");
+    REQUIRE(list.ok);
+    CHECK(list.result.at("displays").at(0).at("alwaysOnTop").get<bool>() == true);
+
+    // Off.
+    const Response off = f.run("display.set", {{"display", f.displayA}, {"alwaysOnTop", false}});
+    REQUIRE(off.ok);
+    CHECK(off.result.at("alwaysOnTop").get<bool>() == false);
+    const auto display = f.displays.find(f.displayA);
+    REQUIRE(display.has_value());
+    CHECK((*display)->alwaysOnTop == false);
+
+    // Back on + invalid ids rejected.
+    const Response on = f.run("display.set", {{"display", f.displayA}, {"alwaysOnTop", true}});
+    REQUIRE(on.ok);
+    CHECK(on.result.at("alwaysOnTop").get<bool>() == true);
+    CHECK((*display)->alwaysOnTop == true);
+    CHECK_FALSE(f.run("display.set", {{"display", 999}, {"alwaysOnTop", true}}).ok);
 }
 
 TEST_CASE("show.save then show.load round trips the show")
