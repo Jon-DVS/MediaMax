@@ -372,6 +372,13 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
         }
     }
 
+    // 2b) Default dock layout: Playback and Console must share one tab
+    //     block, in the order Playback, Console (renderDockspace).
+    const bool layoutOk = app.testDockLayoutPlaybackConsoleTabs();
+    std::cout << (layoutOk ? "PASS" : "FAIL")
+              << " default layout tabs Playback and Console together (order: Playback, Console)"
+              << std::endl;
+
     // 3) Modal dialogs: open each dialog the UI buttons open and verify
     //    Dear ImGui actually shows it, then verify it closes again. This is
     //    the regression guard for "clicking Open / Save As / About does
@@ -1029,7 +1036,7 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
         std::cout << (liveOk ? "gui-self-test: live system OK" : "gui-self-test: live system FAILED")
                   << std::endl;
     }
-    return (liveOk && modalOk && rendered > 0) ? 0 : 1;
+    return (liveOk && modalOk && layoutOk && rendered > 0) ? 0 : 1;
 }
 
 } // namespace mediamax::gui

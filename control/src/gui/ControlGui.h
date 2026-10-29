@@ -3,9 +3,10 @@
 // The control GUI: application state + per-frame rendering (Dear ImGui).
 //
 // Layout (dockspace): Systems (top-left) + Displays/Media tabs
-// (bottom-left), a center column with the 2D Show view (top) over the
-// Playback transport/scenes (bottom), Show Editor (right) and Console
-// (bottom). Every protocol method is reachable from the UI:
+// (bottom-left), a center column with the 2D Show view (top) over a
+// Playback + Console tab block (bottom, tabs in the order Playback,
+// Console), Show Editor (right). Every protocol method is reachable from
+// the UI:
 // transport, scene set/clear, displays + warp grid, media load/unload,
 // system name, show authoring (saved or pushed live via show.loadJson) and
 // a raw command console as the catch-all. The Show view is a live 2D render
@@ -94,6 +95,10 @@ public:
     // the engine received the loaded show (the load pushes it to every
     // connected system immediately).
     bool testLoadShowFile(const std::string& path);
+    // True when the live dock layout has Playback and Console in one tab
+    // block, in that order (the default layout's invariant; the self-test
+    // runs it after the frame phases have built the dockspace).
+    bool testDockLayoutPlaybackConsoleTabs() const;
     // True once a registered system reports its poll connection up.
     bool testSystemConnected(const std::string& name) const;
     // Gives the fresh self-test editor a deterministic scene (id 1) with one

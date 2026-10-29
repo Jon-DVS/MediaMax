@@ -673,10 +673,8 @@ void ControlGuiApp::renderDockspace()
         ImGui::DockBuilderSplitNode(dockspaceId, ImGuiDir_Left, 0.16f, &left, &center);
         ImGuiID right = 0;
         ImGui::DockBuilderSplitNode(center, ImGuiDir_Right, 0.28f, &right, &center);
-        ImGuiID bottom = 0;
-        ImGui::DockBuilderSplitNode(center, ImGuiDir_Down, 0.30f, &bottom, &center);
-        // The center (above the console) splits vertically: the 2D show
-        // view on top, the transport + scenes playback pane below.
+        // The center column splits vertically: the 2D show view on top, the
+        // transport + scenes playback pane below.
         ImGuiID centerBottom = 0;
         ImGui::DockBuilderSplitNode(center, ImGuiDir_Down, 0.42f, &centerBottom, &center);
 
@@ -688,9 +686,11 @@ void ControlGuiApp::renderDockspace()
         ImGui::DockBuilderDockWindow("Systems", left);
         ImGui::DockBuilderDockWindow("Displays", leftBottom);
         ImGui::DockBuilderDockWindow("Show view", center);
+        // Playback and Console share one tab block (dock order = tab
+        // order: Playback first, Console second).
         ImGui::DockBuilderDockWindow("Playback", centerBottom);
+        ImGui::DockBuilderDockWindow("Console", centerBottom);
         ImGui::DockBuilderDockWindow("Show Editor", right);
-        ImGui::DockBuilderDockWindow("Console", bottom);
         // Finish with the root ID (the one given to DockBuilderAddNode);
         // DockSpace() below must receive the same root every frame.
         ImGui::DockBuilderFinish(dockspaceId);
@@ -3828,6 +3828,58 @@ bool ControlGuiApp::testLoadShowFile(const std::string& path)
 {
     std::string error;
     return loadShowFile(path, error);
+}
+
+bool ControlGuiApp::testDockLayoutPlaybackConsoleTabs() const
+{
+    // The default layout must tab Playback and Console together, in that
+    // order. The dock node's Windows list is unordered (Dear ImGui keeps
+    // the user-visible tab order in the node's TabBar), so check both the
+    // shared node and the tab index.
+    ImGuiContext& g = *ImGui::GetCurrentContext();
+    const ImGuiWindow* playback = nullptr;
+    const ImGuiWindow* console = nullptr;
+    for (int wi = 0; wi < g.Windows.Size; ++wi)
+    {
+        ImGuiWindow* w = g.Windows.Data[static_cast<std::size_t>(wi)];
+        if (w->Name == nullptr)
+        {
+            continue;
+        }
+        if (std::string(w->Name) == "Playback")
+        {
+            playback = w;
+        }
+        else if (std::string(w->Name) == "Console")
+        {
+            console = w;
+        }
+    }
+    if (playback == nullptr || console == nullptr || playback->DockNode == nullptr ||
+        playback->DockNode != console->DockNode)
+    {
+        return false; // windows missing or not in the same tab block
+    }
+    const ImGuiDockNode* node = playback->DockNode;
+    if (node->TabBar == nullptr || node->TabBar->Tabs.Size < 2)
+    {
+        return false;
+    }
+    int playbackTab = -1;
+    int consoleTab = -1;
+    for (int i = 0; i < node->TabBar->Tabs.Size; ++i)
+    {
+        const ImGuiTabItem& tab = node->TabBar->Tabs.Data[static_cast<std::size_t>(i)];
+        if (tab.Window == playback)
+        {
+            playbackTab = i;
+        }
+        if (tab.Window == console)
+        {
+            consoleTab = i;
+        }
+    }
+    return playbackTab >= 0 && consoleTab > playbackTab;
 }
 
 void ControlGuiApp::testGiveEditorALayer()
