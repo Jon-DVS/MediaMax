@@ -1411,6 +1411,10 @@ TEST_CASE("frame.state reports the wall and the current frame's layers")
     CHECK(bg.at("opacity").get<double>() == doctest::Approx(1.0f));
     CHECK(bg.at("zIndex") == 0);
     CHECK(!bg.contains("mediaId"));
+    // The transform position (the same quantity layer.set writes): the
+    // fixture layers have the default transform (x=y=0).
+    CHECK(bg.at("x").get<double>() == doctest::Approx(0.0));
+    CHECK(bg.at("y").get<double>() == doctest::Approx(0.0));
     // A color layer fills the output space (identity transform, centered
     // anchor at the origin of a 3840x1080 wall would be off-center, but the
     // fixture layer has the default transform: anchor 0.5 at x=y=0).
@@ -1422,6 +1426,8 @@ TEST_CASE("frame.state reports the wall and the current frame's layers")
     CHECK(video.at("content").get<std::string>() == "video");
     CHECK(video.at("mediaId") == kMediaA);
     CHECK(!video.contains("color"));
+    CHECK(video.at("x").get<double>() == doctest::Approx(0.0));
+    CHECK(video.at("y").get<double>() == doctest::Approx(0.0));
     // The media sits at its native 640x360 size under the default transform.
     CHECK(video.at("corners") == cornerJson(Transform2D::identity(), Size2i{640, 360}));
 }
@@ -1465,6 +1471,10 @@ TEST_CASE("frame.state projects rotated and scaled layers")
     const nlohmann::json& layers = r.at("layers");
     REQUIRE(layers.size() == 1);
     CHECK(layers[0].at("content").get<std::string>() == "color");
+    // The effective transform position is reported as-is (the show value -
+    // no override is set in this test).
+    CHECK(layers[0].at("x").get<double>() == doctest::Approx(50.0));
+    CHECK(layers[0].at("y").get<double>() == doctest::Approx(50.0));
 
     // A color layer is projected at the output-space size.
     Transform2D expected;
@@ -1519,6 +1529,29 @@ TEST_CASE("frame.state omits hidden layers")
     const nlohmann::json& layers = resp.result.at("layers");
     REQUIRE(layers.size() == 1);
     CHECK(layers[0].at("id") == 10);
+}
+
+TEST_CASE("frame.state reports the position layer.set writes")
+{
+    // The show view's drag-to-move reads the layer's x/y from frame.state,
+    // adds the drag delta and sends layer.set - the two commands must agree
+    // on the same quantity (the effective transform position).
+    Fixture f;
+    REQUIRE(f.run("layer.set", {{"layer", 11}, {"x", 123.5}, {"y", -45.5}}).ok);
+    const Response resp = f.run("frame.state");
+    REQUIRE(resp.ok);
+    const nlohmann::json& layers = resp.result.at("layers");
+    bool found = false;
+    for (const auto& l : layers)
+    {
+        if (l.at("id") == 11)
+        {
+            found = true;
+            CHECK(l.at("x").get<double>() == doctest::Approx(123.5));
+            CHECK(l.at("y").get<double>() == doctest::Approx(-45.5));
+        }
+    }
+    CHECK(found);
 }
 
 TEST_CASE("media.thumbnail decodes through the app callback")

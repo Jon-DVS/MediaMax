@@ -92,6 +92,12 @@ public:
     // beginFrame() and endFrame()).
     VkCommandBuffer commandBuffer() const { return m_CommandBuffer; }
 
+    // Blocks until the last submitted frame's command buffer completes (its
+    // submit fence signals): the GUI self-test's thumbnail readback maps
+    // the pixels the frame copied out once this returns. Calling it again
+    // (before the next beginFrame resets the fence) is a no-op wait.
+    void waitForFrame();
+
 private:
     bool createInstanceAndSurface(GLFWwindow* window, std::string& error);
     bool createDevice(std::string& error);

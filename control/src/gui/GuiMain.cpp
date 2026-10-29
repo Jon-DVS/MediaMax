@@ -1,6 +1,7 @@
 #include "gui/GuiMain.h"
 
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -67,6 +68,13 @@ public:
     // (ImGuiIO::AddKeyEvent must land before NewFrame) so the hotkey path
     // can be exercised without physical input.
     std::function<void()> preNewFrameHook;
+    // Vulkan handles for the self-test (it creates the staging buffer the
+    // show view's thumbnail readback copies into).
+    VkDevice device() const { return m_Vulkan.device(); }
+    VkPhysicalDevice physicalDevice() const { return m_Vulkan.physicalDevice(); }
+    // Blocks until the last rendered frame's command buffer completes (the
+    // self-test's readback maps the copied pixels after this returns).
+    void waitForFrame() { m_Vulkan.waitForFrame(); }
 
 private:
     GLFWwindow* m_Window = nullptr;
@@ -116,7 +124,14 @@ bool GuiRuntime::init(GLFWwindow* window, ControlGuiApp* app, std::string& error
     info.Device = m_Vulkan.device();
     info.QueueFamily = m_Vulkan.queueFamily();
     info.Queue = m_Vulkan.queue();
-    info.DescriptorPoolSize = 8; // the back end creates its own pool
+    // The back end creates its own descriptor pool: every
+    // ImGui_ImplVulkan_AddTexture consumes one
+    // VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE descriptor from it (the font texture
+    // plus the show view's thumbnails - one per media). 8 would exhaust on a
+    // wall with a handful of media, and every later AddTexture would fail
+    // silently (no CheckVkResultFn is set), drawing the white fallback
+    // instead of the thumbnail; 128 keeps real shows covered.
+    info.DescriptorPoolSize = 128;
     info.MinImageCount = 2;
     info.ImageCount = static_cast<std::uint32_t>(m_Vulkan.imageCount());
     info.PipelineInfoMain.RenderPass = m_Vulkan.renderPass();
@@ -509,6 +524,20 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
                    "editor Add cue adds on every press (cues: " + std::to_string(cuesAfter1) + ", " +
                    std::to_string(cuesAfter2) + ")\n";
 
+    // 3c) Show view interaction state (headless): the mode setters and the
+    //     selection are pure GUI state - no system needed.
+    {
+        app.testShowViewSetMode("layer");
+        app.testShowViewSetMode("show");
+        const bool svStateOk = app.testShowViewSelectedDisplay() == kInvalidId &&
+                               app.testShowViewSelectedLayer() == kInvalidId &&
+                               !app.testShowViewEditPopupOpen();
+        app.testShowViewSetMode("display");
+        modalOk = modalOk && svStateOk;
+        modalReport += std::string(svStateOk ? "PASS " : "FAIL ") +
+                       "show view mode/selection state\n";
+    }
+
     // 4) Auto-push (issue 8): the editor edit from step 1 must have reached
     //    the system via the debounced auto-push during the frame phases.
     //    Keep rendering frames (the push happens in frame()) while polling
@@ -646,6 +675,455 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
                       "space hotkey toggled playback (" + s0 + " -> " +
                       (hotkeyOk ? expect : "<" + s1 + ">") + ")\n";
         liveOk = liveOk && hotkeyOk;
+    }
+
+    // 4e+) Show view (issue: show view improvements + thumbnail rendering):
+    //      the engine still runs the auto-pushed show (display 1 at the
+    //      origin, the red color layer, the testbmp media layer scaled to
+    //      cover the wall). Verify the thumbnail actually reached the GPU
+    //      (pixel readback of the pool's texture), the mode/selection/drag
+    //      interaction (synthetic mouse events - the same injection path
+    //      as the hotkey check), the context menu's Edit... action, and
+    //      that a drag moves the live display and layer (both restored).
+    if (haveLiveSystem && liveOk)
+    {
+        SystemConnection sv("show-view-check", liveHost, livePort);
+        nlohmann::json fs;
+        std::string fsError;
+        nlohmann::json dispJson;
+        nlohmann::json layerJson;
+        if (sv.send("frame.state", nlohmann::json::object(), fs, fsError) &&
+            fs.contains("displays") && fs["displays"].size() >= 1)
+        {
+            dispJson = fs["displays"][0];
+            if (fs.contains("layers"))
+            {
+                for (const auto& l : fs["layers"])
+                {
+                    if (l.value("name", std::string()) == "testbmp")
+                    {
+                        layerJson = l;
+                        break;
+                    }
+                }
+            }
+        }
+        if (dispJson.is_null() || layerJson.is_null())
+        {
+            liveReport += "FAIL show view - no wall / testbmp layer in frame.state\n";
+            liveOk = false;
+        }
+        else
+        {
+            const std::uint32_t dispId = dispJson["id"].get<std::uint32_t>();
+            const int dispX0 = dispJson["x"].get<int>();
+            const int dispY0 = dispJson["y"].get<int>();
+            const int dispW0 = dispJson["width"].get<int>();
+            const int dispH0 = dispJson["height"].get<int>();
+            const std::string dispName = dispJson["name"].get<std::string>();
+            const std::uint32_t layerId = layerJson["id"].get<std::uint32_t>();
+            const std::uint32_t mediaId = layerJson["mediaId"].get<std::uint32_t>();
+            const double layerX0 = layerJson["x"].get<double>();
+            const double layerY0 = layerJson["y"].get<double>();
+
+            auto sendRaw = [&](const std::string& method, const nlohmann::json& params,
+                               nlohmann::json& out) {
+                std::string rawError;
+                return sv.send(method, params, out, rawError);
+            };
+            // One synthetic click: press + release at a screen point (the
+            // events are queued before NewFrame, like the hotkey check).
+            auto clickAt = [&](float sx, float sy) {
+                runtime.preNewFrameHook = [sx, sy] {
+                    ImGui::GetIO().AddMousePosEvent(sx, sy);
+                    ImGui::GetIO().AddMouseButtonEvent(0, true);
+                };
+                glfwPollEvents();
+                runtime.renderFrame();
+                runtime.preNewFrameHook = [sx, sy] {
+                    ImGui::GetIO().AddMousePosEvent(sx, sy);
+                    ImGui::GetIO().AddMouseButtonEvent(0, false);
+                };
+                glfwPollEvents();
+                runtime.renderFrame();
+                runtime.preNewFrameHook = nullptr;
+            };
+            // One synthetic drag: press at (sx0, sy0), move to (+dx, +dy)
+            // in three steps (past ImGui's drag threshold), release.
+            auto dragAt = [&](float sx0, float sy0, float dx, float dy) {
+                runtime.preNewFrameHook = [sx0, sy0] {
+                    ImGui::GetIO().AddMousePosEvent(sx0, sy0);
+                    ImGui::GetIO().AddMouseButtonEvent(0, true);
+                };
+                glfwPollEvents();
+                runtime.renderFrame();
+                for (int i = 1; i <= 3; ++i)
+                {
+                    const float mx = sx0 + dx * static_cast<float>(i) / 3.f;
+                    const float my = sy0 + dy * static_cast<float>(i) / 3.f;
+                    runtime.preNewFrameHook = [mx, my] {
+                        ImGui::GetIO().AddMousePosEvent(mx, my);
+                    };
+                    glfwPollEvents();
+                    runtime.renderFrame();
+                }
+                const float mx = sx0 + dx;
+                const float my = sy0 + dy;
+                runtime.preNewFrameHook = [mx, my] {
+                    ImGui::GetIO().AddMousePosEvent(mx, my);
+                    ImGui::GetIO().AddMouseButtonEvent(0, false);
+                };
+                glfwPollEvents();
+                runtime.renderFrame();
+                runtime.preNewFrameHook = nullptr;
+            };
+
+            // 1) The thumbnail's pixels actually reached the GPU: wait for
+            //    the pool's upload, copy the texture out on one frame
+            //    (showUploadHook records a copy into a host-visible
+            //    staging buffer) and check the test BMP's halves (top red /
+            //    bottom blue).
+            bool thumbOk = false;
+            std::string thumbDetail;
+            {
+                const auto deadline =
+                    std::chrono::steady_clock::now() + std::chrono::seconds(10);
+                while (!app.testShowTextureUploaded(mediaId) &&
+                       std::chrono::steady_clock::now() < deadline)
+                {
+                    glfwPollEvents();
+                    runtime.renderFrame();
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                }
+                int tw = 0;
+                int th = 0;
+                if (!app.testShowTextureUploaded(mediaId) ||
+                    !app.testShowTextureSize(mediaId, tw, th))
+                {
+                    thumbDetail = "texture never uploaded (size " + std::to_string(tw) + "x" +
+                                  std::to_string(th) + ")";
+                }
+                else
+                {
+                    VkBufferCreateInfo bci{};
+                    bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+                    bci.size = static_cast<VkDeviceSize>(tw) * static_cast<VkDeviceSize>(th) * 4;
+                    bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+                    bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+                    VkBuffer staging = VK_NULL_HANDLE;
+                    VkDeviceMemory stagingMem = VK_NULL_HANDLE;
+                    if (vkCreateBuffer(runtime.device(), &bci, nullptr, &staging) != VK_SUCCESS)
+                    {
+                        thumbDetail = "vkCreateBuffer (readback staging) failed";
+                    }
+                    else
+                    {
+                        VkMemoryRequirements reqs;
+                        vkGetBufferMemoryRequirements(runtime.device(), staging, &reqs);
+                        VkPhysicalDeviceMemoryProperties props;
+                        vkGetPhysicalDeviceMemoryProperties(runtime.physicalDevice(), &props);
+                        bool memOk = false;
+                        for (std::uint32_t i = 0; i < props.memoryTypeCount && !memOk; ++i)
+                        {
+                            const VkMemoryPropertyFlags wanted =
+                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+                            if ((reqs.memoryTypeBits & (1u << i)) != 0 &&
+                                (props.memoryTypes[i].propertyFlags & wanted) == wanted)
+                            {
+                                VkMemoryAllocateInfo ai{};
+                                ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+                                ai.allocationSize = reqs.size;
+                                ai.memoryTypeIndex = i;
+                                if (vkAllocateMemory(runtime.device(), &ai, nullptr, &stagingMem) ==
+                                    VK_SUCCESS)
+                                {
+                                    memOk = vkBindBufferMemory(runtime.device(), staging,
+                                                               stagingMem, 0) == VK_SUCCESS;
+                                }
+                            }
+                        }
+                        if (!memOk)
+                        {
+                            thumbDetail = "host-visible staging memory unavailable";
+                        }
+                        else
+                        {
+                            // One frame with the readback armed: the hook
+                            // records the copy after the pool's uploads.
+                            app.showUploadHook = [&app, mediaId, staging](VkCommandBuffer cmd) {
+                                app.testShowTextureReadback(mediaId, cmd, staging);
+                            };
+                            runtime.renderFrame();
+                            runtime.waitForFrame();
+                            app.showUploadHook = nullptr;
+                            void* mapped = nullptr;
+                            if (vkMapMemory(runtime.device(), stagingMem, 0, bci.size, 0,
+                                            &mapped) != VK_SUCCESS)
+                            {
+                                thumbDetail = "vkMapMemory (readback) failed";
+                            }
+                            else
+                            {
+                                const auto* px = static_cast<const std::uint8_t*>(mapped);
+                                // The test BMP: top half red, bottom half blue.
+                                // Sample well inside each half (the thumbnail
+                                // is aspect-fit into 160x90 for the 320x180
+                                // source).
+                                const int cx = tw / 2;
+                                const std::uint8_t* pTop =
+                                    px + (static_cast<std::size_t>(th / 4) * tw + cx) * 4;
+                                const std::uint8_t* pBot =
+                                    px + (static_cast<std::size_t>(th * 3 / 4) * tw + cx) * 4;
+                                const bool topRed =
+                                    pTop[0] > 128 && pTop[1] < 64 && pTop[2] < 64;
+                                const bool botBlue =
+                                    pBot[0] < 64 && pBot[1] < 64 && pBot[2] > 128;
+                                thumbDetail = "top=" + std::to_string(pTop[0]) + "," +
+                                              std::to_string(pTop[1]) + "," +
+                                              std::to_string(pTop[2]) + " bottom=" +
+                                              std::to_string(pBot[0]) + "," +
+                                              std::to_string(pBot[1]) + "," +
+                                              std::to_string(pBot[2]);
+                                thumbOk = topRed && botBlue;
+                                vkUnmapMemory(runtime.device(), stagingMem);
+                            }
+                        }
+                        if (staging != VK_NULL_HANDLE)
+                        {
+                            vkDestroyBuffer(runtime.device(), staging, nullptr);
+                        }
+                        if (stagingMem != VK_NULL_HANDLE)
+                        {
+                            vkFreeMemory(runtime.device(), stagingMem, nullptr);
+                        }
+                    }
+                }
+            }
+            liveReport += std::string(thumbOk ? "PASS " : "FAIL ") +
+                          "show view thumbnail readback (" + thumbDetail + ")\n";
+            liveOk = liveOk && thumbOk;
+
+            // 2) The camera is fitted (frames rendered all along): grab it
+            //    to project world points into clicks.
+            float scale = 0.f;
+            float camMinX = 0.f, camMinY = 0.f, camMaxX = 0.f, camMaxY = 0.f;
+            const bool haveCam = app.testShowViewCamera(scale, camMinX, camMinY, camMaxX, camMaxY);
+            liveReport += std::string(haveCam ? "PASS " : "FAIL ") +
+                          "show view camera fitted (scale " + std::to_string(scale) + ")\n";
+            liveOk = liveOk && haveCam;
+
+            if (haveCam)
+            {
+                float sx = 0.f;
+                float sy = 0.f;
+
+                // 3) Display mode: a click on the display selects it.
+                app.testShowViewSetMode("display");
+                app.testShowViewProject(dispX0 + dispW0 * 0.5f, dispY0 + dispH0 * 0.5f, sx, sy);
+                clickAt(sx, sy);
+                const bool dispSelOk = app.testShowViewSelectedDisplay() == dispId &&
+                                       app.testShowViewSelectedLayer() == kInvalidId;
+                liveReport += std::string(dispSelOk ? "PASS " : "FAIL ") +
+                              "display mode click selects the display (id " +
+                              std::to_string(dispId) + ")\n";
+                liveOk = liveOk && dispSelOk;
+
+                // 4) Layer mode: the same point selects the topmost layer
+                //    (the testbmp media layer, which covers the wall).
+                app.testShowViewSetMode("layer");
+                clickAt(sx, sy);
+                const bool layerSelOk = app.testShowViewSelectedLayer() == layerId &&
+                                        app.testShowViewSelectedDisplay() == kInvalidId;
+                liveReport += std::string(layerSelOk ? "PASS " : "FAIL ") +
+                              "layer mode click selects the topmost layer (id " +
+                              std::to_string(layerId) + ")\n";
+                liveOk = liveOk && layerSelOk;
+
+                // 5) Show mode: clicks select nothing (the selection from
+                //    the previous mode persists, unchanged).
+                app.testShowViewSetMode("show");
+                clickAt(sx, sy);
+                const bool showModeOk = app.testShowViewSelectedLayer() == layerId &&
+                                        app.testShowViewSelectedDisplay() == kInvalidId;
+                liveReport += std::string(showModeOk ? "PASS " : "FAIL ") +
+                              "show mode clicks select nothing\n";
+                liveOk = liveOk && showModeOk;
+
+                // 6) Clicking empty space (inside the fitted view, outside
+                //    the display) deselects.
+                app.testShowViewSetMode("display");
+                app.testShowViewProject(-60.f, -36.f, sx, sy);
+                clickAt(sx, sy);
+                const bool deselectOk = app.testShowViewSelectedDisplay() == kInvalidId &&
+                                        app.testShowViewSelectedLayer() == kInvalidId;
+                liveReport += std::string(deselectOk ? "PASS " : "FAIL ") +
+                              "clicking empty space deselects\n";
+                liveOk = liveOk && deselectOk;
+
+                // 7) Dragging the selected display moves the LIVE engine
+                //    display (display.set): press on the display, move
+                //    +30/+15 screen px, release - the world delta is the
+                //    screen delta divided by the camera scale.
+                const float dragDx = 30.f;
+                const float dragDy = 15.f;
+                app.testShowViewProject(dispX0 + dispW0 * 0.5f, dispY0 + dispH0 * 0.5f, sx, sy);
+                dragAt(sx, sy, dragDx, dragDy);
+                nlohmann::json dv;
+                nlohmann::json dummy;
+                bool dragDispOk = false;
+                std::string dragDispDetail;
+                if (sendRaw("display.list", nlohmann::json::object(), dv) &&
+                    dv.contains("displays"))
+                {
+                    int gotX = 0;
+                    int gotY = 0;
+                    bool found = false;
+                    for (const auto& d : dv["displays"])
+                    {
+                        if (d.value("id", 0u) == dispId)
+                        {
+                            found = true;
+                            gotX = d.value("x", 0);
+                            gotY = d.value("y", 0);
+                        }
+                    }
+                    const double expX = dispX0 + dragDx / scale;
+                    const double expY = dispY0 + dragDy / scale;
+                    dragDispOk = found && std::abs(gotX - expX) <= 2.0 &&
+                                 std::abs(gotY - expY) <= 2.0;
+                    dragDispDetail = "got " + std::to_string(gotX) + "," +
+                                     std::to_string(gotY) + " want ~" +
+                                     std::to_string(static_cast<int>(expX)) + "," +
+                                     std::to_string(static_cast<int>(expY));
+                }
+                else
+                {
+                    dragDispDetail = "display.list failed";
+                }
+                liveReport += std::string(dragDispOk ? "PASS " : "FAIL ") +
+                              "display drag moves the live display (" + dragDispDetail + ")\n";
+                liveOk = liveOk && dragDispOk;
+                // Restore the original geometry (the scratch engine's real
+                // window moved).
+                sendRaw("display.set",
+                        {{"display", dispId}, {"x", dispX0}, {"y", dispY0}}, dummy);
+
+                // 8) Dragging the selected layer moves the engine's layer
+                //    position (layer.set, read back from frame.state x/y).
+                app.testShowViewSetMode("layer");
+                app.testShowViewProject(static_cast<float>(layerX0),
+                                        static_cast<float>(layerY0), sx, sy);
+                dragAt(sx, sy, dragDx, dragDy);
+                nlohmann::json fs2;
+                bool dragLayerOk = false;
+                std::string dragLayerDetail;
+                if (sendRaw("frame.state", nlohmann::json::object(), fs2) &&
+                    fs2.contains("layers"))
+                {
+                    double gotX = 0.0;
+                    double gotY = 0.0;
+                    bool found = false;
+                    for (const auto& l : fs2["layers"])
+                    {
+                        if (l.value("id", 0u) == layerId)
+                        {
+                            found = true;
+                            gotX = l.value("x", 0.0);
+                            gotY = l.value("y", 0.0);
+                        }
+                    }
+                    const double expX = layerX0 + dragDx / scale;
+                    const double expY = layerY0 + dragDy / scale;
+                    dragLayerOk = found && std::abs(gotX - expX) <= 2.0 &&
+                                  std::abs(gotY - expY) <= 2.0;
+                    dragLayerDetail = "got " + std::to_string(gotX) + "," +
+                                      std::to_string(gotY) + " want ~" +
+                                      std::to_string(static_cast<int>(expX)) + "," +
+                                      std::to_string(static_cast<int>(expY));
+                }
+                else
+                {
+                    dragLayerDetail = "frame.state failed";
+                }
+                liveReport += std::string(dragLayerOk ? "PASS " : "FAIL ") +
+                              "layer drag moves the layer (frame.state x/y " + dragLayerDetail +
+                              ")\n";
+                liveOk = liveOk && dragLayerOk;
+                // Restore the original position.
+                sendRaw("layer.set",
+                        {{"layer", layerId}, {"x", layerX0}, {"y", layerY0}}, dummy);
+
+                // 9) The right-click context menu over the selected display:
+                //    drop the document's display entry first so the Edit...
+                //    action runs its "add from live" path; a right click
+                //    over the selected display opens the menu; Edit... opens
+                //    the settings dialog on the (re-)added entry.
+                app.testRemoveDocumentDisplay(dispName);
+                app.testShowViewSetMode("display");
+                app.testShowViewProject(dispX0 + dispW0 * 0.5f, dispY0 + dispH0 * 0.5f, sx, sy);
+                clickAt(sx, sy);
+                {
+                    runtime.preNewFrameHook = [sx, sy] {
+                        ImGui::GetIO().AddMousePosEvent(sx, sy);
+                        ImGui::GetIO().AddMouseButtonEvent(1, true);
+                    };
+                    glfwPollEvents();
+                    runtime.renderFrame();
+                    runtime.preNewFrameHook = [sx, sy] {
+                        ImGui::GetIO().AddMousePosEvent(sx, sy);
+                        ImGui::GetIO().AddMouseButtonEvent(1, false);
+                    };
+                    glfwPollEvents();
+                    runtime.renderFrame();
+                    runtime.preNewFrameHook = nullptr;
+                }
+                bool popupSeen = false;
+                for (int i = 0; i < 10 && !popupSeen; ++i)
+                {
+                    glfwPollEvents();
+                    runtime.renderFrame();
+                    popupSeen = app.testShowViewEditPopupOpen();
+                }
+                const bool editActionOk = popupSeen && app.testShowViewEditSelectedDisplay();
+                bool editShown = false;
+                for (int i = 0; i < 10 && !editShown; ++i)
+                {
+                    glfwPollEvents();
+                    runtime.renderFrame();
+                    editShown = app.testModalOpen("edit");
+                }
+                app.testCloseModal("edit");
+                bool editClosed = false;
+                for (int i = 0; i < 10 && !editClosed; ++i)
+                {
+                    glfwPollEvents();
+                    runtime.renderFrame();
+                    editClosed = !app.testModalOpen("edit");
+                }
+                const bool ctxOk = editActionOk && editShown && editClosed;
+                liveReport += std::string(ctxOk ? "PASS " : "FAIL ") +
+                              "show view right-click menu: Edit... opens the settings dialog\n";
+                liveOk = liveOk && ctxOk;
+
+                // The Edit... action re-added the display entry (an editor
+                // touch): a debounced auto-push (1 s) will re-apply the
+                // document to the engine. Let it land NOW - while the engine
+                // still runs this show, where it is a no-op - rather than
+                // racing the load-push check below.
+                {
+                    const auto settleUntil =
+                        std::chrono::steady_clock::now() + std::chrono::milliseconds(1400);
+                    while (std::chrono::steady_clock::now() < settleUntil)
+                    {
+                        glfwPollEvents();
+                        runtime.renderFrame();
+                        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                    }
+                }
+                app.testShowViewSetMode("display");
+            }
+        }
     }
 
     // 4a) Loading a show (File > Open) pushes it to every connected system

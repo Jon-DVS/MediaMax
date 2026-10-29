@@ -8,6 +8,25 @@
 namespace mediamax::gui
 {
 
+namespace
+{
+
+// FNV-1a over the thumbnail pixels: cheap enough to run per frame per
+// media layer, and it tells textureFor() whether the pixels it was handed
+// changed since the last upload (a video's representative frame advances).
+std::uint64_t pixelHash(const std::vector<std::uint8_t>& rgba)
+{
+    std::uint64_t hash = 1469598103934665603ull;
+    for (const std::uint8_t b : rgba)
+    {
+        hash ^= b;
+        hash *= 1099511628211ull;
+    }
+    return hash;
+}
+
+} // namespace
+
 // --- scene model ---------------------------------------------------------------
 
 std::string ShowViewScene::displaySignature() const
@@ -85,6 +104,8 @@ ShowViewScene buildShowViewScene(const SystemConnection::Snapshot& snap)
                 }
             }
             layer.mediaId = static_cast<std::uint32_t>(l.value("mediaId", 0u));
+            layer.x = static_cast<float>(l.value("x", 0.0));
+            layer.y = static_cast<float>(l.value("y", 0.0));
             if (l.contains("corners") && l["corners"].is_array() && l["corners"].size() == 4)
             {
                 for (int i = 0; i < 4; ++i)
@@ -370,32 +391,44 @@ ImTextureRef ShowTexturePool::textureFor(std::uint32_t mediaId, const std::strin
                                          const std::vector<std::uint8_t>& rgba, int width,
                                          int height)
 {
-    if (!m_Ready)
+    if (!m_Ready || width <= 0 || height <= 0 ||
+        rgba.size() != static_cast<std::size_t>(width) * height * 4)
     {
         return m_White;
     }
+    const std::uint64_t hash = pixelHash(rgba);
     auto it = m_Textures.find(mediaId);
-    if (it != m_Textures.end() && it->second.path == path)
+    if (it != m_Textures.end() && it->second.path == path && it->second.width == width &&
+        it->second.height == height && it->second.pixelHash == hash)
     {
-        // Same asset (a pending upload is about to happen in this same
-        // frame's flush - the texture stays valid).
+        // Unchanged asset: the texture is on the GPU already (a pending
+        // upload is about to happen in this frame's flush).
+        return it->second.texture;
+    }
+    if (it != m_Textures.end() && it->second.path == path && it->second.width == width &&
+        it->second.height == height)
+    {
+        // Same asset, new pixels (the engine's thumbnail advanced, e.g. a
+        // video's representative frame): re-upload into the existing image
+        // rather than recreating the texture.
+        it->second.pending = rgba;
+        it->second.pixelHash = hash;
+        it->second.pendingUpload = true;
         return it->second.texture;
     }
     if (it != m_Textures.end())
     {
-        // The asset's path changed (a file reload): replace the texture.
+        // The asset's path or size changed (a file reload): replace the
+        // texture.
         destroyEntry(it->second);
         m_Textures.erase(it);
-    }
-    if (width <= 0 || height <= 0 || rgba.size() != static_cast<std::size_t>(width) * height * 4)
-    {
-        return m_White;
     }
     Entry entry;
     entry.path = path;
     entry.width = width;
     entry.height = height;
     entry.pending = rgba;
+    entry.pixelHash = hash;
     entry.pendingUpload = true;
     if (!createImage(entry, width, height))
     {
@@ -537,6 +570,86 @@ void ShowTexturePool::flushUploads(VkCommandBuffer cmd)
         entry->pendingUpload = false;
         entry->pending.clear();
     }
+}
+
+// --- test-only accessors ---------------------------------------------------------
+
+bool ShowTexturePool::textureUploaded(std::uint32_t mediaId) const
+{
+    const auto it = m_Textures.find(mediaId);
+    return it != m_Textures.end() && it->second.hasTexture && !it->second.pendingUpload;
+}
+
+bool ShowTexturePool::textureSize(std::uint32_t mediaId, int& width, int& height) const
+{
+    const auto it = m_Textures.find(mediaId);
+    if (it == m_Textures.end() || !it->second.hasTexture)
+    {
+        return false;
+    }
+    width = it->second.width;
+    height = it->second.height;
+    return true;
+}
+
+bool ShowTexturePool::readbackInto(std::uint32_t mediaId, VkCommandBuffer cmd, VkBuffer dst) const
+{
+    const auto it = m_Textures.find(mediaId);
+    if (it == m_Textures.end() || !it->second.hasTexture)
+    {
+        return false;
+    }
+    const Entry& e = it->second;
+    VkImageSubresourceRange range{};
+    range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    range.baseMipLevel = 0;
+    range.levelCount = 1;
+    range.baseArrayLayer = 0;
+    range.layerCount = 1;
+
+    // The texture is sampled in SHADER_READ_ONLY_OPTIMAL: barrier to
+    // TRANSFER_SRC for the copy, then back (the UI samples it again next
+    // frame).
+    VkImageMemoryBarrier toSrc{};
+    toSrc.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    toSrc.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    toSrc.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    toSrc.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    toSrc.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    toSrc.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toSrc.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toSrc.image = e.image;
+    toSrc.subresourceRange = range;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &toSrc);
+
+    VkBufferImageCopy region{};
+    region.bufferOffset = 0;
+    region.bufferRowLength = 0;
+    region.bufferImageHeight = 0;
+    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.imageSubresource.mipLevel = 0;
+    region.imageSubresource.baseArrayLayer = 0;
+    region.imageSubresource.layerCount = 1;
+    region.imageOffset = {0, 0, 0};
+    region.imageExtent = {static_cast<std::uint32_t>(e.width), static_cast<std::uint32_t>(e.height),
+                          1};
+    vkCmdCopyImageToBuffer(cmd, e.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst, 1, &region);
+
+    VkImageMemoryBarrier back{};
+    back.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    back.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    back.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    back.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    back.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    back.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    back.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    back.image = e.image;
+    back.subresourceRange = range;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1,
+                         &back);
+    return true;
 }
 
 } // namespace mediamax::gui

@@ -16,6 +16,7 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <span>
@@ -181,6 +182,47 @@ public:
         return "target=" + std::to_string(targetIdx) + " id=" + std::to_string(m_EditDisplayId) +
                " editSystem=" + std::to_string(m_EditSystem) + " active=" + std::to_string(m_Active);
     }
+    // --- show view (live self-test, issue: show view improvements) --------
+    // The show view's mode: "display" | "layer" | "show" (an unknown value
+    // leaves it unchanged).
+    void testShowViewSetMode(const std::string& mode);
+    // The show view's camera + the scene child's rect (screen px): what the
+    // self-test projects world points into clicks with. False when the
+    // window has not drawn a scene yet.
+    bool testShowViewCamera(float& scale, float& childMinX, float& childMinY, float& childMaxX,
+                            float& childMaxY) const;
+    // Projects world (output-space) coordinates to window screen px (false
+    // when the camera is not fitted yet).
+    bool testShowViewProject(float wx, float wy, float& sx, float& sy) const;
+    // The currently selected display / layer (kInvalidId when none).
+    Id testShowViewSelectedDisplay() const;
+    Id testShowViewSelectedLayer() const;
+    // True while the right-click context menu over the selected display is
+    // open.
+    bool testShowViewEditPopupOpen() const;
+    // Runs the show view's context menu "Edit..." action on the currently
+    // selected display (the exact action the menu item runs: the document
+    // entry of the live display opens the settings dialog, added from the
+    // live record when missing).
+    bool testShowViewEditSelectedDisplay();
+    // The show view's texture pool state for the self-test: whether the
+    // thumbnail of `mediaId` has been uploaded to the GPU, its pixel size,
+    // and a copy of its pixels recorded into the frame's command buffer
+    // (dst: a caller-created host-visible, host-coherent TRANSFER_DST
+    // buffer of width*height*4 bytes; record the copy through
+    // showUploadHook and map it after waitForFrame).
+    bool testShowTextureUploaded(std::uint32_t mediaId) const;
+    bool testShowTextureSize(std::uint32_t mediaId, int& width, int& height) const;
+    bool testShowTextureReadback(std::uint32_t mediaId, VkCommandBuffer cmd,
+                                 VkBuffer dst) const;
+    // Runs at the end of flushShowTextureUploads() with the frame's command
+    // buffer (after the pool's uploads have been recorded): the self-test's
+    // thumbnail readback hook.
+    std::function<void(VkCommandBuffer)> showUploadHook;
+    // Removes the show document display with the given name (the
+    // self-test's context-menu check drops the pre-seeded entry first, so
+    // the Edit... action's "add from live" path runs).
+    void testRemoveDocumentDisplay(const std::string& name);
 
 private:
     // --- systems -----------------------------------------------------------
@@ -255,6 +297,17 @@ private:
     // that runs a live same-named display) and can relink it to another
     // connected system (Apply then performs the live move - issue 14).
     void openDisplayEdit(Id docDisplayId);
+    // The document part of the show view's right-click menu "Edit..."
+    // action: make sure a show-document entry exists for this live
+    // display's name, adding it from the live record (name + geometry)
+    // when the document does not define the display yet. Returns the
+    // document entry's id. Safe between frames (no ImGui calls).
+    Id ensureShowDisplayEntryForLive(const ShowViewDisplay& live);
+    // The show view's right-click menu "Edit..." action: opens the Display
+    // settings dialog on the entry above. Must run inside frame()
+    // (openDisplayEdit calls ImGui::OpenPopup, which needs a current
+    // window).
+    void openDisplayEditForLiveDisplay(const ShowViewDisplay& live);
     // The Display settings Apply button: writes the dialog's values to the
     // show document entry (the persistence path; the auto-push propagates
     // them) and, while the entry is mapped to a connected system, applies
@@ -445,6 +498,10 @@ private:
     Id m_MediaDetailsId = kInvalidId;
     // Test hook: modal queued by testOpenModal(), opened by the next frame().
     std::string m_PendingTestOpenModal;
+    // Test hook: display entry queued by testShowViewEditSelectedDisplay(),
+    // opened in the settings dialog by the next frame() (OpenPopup() needs
+    // a current window, which does not exist between frames).
+    Id m_PendingLiveDisplayEdit = kInvalidId;
 
     // Console.
     std::string m_ConsoleInput;
@@ -524,6 +581,38 @@ private:
     ImVec2 m_ShowViewRectMax{0.f, 0.f};
     bool m_ShowViewVisible = false; // the window was Begun this frame
     ShowTexturePool m_ShowTexPool;
+    // Show view interaction (issue: show view improvements). The mode picks
+    // what a left click selects: a display, the topmost layer, or nothing
+    // (show mode). Display/layer drags move the selection live (display.set
+    // / layer.set with the drag-start position plus the world delta).
+    enum class ShowViewMode
+    {
+        Display,
+        Layer,
+        Show,
+    };
+    ShowViewMode m_ShowViewMode = ShowViewMode::Display;
+    // The selection (at most one of the two; picking one clears the other).
+    // Dropped automatically when the item leaves the scene.
+    Id m_ShowViewSelDisplay = kInvalidId;
+    Id m_ShowViewSelLayer = kInvalidId;
+    // The live drag in flight: the press point in world + the item's
+    // position at the press; each dragging frame sends their sum.
+    bool m_ShowDragActive = false;
+    bool m_ShowDragIsDisplay = false;
+    Id m_ShowDragId = kInvalidId;
+    float m_ShowDragStartWX = 0.f;
+    float m_ShowDragStartWY = 0.f;
+    float m_ShowDragOrigX = 0.f;
+    float m_ShowDragOrigY = 0.f;
+    // When the last show-view drag released: the wall's signature keeps
+    // updating for a poll period after the release, and the auto-refit is
+    // held off for a short settle so the view does not jump behind the
+    // drag's own changes.
+    std::chrono::steady_clock::time_point m_ShowDragEndTime{};
+    // The right-click context menu over the selected display (mirrors the
+    // popup's open state; the self-test reads it).
+    bool m_ShowViewEditPopupOpen = false;
 
     // The live self-test's scratch BMP (written by selfTestSystem, removed
     // by testRemoveSelfTestBmp after the frame phases).

@@ -656,6 +656,15 @@ void GuiVulkan::endFrame(VkResult& presentResult)
     presentResult = vkQueuePresentKHR(m_Queue, &presentInfo);
 }
 
+void GuiVulkan::waitForFrame()
+{
+    if (m_Device == VK_NULL_HANDLE || m_Fence == VK_NULL_HANDLE)
+    {
+        return;
+    }
+    vkWaitForFences(m_Device, 1, &m_Fence, VK_TRUE, UINT64_MAX);
+}
+
 void GuiVulkan::shutdown()
 {
     // Handles partial init state: every resource is released only when it

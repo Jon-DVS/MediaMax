@@ -549,10 +549,12 @@ everything it needs to picture the output without decoding any media.
  "displays":[{"id":1,"name":"Display 1","x":0,"y":0,
               "width":1920,"height":1080,"enabled":true}],
  "layers":[{"id":11,"name":"clouds","content":"video",
+            "x":0,"y":0,
             "corners":[[0,0],[1920,0],[1920,1080],[0,1080]],
             "opacity":1.0,"zIndex":0,"mediaId":2},
            {"id":10,"name":"red","content":"color",
             "color":[1,0,0,1],
+            "x":960,"y":540,
             "corners":[[0,0],[1920,0],[1920,1080],[0,1080]],
             "opacity":0.5,"zIndex":1}]}
 ```
@@ -574,6 +576,11 @@ everything it needs to picture the output without decoding any media.
   reports the full-screen quad.
 - `content` is `"color"`, `"image"` or `"video"` (color layers carry
   `color` [r,g,b,a]; media layers carry `mediaId` instead).
+- `x` / `y` are the layer's effective transform position in output space —
+  the same coordinates `layer.set` writes (a client that moves a layer by a
+  delta reads these, adds the delta and sends `layer.set`; the transform's
+  position is a pure translation, so the quad shifts by exactly the delta
+  regardless of rotation, anchor or scale).
 - Layers are in draw order (zIndex ascending, stable for ties) — the same
   order the renderer composites them.
 - The command is read-only and cheap (no decode); clients may poll it at

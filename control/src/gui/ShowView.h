@@ -63,6 +63,11 @@ struct ShowViewLayer
     float color[4] = {0.f, 0.f, 0.f, 1.f}; // color layers only
     std::uint32_t mediaId = 0; // media layers only (0 = none)
     float corners[8] = {}; // TL, TR, BR, BL (clockwise), output-space px
+    // The effective transform position (output-space px): the same
+    // quantity the "layer.set" x/y params take - dragging the quad by a
+    // delta moves this by the delta (a pure final translation).
+    float x = 0.f;
+    float y = 0.f;
     float opacity = 1.f;
     int zIndex = 0;
 };
@@ -138,6 +143,22 @@ public:
     // beginRenderPass(), ahead of the UI draw that samples the textures).
     void flushUploads(VkCommandBuffer cmd);
 
+    // --- test-only accessors (the GUI self-test's thumbnail readback) -----
+    // True once the texture for `mediaId` exists and its pixels have been
+    // recorded by a flushUploads() (uploaded by the next present).
+    bool textureUploaded(std::uint32_t mediaId) const;
+    // The texture's pixel size (false when there is no texture for the id).
+    bool textureSize(std::uint32_t mediaId, int& width, int& height) const;
+    // Records a copy of the texture's current GPU pixels into `dst`
+    // (a caller-created host-visible, host-coherent TRANSFER_DST buffer of
+    // at least width*height*4 bytes) into `cmd`: barrier to TRANSFER_SRC,
+    // copy, barrier back to SHADER_READ_ONLY (the layout the UI samples).
+    // Call `cmd` in the same command buffer and before its render pass,
+    // after this frame's flushUploads(); map `dst` once the submit fence
+    // signals (the rows are tightly packed, top-left origin). Does not
+    // modify the pool (the texture keeps its layout).
+    bool readbackInto(std::uint32_t mediaId, VkCommandBuffer cmd, VkBuffer dst) const;
+
 private:
     struct Entry
     {
@@ -152,6 +173,10 @@ private:
         std::vector<std::uint8_t> pending; // pixels waiting for the upload
         bool pendingUpload = false;
         std::uint64_t stagingOffset = 0; // assigned in flushUploads()
+        // FNV-1a of the last pixels handed to textureFor: lets the pool
+        // re-upload a changed thumbnail (the engine's representative frame
+        // can advance for video) without recreating the texture.
+        std::uint64_t pixelHash = 0;
     };
 
     // Creates the image + view for an entry (the texture registration is the

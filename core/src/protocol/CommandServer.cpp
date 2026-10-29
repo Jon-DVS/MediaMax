@@ -440,6 +440,8 @@ nlohmann::json CommandServer::handleFrameState() const
             {"id", layer.layerId},
             {"name", byId.count(layer.layerId) ? byId.at(layer.layerId)->name : std::string()},
             {"content", content},
+            {"x", layer.x},
+            {"y", layer.y},
             {"corners", corners},
             {"opacity", layer.opacity},
             {"zIndex", layer.zIndex},

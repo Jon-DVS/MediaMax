@@ -67,12 +67,13 @@ bool writeThumbnailTestBmp(const std::string& path)
     for (int y = 0; y < height; ++y)
     {
         // Bottom-up storage: the first stored row is the bottom of the
-        // image, so the red half ends up on top when displayed.
-        const bool redHalf = (height - 1 - y) * 2 >= height;
+        // image, so the red half ends up on top when displayed (stored
+        // row y shows at display row height - 1 - y).
+        const bool redHalf = (height - 1 - y) * 2 < height;
         auto* row = pixels + static_cast<std::size_t>(y) * rowPadded;
         for (int x = 0; x < width; ++x)
         {
-            row[static_cast<std::size_t>(x) * 3 + 0] = redHalf ? 0 : 128;  // B
+            row[static_cast<std::size_t>(x) * 3 + 0] = redHalf ? 0 : 200;  // B
             row[static_cast<std::size_t>(x) * 3 + 1] = redHalf ? 0 : 0;    // G
             row[static_cast<std::size_t>(x) * 3 + 2] = redHalf ? 200 : 0;  // R
         }
@@ -333,6 +334,12 @@ void ControlGuiApp::frame()
         const std::string which = m_PendingTestOpenModal;
         m_PendingTestOpenModal.clear();
         openModal(which);
+    }
+    if (m_PendingLiveDisplayEdit != kInvalidId)
+    {
+        const Id docId = m_PendingLiveDisplayEdit;
+        m_PendingLiveDisplayEdit = kInvalidId;
+        openDisplayEdit(docId);
     }
     renderMenuBar();
     renderDockspace();
@@ -1523,6 +1530,56 @@ void ControlGuiApp::openDisplayEdit(Id docDisplayId)
     ImGui::OpenPopup(modalPopupId("Display settings"));
 }
 
+Id ControlGuiApp::ensureShowDisplayEntryForLive(const ShowViewDisplay& live)
+{
+    // The settings dialog edits show-document entries: find the entry with
+    // this live display's name, or add one from the live record when the
+    // document does not define the display yet (it came from an older show
+    // file or was created on the engine directly).
+    Show& show = m_Editor.show();
+    ShowDisplay* found = nullptr;
+    for (auto& d : show.displays)
+    {
+        if (d.name == live.name)
+        {
+            found = &d;
+            break;
+        }
+    }
+    if (found == nullptr)
+    {
+        ShowDisplay d;
+        d.id = ShowEditor::nextDisplayId(show);
+        d.name = live.name;
+        d.x = static_cast<std::int32_t>(std::llround(live.x));
+        d.y = static_cast<std::int32_t>(std::llround(live.y));
+        d.width = static_cast<std::int32_t>(std::llround(live.w));
+        d.height = static_cast<std::int32_t>(std::llround(live.h));
+        show.displays.push_back(std::move(d));
+        m_Editor.touch();
+        log("show view: display '" + live.name +
+            "' added to the show document from the live wall");
+        for (auto& d2 : show.displays)
+        {
+            if (d2.name == live.name)
+            {
+                found = &d2;
+                break;
+            }
+        }
+    }
+    return found != nullptr ? found->id : kInvalidId;
+}
+
+void ControlGuiApp::openDisplayEditForLiveDisplay(const ShowViewDisplay& live)
+{
+    const Id docId = ensureShowDisplayEntryForLive(live);
+    if (docId != kInvalidId)
+    {
+        openDisplayEdit(docId);
+    }
+}
+
 bool ControlGuiApp::applyDisplayEdit()
 {
     if (m_EditDisplayId == kInvalidId)
@@ -1972,6 +2029,66 @@ void ControlGuiApp::renderMediaBlock(const SystemConnection::Snapshot& snap)
 
 // --- show view window (2D render) -----------------------------------------------------
 
+namespace
+{
+
+// The scene's display / layer record for an id (nullptr when the item left
+// the scene between the selection and the next snapshot).
+const ShowViewDisplay* findShowViewDisplay(const ShowViewScene& scene, std::uint32_t id)
+{
+    for (const auto& d : scene.displays)
+    {
+        if (d.id == id)
+        {
+            return &d;
+        }
+    }
+    return nullptr;
+}
+
+const ShowViewLayer* findShowViewLayer(const ShowViewScene& scene, std::uint32_t id)
+{
+    for (const auto& l : scene.layers)
+    {
+        if (l.id == id)
+        {
+            return &l;
+        }
+    }
+    return nullptr;
+}
+
+// True when (wx, wy) is inside the convex quad (corners TL, TR, BR, BL in
+// consistent order): the sign test on the four edge cross products.
+bool pointInShowViewQuad(float wx, float wy, const float corners[8])
+{
+    int sign = 0;
+    for (int i = 0; i < 4; ++i)
+    {
+        const int j = (i + 1) % 4;
+        const float ax = corners[static_cast<std::size_t>(2 * i)];
+        const float ay = corners[static_cast<std::size_t>(2 * i + 1)];
+        const float bx = corners[static_cast<std::size_t>(2 * j)];
+        const float by = corners[static_cast<std::size_t>(2 * j + 1)];
+        const float cross = (bx - ax) * (wy - ay) - (by - ay) * (wx - ax);
+        const int s = (cross > 0.f) ? 1 : (cross < 0.f ? -1 : 0);
+        if (s != 0)
+        {
+            if (sign == 0)
+            {
+                sign = s;
+            }
+            else if (sign != s)
+            {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+} // namespace
+
 void ControlGuiApp::initShowView(VkDevice device, VkPhysicalDevice physicalDevice)
 {
     std::string error;
@@ -1989,6 +2106,10 @@ void ControlGuiApp::shutdownShowView()
 void ControlGuiApp::flushShowTextureUploads(VkCommandBuffer cmd)
 {
     m_ShowTexPool.flushUploads(cmd);
+    if (showUploadHook)
+    {
+        showUploadHook(cmd); // the self-test's thumbnail readback
+    }
 }
 
 void ControlGuiApp::fitShowViewCamera(const ImVec2& childSize, const std::string& signature)
@@ -2044,8 +2165,10 @@ void ControlGuiApp::fitShowViewCamera(const ImVec2& childSize, const std::string
 
 void ControlGuiApp::renderShowViewWindow()
 {
+    m_ShowViewEditPopupOpen = false;
     // The scene fills the window content edge to edge (NoBackground); the
-    // "Reset view" button is the only ImGui widget over it.
+    // mode radios, the "Reset view" button and the selection readout are
+    // the only widgets over it.
     const bool visible =
         ImGui::Begin("Show view", nullptr, ImGuiWindowFlags_NoBackground);
     m_ShowViewVisible = false;
@@ -2056,20 +2179,49 @@ void ControlGuiApp::renderShowViewWindow()
     }
     m_ShowViewVisible = true;
 
-    // The "Reset view" overlay's screen rect (drawn after the child, but
-    // computed now so the camera input below can ignore clicks on it).
+    // The top-right control strip: [Display][Layer][Show]  [Reset view],
+    // right-aligned. It sits one row below the content top - at y=8 the old
+    // Reset button sat under the docked window's title bar (issue: the
+    // centralise button was clipped). Computed now so the scene input
+    // below can ignore the strip's rect.
     const ImVec2 winSize = ImGui::GetWindowSize();
-    const float resetWidth =
-        ImGui::CalcTextSize("Reset view").x + ImGui::GetStyle().FramePadding.x * 2.f;
     const ImVec2 contentOrigin = ImGui::GetCursorScreenPos();
-    const ImVec2 resetMin(contentOrigin.x + winSize.x - resetWidth - 8.f,
-                          contentOrigin.y + 8.f);
-    const ImVec2 resetMax(resetMin.x + resetWidth, resetMin.y + ImGui::GetFrameHeight());
+    const float frameH = ImGui::GetFrameHeight();
+    const float itemSpacing = ImGui::GetStyle().ItemSpacing.x;
+    const auto widgetWidth = [](const char* text) {
+        return ImGui::CalcTextSize(text).x + ImGui::GetStyle().FramePadding.x * 2.f;
+    };
+    const float wReset = widgetWidth("Reset view");
+    const float wShow = widgetWidth("Show");
+    const float wLayer = widgetWidth("Layer");
+    const float wDisplay = widgetWidth("Display");
+    const float stripRight = winSize.x - 8.f;
+    const float stripY = frameH + 8.f;
+    const float xReset = stripRight - wReset;
+    const float xShow = xReset - itemSpacing - wShow;
+    const float xLayer = xShow - itemSpacing - wLayer;
+    const float xDisplay = xLayer - itemSpacing - wDisplay;
+    const ImVec2 stripMin(contentOrigin.x + xDisplay, contentOrigin.y + stripY);
+    const ImVec2 stripMax(contentOrigin.x + stripRight, contentOrigin.y + stripY + frameH);
 
     SystemConnection* active = activeConnection();
     const SystemConnection::Snapshot snap =
         active ? active->snapshot() : SystemConnection::Snapshot{};
     m_ShowScene = buildShowViewScene(snap);
+    const std::string signature = m_ShowScene.displaySignature();
+
+    // Drop a selection whose item left the scene (the engine removed it,
+    // or the active system switched).
+    if (m_ShowViewSelDisplay != kInvalidId &&
+        findShowViewDisplay(m_ShowScene, m_ShowViewSelDisplay) == nullptr)
+    {
+        m_ShowViewSelDisplay = kInvalidId;
+    }
+    if (m_ShowViewSelLayer != kInvalidId &&
+        findShowViewLayer(m_ShowScene, m_ShowViewSelLayer) == nullptr)
+    {
+        m_ShowViewSelLayer = kInvalidId;
+    }
 
     if (!ImGui::BeginChild("##showscene", ImVec2(0.0f, 0.0f)))
     {
@@ -2118,35 +2270,18 @@ void ControlGuiApp::renderShowViewWindow()
 
     // Camera: fit on the first frame of a system, and again whenever the
     // display wall changes (a display moved or the system switched). User
-    // zoom/pan below is transient: it survives until the next such change.
-    const std::string signature = m_ShowScene.displaySignature();
-    if (!m_ShowCam.fitted || signature != m_ShowFittedSignature)
+    // zoom/pan is transient: it survives until the next such change. The
+    // refit is held off while a drag is in flight (the drag's own
+    // display.set moves the wall, and refitting would fight it) and for a
+    // short settle after it (the wall's signature keeps updating for a
+    // poll period after the release).
+    const bool dragSettling =
+        m_ShowDragEndTime != std::chrono::steady_clock::time_point{} &&
+        std::chrono::steady_clock::now() < m_ShowDragEndTime + std::chrono::seconds(2);
+    if (!m_ShowCam.fitted ||
+        (signature != m_ShowFittedSignature && !m_ShowDragActive && !dragSettling))
     {
         fitShowViewCamera(childSize, signature);
-    }
-
-    // Input: wheel-zoom around the cursor, left-drag pan (the child owns
-    // none of these otherwise). The Reset button's rect is excluded so a
-    // click on it does not also start a pan.
-    if (m_ShowCam.scale > 0.0f && ImGui::IsWindowHovered() &&
-        !ImGui::IsMouseHoveringRect(resetMin, resetMax))
-    {
-        const ImGuiIO& io = ImGui::GetIO();
-        if (io.MouseWheel != 0.0f)
-        {
-            const ImVec2 mouse = ImGui::GetMousePos();
-            const float wx = (mouse.x - childMin.x - m_ShowCam.offsetX) / m_ShowCam.scale;
-            const float wy = (mouse.y - childMin.y - m_ShowCam.offsetY) / m_ShowCam.scale;
-            m_ShowCam.scale =
-                ImClamp(m_ShowCam.scale * std::pow(1.15f, io.MouseWheel), 0.01f, 32.0f);
-            m_ShowCam.offsetX = mouse.x - childMin.x - wx * m_ShowCam.scale;
-            m_ShowCam.offsetY = mouse.y - childMin.y - wy * m_ShowCam.scale;
-        }
-        if (ImGui::IsMouseDragging(ImGuiMouseButton_Left))
-        {
-            m_ShowCam.offsetX += io.MouseDelta.x;
-            m_ShowCam.offsetY += io.MouseDelta.y;
-        }
     }
 
     // Draw the scene on the child's draw list (auto-clipped to the child
@@ -2158,10 +2293,60 @@ void ControlGuiApp::renderShowViewWindow()
         return ImVec2(origin.x + wx * m_ShowCam.scale + m_ShowCam.offsetX,
                       origin.y + wy * m_ShowCam.scale + m_ShowCam.offsetY);
     };
+    // The inverse of project (sx/sy are child-relative screen px): the
+    // grid below draws world-space lines across the visible extent.
+    auto unproject = [this](float sx, float sy) -> ImVec2 {
+        return ImVec2((sx - m_ShowCam.offsetX) / m_ShowCam.scale,
+                      (sy - m_ShowCam.offsetY) / m_ShowCam.scale);
+    };
     dl->AddRectFilled(childMin, m_ShowViewRectMax,
                       ImGui::ColorConvertFloat4ToU32(ImVec4(0.10f, 0.10f, 0.12f, 1.0f)));
 
-    // The display wall.
+    // The faint world-space grid: the step adapts to the zoom so the lines
+    // stay at least ~24 px apart on screen; the origin lines (x=0, y=0)
+    // are the reference and are drawn brighter and thicker.
+    if (m_ShowCam.scale > 0.0f)
+    {
+        const ImVec2 wMin = unproject(0.0f, 0.0f);
+        const ImVec2 wMax = unproject(childSize.x, childSize.y);
+        static const float kGridSteps[] = {25.f, 50.f, 100.f, 250.f, 500.f, 1000.f, 2000.f,
+                                           5000.f, 10000.f, 25000.f, 100000.f};
+        float step = kGridSteps[std::size(kGridSteps) - 1];
+        for (float s : kGridSteps)
+        {
+            if (s * m_ShowCam.scale >= 24.f)
+            {
+                step = s;
+                break;
+            }
+        }
+        const ImU32 gridFaint = ImGui::ColorConvertFloat4ToU32(ImVec4(1.f, 1.f, 1.f, 0.07f));
+        const ImU32 gridOrigin = ImGui::ColorConvertFloat4ToU32(ImVec4(1.f, 1.f, 1.f, 0.28f));
+        // The step choice already bounds the line count; the caps are a
+        // safety net for a degenerate camera.
+        if ((wMax.x - wMin.x) / step <= 200.f)
+        {
+            for (float gx = std::floor(wMin.x / step) * step; gx <= wMax.x; gx += step)
+            {
+                const bool isOrigin = std::fabs(gx) < step * 0.01f;
+                dl->AddLine(project(gx, wMin.y), project(gx, wMax.y),
+                            isOrigin ? gridOrigin : gridFaint, isOrigin ? 2.0f : 1.0f);
+            }
+        }
+        if ((wMax.y - wMin.y) / step <= 200.f)
+        {
+            for (float gy = std::floor(wMin.y / step) * step; gy <= wMax.y; gy += step)
+            {
+                const bool isOrigin = std::fabs(gy) < step * 0.01f;
+                dl->AddLine(project(wMin.x, gy), project(wMax.x, gy),
+                            isOrigin ? gridOrigin : gridFaint, isOrigin ? 2.0f : 1.0f);
+            }
+        }
+    }
+
+    // The display wall. The selected display is highlighted; its label -
+    // name, resolution and the system it is on - shows only while selected.
+    const ImU32 selCol = ImGui::ColorConvertFloat4ToU32(ImVec4(0.25f, 0.75f, 1.0f, 1.0f));
     for (const auto& d : m_ShowScene.displays)
     {
         if (d.w <= 0.f || d.h <= 0.f)
@@ -2170,17 +2355,27 @@ void ControlGuiApp::renderShowViewWindow()
         }
         const ImVec2 p1 = project(d.x, d.y);
         const ImVec2 p2 = project(d.x + d.w, d.y + d.h);
-        const ImU32 col = d.enabled ? ImGui::GetColorU32(ImGuiCol_Text)
-                                    : ImGui::GetColorU32(ImGuiCol_TextDisabled);
-        dl->AddRect(p1, p2, col, 0.0f, ImDrawFlags_None, d.enabled ? 2.0f : 1.0f);
-        if (!d.name.empty())
+        const bool selected = d.id == m_ShowViewSelDisplay;
+        const ImU32 col = selected ? selCol
+                                   : d.enabled ? ImGui::GetColorU32(ImGuiCol_Text)
+                                               : ImGui::GetColorU32(ImGuiCol_TextDisabled);
+        dl->AddRect(p1, p2, col, 0.0f, ImDrawFlags_None,
+                    selected ? 3.0f : (d.enabled ? 2.0f : 1.0f));
+        if (selected)
         {
-            dl->AddText(ImVec2(p1.x + 4.f, p1.y + 2.f),
-                        ImGui::GetColorU32(ImGuiCol_Text), d.name.c_str());
+            std::string label = d.name + "  \u00b7  " + std::to_string(static_cast<int>(d.w)) +
+                                "x" + std::to_string(static_cast<int>(d.h));
+            const std::string systemName = active ? active->name() : std::string();
+            if (!systemName.empty())
+            {
+                label += "  \u00b7  " + systemName;
+            }
+            dl->AddText(ImVec2(p1.x + 4.f, p1.y + 2.f), selCol, label.c_str());
         }
     }
 
-    // The visible layers (in draw order).
+    // The visible layers (in draw order). The selected layer gets the
+    // highlight outline; its label shows only while selected.
     for (const auto& layer : m_ShowScene.layers)
     {
         ImVec2 c[4];
@@ -2189,20 +2384,21 @@ void ControlGuiApp::renderShowViewWindow()
             c[i] = project(layer.corners[static_cast<size_t>(2 * i)],
                            layer.corners[static_cast<size_t>(2 * i + 1)]);
         }
-        const ImU32 outline = ImGui::GetColorU32(ImGuiCol_TextDisabled);
+        const bool selected = layer.id == m_ShowViewSelLayer;
+        const ImU32 outline = selected ? selCol : ImGui::GetColorU32(ImGuiCol_TextDisabled);
         if (layer.content == "color")
         {
             const ImU32 fill = ImGui::ColorConvertFloat4ToU32(ImVec4(
                 layer.color[0], layer.color[1], layer.color[2],
                 layer.color[3] * layer.opacity));
             dl->AddQuadFilled(c[0], c[1], c[2], c[3], fill);
-            dl->AddQuad(c[0], c[1], c[2], c[3], outline);
+            dl->AddQuad(c[0], c[1], c[2], c[3], outline, selected ? 2.5f : 1.0f);
         }
         else if (m_ShowTexPool.ready())
         {
             // Media: the thumbnail texture (a white fallback until it
-            // arrives). The pool keys the texture on the asset path, so a
-            // file reload replaces it.
+            // arrives). The pool replaces the texture on a path/size change
+            // and re-uploads on new pixels.
             ImTextureRef tex = m_ShowTexPool.whiteTexture();
             int tw = 0;
             int th = 0;
@@ -2229,7 +2425,7 @@ void ControlGuiApp::renderShowViewWindow()
             dl->PrimQuadUV(c[0], c[1], c[2], c[3], ImVec2(0.f, 0.f), ImVec2(1.f, 0.f),
                            ImVec2(1.f, 1.f), ImVec2(0.f, 1.f), tint);
             dl->PopTextureID();
-            dl->AddQuad(c[0], c[1], c[2], c[3], outline);
+            dl->AddQuad(c[0], c[1], c[2], c[3], outline, selected ? 2.5f : 1.0f);
             if (layer.content == "video")
             {
                 // Play badge: screen-constant (a world-space size would
@@ -2247,22 +2443,268 @@ void ControlGuiApp::renderShowViewWindow()
             dl->AddQuadFilled(c[0], c[1], c[2], c[3],
                               ImGui::ColorConvertFloat4ToU32(
                                   ImVec4(0.5f, 0.5f, 0.5f, layer.opacity)));
-            dl->AddQuad(c[0], c[1], c[2], c[3], outline);
+            dl->AddQuad(c[0], c[1], c[2], c[3], outline, selected ? 2.5f : 1.0f);
         }
-        if (!layer.name.empty())
+        if (selected && !layer.name.empty())
         {
-            dl->AddText(ImVec2(c[0].x + 3.f, c[0].y + 2.f),
-                        ImGui::GetColorU32(ImGuiCol_Text), layer.name.c_str());
+            dl->AddText(ImVec2(c[0].x + 3.f, c[0].y + 2.f), selCol, layer.name.c_str());
         }
     }
     ImGui::EndChild();
 
-    // The "Reset view" overlay, top-right of the content area (window
-    // content coordinates start below the title bar).
-    ImGui::SetCursorPos(ImVec2(winSize.x - resetWidth - 8.f, 8.f));
+    // The top-right control strip: the view-mode radios + Reset view.
+    // Rendered before the scene input below so a press on them is already
+    // in ImGui's active-id state when the input block runs.
+    ImGui::SetCursorPos(ImVec2(xDisplay, stripY));
+    if (ImGui::RadioButton("Display##showmode", m_ShowViewMode == ShowViewMode::Display))
+    {
+        m_ShowViewMode = ShowViewMode::Display;
+    }
+    ImGui::SetCursorPos(ImVec2(xLayer, stripY));
+    if (ImGui::RadioButton("Layer##showmode", m_ShowViewMode == ShowViewMode::Layer))
+    {
+        m_ShowViewMode = ShowViewMode::Layer;
+    }
+    ImGui::SetCursorPos(ImVec2(xShow, stripY));
+    if (ImGui::RadioButton("Show##showmode", m_ShowViewMode == ShowViewMode::Show))
+    {
+        m_ShowViewMode = ShowViewMode::Show;
+    }
+    ImGui::SetCursorPos(ImVec2(xReset, stripY));
     if (ImGui::Button("Reset view##showreset"))
     {
-        fitShowViewCamera(childSize, m_ShowScene.displaySignature());
+        fitShowViewCamera(childSize, signature);
+    }
+
+    // Scene input: wheel-zoom around the cursor, middle-drag pan, and the
+    // left button for selection/drag (the mode decides what a click
+    // selects; a drag moves the selected item live). The strip's rect is
+    // excluded, and everything is ignored while any widget owns the mouse
+    // or a popup/modal is open (their click closes or drives them).
+    {
+        const ImGuiIO& io = ImGui::GetIO();
+        // With ConfigWindowsMoveFromTitleBarOnly, a left press on a
+        // window's empty space makes ImGui grab the window's MoveId
+        // (StartMouseMovingWindow() sets the ActiveId, then cancels the
+        // move because the press is outside the title bar). The window
+        // does not move, but the grab keeps IsAnyItemActive() true while
+        // the button is held: it must not block the scene's own left
+        // drag. Only a real widget (a different ActiveId) blocks it.
+        bool mouseFree = !ImGui::IsAnyItemActive();
+        ImGuiContext& ctx = *ImGui::GetCurrentContext();
+        if (!mouseFree && ctx.ActiveIdWindow != nullptr &&
+            ctx.ActiveId == ctx.ActiveIdWindow->MoveId)
+        {
+            mouseFree = true;
+        }
+        const bool popupOpen = ctx.OpenPopupStack.Size > 0;
+        const bool inScene =
+            ImGui::IsMouseHoveringRect(m_ShowViewRectMin, m_ShowViewRectMax) &&
+            !ImGui::IsMouseHoveringRect(stripMin, stripMax);
+        if (m_ShowCam.scale > 0.0f && mouseFree && !popupOpen && inScene)
+        {
+            if (io.MouseWheel != 0.0f)
+            {
+                const ImVec2 mouse = ImGui::GetMousePos();
+                const float wx = (mouse.x - childMin.x - m_ShowCam.offsetX) / m_ShowCam.scale;
+                const float wy = (mouse.y - childMin.y - m_ShowCam.offsetY) / m_ShowCam.scale;
+                m_ShowCam.scale =
+                    ImClamp(m_ShowCam.scale * std::pow(1.15f, io.MouseWheel), 0.01f, 32.0f);
+                m_ShowCam.offsetX = mouse.x - childMin.x - wx * m_ShowCam.scale;
+                m_ShowCam.offsetY = mouse.y - childMin.y - wy * m_ShowCam.scale;
+            }
+            if (ImGui::IsMouseDragging(ImGuiMouseButton_Middle))
+            {
+                m_ShowCam.offsetX += io.MouseDelta.x;
+                m_ShowCam.offsetY += io.MouseDelta.y;
+            }
+
+            const ImVec2 mouse = ImGui::GetMousePos();
+            const float wx = (mouse.x - childMin.x - m_ShowCam.offsetX) / m_ShowCam.scale;
+            const float wy = (mouse.y - childMin.y - m_ShowCam.offsetY) / m_ShowCam.scale;
+
+            if (m_ShowViewMode != ShowViewMode::Show)
+            {
+                if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+                {
+                    // Hit-test: the topmost (last-drawn) item under the
+                    // cursor; a hit on nothing clears the selection.
+                    const ShowViewDisplay* hitDisplay = nullptr;
+                    const ShowViewLayer* hitLayer = nullptr;
+                    if (m_ShowViewMode == ShowViewMode::Display)
+                    {
+                        for (auto it = m_ShowScene.displays.rbegin();
+                             it != m_ShowScene.displays.rend(); ++it)
+                        {
+                            if (it->w > 0.f && it->h > 0.f && wx >= it->x &&
+                                wx <= it->x + it->w && wy >= it->y && wy <= it->y + it->h)
+                            {
+                                hitDisplay = &*it;
+                                break;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        for (auto it = m_ShowScene.layers.rbegin();
+                             it != m_ShowScene.layers.rend(); ++it)
+                        {
+                            if (pointInShowViewQuad(wx, wy, it->corners))
+                            {
+                                hitLayer = &*it;
+                                break;
+                            }
+                        }
+                    }
+                    m_ShowViewSelDisplay = (hitDisplay != nullptr) ? hitDisplay->id : kInvalidId;
+                    m_ShowViewSelLayer = (hitLayer != nullptr) ? hitLayer->id : kInvalidId;
+                    // Arm a live drag of the hit item (the press point is
+                    // the origin; IsMouseDragging gates the first move).
+                    if (hitDisplay != nullptr)
+                    {
+                        m_ShowDragActive = true;
+                        m_ShowDragIsDisplay = true;
+                        m_ShowDragId = hitDisplay->id;
+                        m_ShowDragStartWX = wx;
+                        m_ShowDragStartWY = wy;
+                        m_ShowDragOrigX = hitDisplay->x;
+                        m_ShowDragOrigY = hitDisplay->y;
+                    }
+                    else if (hitLayer != nullptr)
+                    {
+                        m_ShowDragActive = true;
+                        m_ShowDragIsDisplay = false;
+                        m_ShowDragId = hitLayer->id;
+                        m_ShowDragStartWX = wx;
+                        m_ShowDragStartWY = wy;
+                        m_ShowDragOrigX = hitLayer->x;
+                        m_ShowDragOrigY = hitLayer->y;
+                    }
+                    else
+                    {
+                        m_ShowDragActive = false;
+                    }
+                }
+                else if (m_ShowDragActive &&
+                         ImGui::IsMouseDragging(ImGuiMouseButton_Left))
+                {
+                    // The live move: the position at the press plus the
+                    // world delta since (the transform position is a pure
+                    // final translation, so the delta shifts the quad
+                    // regardless of rotation/anchor/scale).
+                    const float dx = wx - m_ShowDragStartWX;
+                    const float dy = wy - m_ShowDragStartWY;
+                    std::string error;
+                    if (m_ShowDragIsDisplay)
+                    {
+                        sendActive(
+                            "display.set",
+                            {{"display", m_ShowDragId},
+                             {"x", static_cast<std::int32_t>(std::llround(m_ShowDragOrigX + dx))},
+                             {"y", static_cast<std::int32_t>(std::llround(m_ShowDragOrigY + dy))}},
+                            error);
+                    }
+                    else
+                    {
+                        sendActive("layer.set",
+                                   {{"layer", m_ShowDragId},
+                                    {"x", m_ShowDragOrigX + dx},
+                                    {"y", m_ShowDragOrigY + dy}},
+                                   error);
+                    }
+                    // The wall signature moves with our own display.set:
+                    // mark the camera fitted to it so the auto-refit neither
+                    // fights the drag nor jumps on release.
+                    m_ShowFittedSignature = signature;
+                }
+                if (!ImGui::IsMouseDown(ImGuiMouseButton_Left))
+                {
+                    if (m_ShowDragActive)
+                    {
+                        // The drag is over: accept the wall it produced
+                        // (no refit jump) and start the settle grace.
+                        m_ShowFittedSignature = signature;
+                        m_ShowDragEndTime = std::chrono::steady_clock::now();
+                    }
+                    m_ShowDragActive = false;
+                }
+            }
+            if (m_ShowViewSelDisplay != kInvalidId &&
+                ImGui::IsMouseReleased(ImGuiMouseButton_Right))
+            {
+                // Right release over the selected display: context menu.
+                const ShowViewDisplay* sel =
+                    findShowViewDisplay(m_ShowScene, m_ShowViewSelDisplay);
+                if (sel != nullptr && wx >= sel->x && wx <= sel->x + sel->w &&
+                    wy >= sel->y && wy <= sel->y + sel->h)
+                {
+                    ImGui::OpenPopup("Show view display");
+                }
+            }
+        }
+    }
+
+    // The right-click context menu over the selected display.
+    if (ImGui::BeginPopup("Show view display"))
+    {
+        m_ShowViewEditPopupOpen = true;
+        if (ImGui::MenuItem("Edit...") && m_ShowViewSelDisplay != kInvalidId)
+        {
+            const ShowViewDisplay* sel =
+                findShowViewDisplay(m_ShowScene, m_ShowViewSelDisplay);
+            if (sel != nullptr)
+            {
+                openDisplayEditForLiveDisplay(*sel);
+            }
+        }
+        ImGui::EndPopup();
+    }
+
+    // The top-left readout: what is selected (the display's name,
+    // resolution and system - or the layer's name), on a dark chip so it
+    // stays readable over the scene. Drawn on the window's draw list after
+    // the child, so it sits on top of the scene.
+    {
+        ImDrawList* wdl = ImGui::GetWindowDrawList();
+        std::string text;
+        const ShowViewDisplay* selDisplay =
+            m_ShowViewSelDisplay != kInvalidId
+                ? findShowViewDisplay(m_ShowScene, m_ShowViewSelDisplay)
+                : nullptr;
+        if (selDisplay != nullptr)
+        {
+            text = selDisplay->name + "  \u00b7  " +
+                   std::to_string(static_cast<int>(selDisplay->w)) + "x" +
+                   std::to_string(static_cast<int>(selDisplay->h));
+            const std::string systemName = active ? active->name() : std::string();
+            if (!systemName.empty())
+            {
+                text += "  \u00b7  " + systemName;
+            }
+        }
+        else
+        {
+            const ShowViewLayer* selLayer =
+                m_ShowViewSelLayer != kInvalidId
+                    ? findShowViewLayer(m_ShowScene, m_ShowViewSelLayer)
+                    : nullptr;
+            if (selLayer != nullptr)
+            {
+                text = "'" + selLayer->name + "'";
+            }
+        }
+        if (text.empty())
+        {
+            text = "No selection";
+        }
+        const float tsx = contentOrigin.x + 8.f;
+        const float tsy = contentOrigin.y + 8.f;
+        const ImVec2 tsize = ImGui::CalcTextSize(text.c_str());
+        const float pad = 4.f;
+        wdl->AddRectFilled(ImVec2(tsx - pad, tsy - pad),
+                           ImVec2(tsx + tsize.x + pad, tsy + tsize.y + pad),
+                           ImGui::ColorConvertFloat4ToU32(ImVec4(0.f, 0.f, 0.f, 0.55f)));
+        wdl->AddText(ImVec2(tsx, tsy), ImGui::GetColorU32(ImGuiCol_Text), text.c_str());
     }
     ImGui::End();
 }
@@ -4403,6 +4845,113 @@ void ControlGuiApp::testRemoveSelfTestBmp()
         std::error_code fsError;
         std::filesystem::remove(m_SelfTestBmpPath, fsError); // best effort
         m_SelfTestBmpPath.clear();
+    }
+}
+
+// --- show view test hooks (live self-test) --------------------------------------
+
+void ControlGuiApp::testShowViewSetMode(const std::string& mode)
+{
+    if (mode == "display")
+    {
+        m_ShowViewMode = ShowViewMode::Display;
+    }
+    else if (mode == "layer")
+    {
+        m_ShowViewMode = ShowViewMode::Layer;
+    }
+    else if (mode == "show")
+    {
+        m_ShowViewMode = ShowViewMode::Show;
+    }
+}
+
+bool ControlGuiApp::testShowViewCamera(float& scale, float& childMinX, float& childMinY,
+                                       float& childMaxX, float& childMaxY) const
+{
+    if (m_ShowCam.scale <= 0.f)
+    {
+        return false;
+    }
+    scale = m_ShowCam.scale;
+    childMinX = m_ShowViewRectMin.x;
+    childMinY = m_ShowViewRectMin.y;
+    childMaxX = m_ShowViewRectMax.x;
+    childMaxY = m_ShowViewRectMax.y;
+    return true;
+}
+
+bool ControlGuiApp::testShowViewProject(float wx, float wy, float& sx, float& sy) const
+{
+    if (m_ShowCam.scale <= 0.f)
+    {
+        return false;
+    }
+    sx = m_ShowViewRectMin.x + wx * m_ShowCam.scale + m_ShowCam.offsetX;
+    sy = m_ShowViewRectMin.y + wy * m_ShowCam.scale + m_ShowCam.offsetY;
+    return true;
+}
+
+Id ControlGuiApp::testShowViewSelectedDisplay() const
+{
+    return m_ShowViewSelDisplay;
+}
+
+Id ControlGuiApp::testShowViewSelectedLayer() const
+{
+    return m_ShowViewSelLayer;
+}
+
+bool ControlGuiApp::testShowViewEditPopupOpen() const
+{
+    return m_ShowViewEditPopupOpen;
+}
+
+bool ControlGuiApp::testShowViewEditSelectedDisplay()
+{
+    if (m_ShowViewSelDisplay == kInvalidId)
+    {
+        return false;
+    }
+    const ShowViewDisplay* sel = findShowViewDisplay(m_ShowScene, m_ShowViewSelDisplay);
+    if (sel == nullptr)
+    {
+        return false;
+    }
+    // The document part is safe between frames; the dialog itself is
+    // deferred to the next frame() - openDisplayEdit calls ImGui::OpenPopup,
+    // which needs a current window (g.CurrentWindow is NULL between frames).
+    m_PendingLiveDisplayEdit = ensureShowDisplayEntryForLive(*sel);
+    return m_PendingLiveDisplayEdit != kInvalidId;
+}
+
+bool ControlGuiApp::testShowTextureUploaded(std::uint32_t mediaId) const
+{
+    return m_ShowTexPool.textureUploaded(mediaId);
+}
+
+bool ControlGuiApp::testShowTextureSize(std::uint32_t mediaId, int& width,
+                                        int& height) const
+{
+    return m_ShowTexPool.textureSize(mediaId, width, height);
+}
+
+bool ControlGuiApp::testShowTextureReadback(std::uint32_t mediaId, VkCommandBuffer cmd,
+                                            VkBuffer dst) const
+{
+    return m_ShowTexPool.readbackInto(mediaId, cmd, dst);
+}
+
+void ControlGuiApp::testRemoveDocumentDisplay(const std::string& name)
+{
+    Show& show = m_Editor.show();
+    for (auto it = show.displays.begin(); it != show.displays.end(); ++it)
+    {
+        if (it->name == name)
+        {
+            removeShowDisplay(it->id);
+            return;
+        }
     }
 }
 
