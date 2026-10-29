@@ -1122,6 +1122,92 @@ TEST_CASE("show.loadJson loads an inline show document")
     CHECK(f.media.find(videoLayer->mediaId).has_value());
 }
 
+TEST_CASE("show.loadJson with a displays section reconciles the engine's wall")
+{
+    Fixture f;
+    // The fixture's wall is "main" (0,0,1920,1080) + "side" (1920,0,1920,1080).
+    // The document updates "main" (geometry, flags, warp), adds "extra" and
+    // no longer defines "side".
+    const nlohmann::json doc = R"({
+        "app": "mediamax-show",
+        "version": 1,
+        "name": "Wall show",
+        "frameRate": {"num": 60, "den": 1},
+        "displays": [
+            {"id": 1, "name": "main", "x": 0, "y": 0, "width": 3840, "height": 2160,
+             "brightness": 0.7, "enabled": true, "alwaysOnTop": false,
+             "statusOverlay": true, "vsync": false,
+             "warp": {"mode": "spline", "rows": 2, "cols": 2,
+                      "points": [[0,0],[1,0],[0,1],[1,1]]}},
+            {"id": 2, "name": "extra", "x": 3840, "y": 0, "width": 1920, "height": 1080}
+        ]
+    })"_json;
+    const Response resp = f.run("show.loadJson", {{"show", doc}});
+    REQUIRE(resp.ok);
+    CHECK(resp.result.at("displays").get<std::uint64_t>() == 2);
+
+    const Response list = f.run("display.list");
+    REQUIRE(list.ok);
+    const auto& displays = list.result.at("displays");
+    REQUIRE(displays.size() == 2);
+
+    nlohmann::json mainJson;
+    nlohmann::json extraJson;
+    for (const auto& d : displays)
+    {
+        if (d.at("name") == "main")
+        {
+            mainJson = d;
+        }
+        else if (d.at("name") == "extra")
+        {
+            extraJson = d;
+        }
+    }
+    REQUIRE(mainJson.is_object());
+    REQUIRE(extraJson.is_object());
+
+    // "main" was updated in place: it keeps its engine id.
+    CHECK(mainJson.at("id").get<std::uint64_t>() == f.displayA);
+    CHECK(mainJson.at("x").get<int>() == 0);
+    CHECK(mainJson.at("y").get<int>() == 0);
+    CHECK(mainJson.at("width").get<int>() == 3840);
+    CHECK(mainJson.at("height").get<int>() == 2160);
+    CHECK(mainJson.at("brightness").get<double>() == doctest::Approx(0.7));
+    CHECK(mainJson.at("alwaysOnTop").get<bool>() == false);
+    CHECK(mainJson.at("statusOverlay").get<bool>() == true);
+    CHECK(mainJson.at("vsync").get<bool>() == false);
+    CHECK(mainJson.at("warp").at("mode") == "spline");
+    CHECK(mainJson.at("warp").at("rows") == 2);
+
+    // "extra" was added with the document's geometry.
+    CHECK(extraJson.at("x").get<int>() == 3840);
+    CHECK(extraJson.at("y").get<int>() == 0);
+    CHECK(extraJson.at("width").get<int>() == 1920);
+    CHECK(extraJson.at("height").get<int>() == 1080);
+    CHECK(extraJson.at("enabled").get<bool>() == true);
+    CHECK(extraJson.at("vsync").get<bool>() == true); // document default
+
+    // "side" is not in the document anymore: it is gone.
+    for (const auto& d : displays)
+    {
+        CHECK(d.at("name") != "side");
+    }
+}
+
+TEST_CASE("show.loadJson without a displays section leaves the wall untouched")
+{
+    Fixture f;
+    const nlohmann::json doc = f.engine.show().toJson(); // no displays
+    const Response resp = f.run("show.loadJson", {{"show", doc}});
+    REQUIRE(resp.ok);
+    CHECK(resp.result.at("displays").get<std::uint64_t>() == 0);
+
+    const Response list = f.run("display.list");
+    REQUIRE(list.ok);
+    CHECK(list.result.at("displays").size() == 2); // main + side, as before
+}
+
 TEST_CASE("show.loadJson validates its parameter")
 {
     Fixture f;

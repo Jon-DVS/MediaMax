@@ -18,6 +18,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "mediamax/display/WarpMap.h"
 #include "mediamax/show/Cue.h"
 #include "mediamax/show/Scene.h"
 #include "mediamax/time/FrameRate.h"
@@ -30,6 +31,30 @@ struct MediaReference
 {
     Id id = kInvalidId;
     std::string path;
+};
+
+// One display of the show's wall definition (docs/SHOW_FORMAT.md). The show
+// file is where display settings persist: loading a show reconciles each
+// system's display set to this list (the display NAME is the identity - the
+// id is file-local, like media ids, and is remapped to the engine's id on
+// load). Shows without a `displays` section do not control the system's
+// display set.
+struct ShowDisplay
+{
+    Id id = kInvalidId;
+    std::string name;
+    std::int32_t x = 0;
+    std::int32_t y = 0;
+    std::int32_t width = 1920;
+    std::int32_t height = 1080;
+    float brightness = 1.0f;
+    bool enabled = true;
+    bool alwaysOnTop = true;
+    bool statusOverlay = false;
+    bool vsync = true;
+    // Projection warp (identity 2x2 grid when never edited) - the same
+    // model and wire layout as the runtime display's warp.
+    WarpMap warp{2, 2};
 };
 
 // A playback system the show runs on (issue 18: the show file is where the
@@ -60,6 +85,11 @@ public:
     // The playback systems the show targets (the control GUI's system list;
     // issue 18 - stored in the show file rather than a separate config).
     std::vector<SystemReference> systems;
+
+    // The show's display settings (the output wall). Optional in the JSON:
+    // a show without a `displays` section leaves a system's display set
+    // untouched on load.
+    std::vector<ShowDisplay> displays;
 
     // --- Queries -----------------------------------------------------------
 

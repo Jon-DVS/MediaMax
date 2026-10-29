@@ -1027,25 +1027,28 @@ void ControlGuiApp::renderDisplaysWindow()
         ImGui::End();
         return;
     }
-    SystemConnection* active = activeConnection();
-    if (!active || !active->snapshot().haveStatus)
-    {
-        ImGui::TextDisabled(active ? "Waiting for status..."
-                                   : "Select a system (left) and make sure it is online.");
-        ImGui::End();
-        return;
-    }
-    const auto snap = active->snapshot();
+    // The Displays tab is document-driven (the show file's display wall):
+    // it is listed and editable with no system connected. The Media tab
+    // still needs a live system (the media library is per engine).
     if (ImGui::BeginTabBar("##displaystab"))
     {
         if (ImGui::BeginTabItem("Displays"))
         {
-            renderDisplaysBlock(snap);
+            renderDisplaysBlock();
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("Media"))
         {
-            renderMediaBlock(snap);
+            SystemConnection* active = activeConnection();
+            if (!active || !active->snapshot().haveStatus)
+            {
+                ImGui::TextDisabled(active ? "Waiting for status..."
+                                           : "Select a system (left) and make sure it is online.");
+            }
+            else
+            {
+                renderMediaBlock(active->snapshot());
+            }
             ImGui::EndTabItem();
         }
         ImGui::EndTabBar();
@@ -1294,30 +1297,148 @@ void ControlGuiApp::renderScenesBlock(const SystemConnection::Snapshot& snap)
     }
 }
 
-void ControlGuiApp::openDisplayEdit(const json& display, SystemConnection* target)
+void ControlGuiApp::addShowDisplay()
 {
-    const Id id = static_cast<Id>(display.value("id", 0u));
-    // Resync from the current record so the dialog always starts from the
-    // engine's live values (an old edit must not survive across systems or
-    // external display.set calls).
-    DisplayEdit& de = m_DisplayEdits[id];
-    de.x = static_cast<int>(display.value("x", 0));
-    de.y = static_cast<int>(display.value("y", 0));
-    de.width = static_cast<int>(display.value("width", 1920));
-    de.height = static_cast<int>(display.value("height", 1080));
-    de.brightness = static_cast<float>(display.value("brightness", 1.0));
-    de.enabled = display.value("enabled", true);
-    de.alwaysOnTop = display.value("alwaysOnTop", true);
-    de.vsync = display.value("vsync", true);
-    de.name = display.value("name", "");
-    de.monitor = display.value("monitor", "");
-    m_EditTarget = target;
-    m_EditDisplayId = id;
-    // The System dropdown starts on the system the display is linked to.
+    // A new panel tiled right of the document's current wall at 1920x1080
+    // (an empty wall starts at the origin). The name is the display's
+    // identity, so it must be unique within the document.
+    Show& show = m_Editor.show();
+    std::int32_t wallRight = 0;
+    for (const auto& d : show.displays)
+    {
+        wallRight = std::max(wallRight, d.x + std::max(0, d.width));
+    }
+    ShowDisplay display;
+    display.id = ShowEditor::nextDisplayId(show);
+    int n = 1;
+    do
+    {
+        display.name = "Display " + std::to_string(n++);
+    } while (std::any_of(show.displays.begin(), show.displays.end(),
+                         [&](const ShowDisplay& d) { return d.name == display.name; }));
+    display.x = wallRight;
+    display.y = 0;
+    show.displays.push_back(display);
+    m_Editor.touch();
+    log("display '" + display.name + "' added to the show (the wall)");
+}
+
+void ControlGuiApp::removeShowDisplay(Id docDisplayId)
+{
+    Show& show = m_Editor.show();
+    for (auto it = show.displays.begin(); it != show.displays.end(); ++it)
+    {
+        if (it->id == docDisplayId)
+        {
+            log("display '" + it->name + "' removed from the show (the systems drop it on the "
+                "next show push)");
+            show.displays.erase(it);
+            m_Editor.touch();
+            return;
+        }
+    }
+}
+
+SystemConnection* ControlGuiApp::mappedSystemFor(const std::string& displayName) const
+{
+    for (const auto& system : m_Systems)
+    {
+        if (!system->pollConnected())
+        {
+            continue;
+        }
+        const auto snap = system->snapshot();
+        if (!snap.haveStatus || !snap.status.contains("displays") || !snap.status["displays"].is_array())
+        {
+            continue;
+        }
+        for (const auto& d : snap.status["displays"])
+        {
+            if (d.value("name", "") == displayName)
+            {
+                return system.get();
+            }
+        }
+    }
+    return nullptr;
+}
+
+Id ControlGuiApp::liveDisplayIdFor(const SystemConnection* system,
+                                   const std::string& displayName) const
+{
+    if (system == nullptr)
+    {
+        return kInvalidId;
+    }
+    const auto snap = system->snapshot();
+    if (!snap.haveStatus || !snap.status.contains("displays") || !snap.status["displays"].is_array())
+    {
+        return kInvalidId;
+    }
+    for (const auto& d : snap.status["displays"])
+    {
+        if (d.value("name", "") == displayName)
+        {
+            return static_cast<Id>(d.value("id", 0u));
+        }
+    }
+    return kInvalidId;
+}
+
+void ControlGuiApp::openDisplayEdit(Id docDisplayId)
+{
+    const ShowDisplay* sd = nullptr;
+    for (const auto& d : m_Editor.show().displays)
+    {
+        if (d.id == docDisplayId)
+        {
+            sd = &d;
+            break;
+        }
+    }
+    if (sd == nullptr)
+    {
+        return; // the entry went away (removed by another edit)
+    }
+    // Resync from the document entry so the dialog always starts from what
+    // the show file says (an old edit must not survive).
+    DisplayEdit& de = m_DisplayEdits[docDisplayId];
+    de.x = sd->x;
+    de.y = sd->y;
+    de.width = sd->width;
+    de.height = sd->height;
+    de.brightness = sd->brightness;
+    de.enabled = sd->enabled;
+    de.alwaysOnTop = sd->alwaysOnTop;
+    de.statusOverlay = sd->statusOverlay;
+    de.vsync = sd->vsync;
+    de.name = sd->name;
+    // The physical output is engine state: show it while the entry runs on
+    // a mapped system, otherwise leave it blank.
+    de.monitor.clear();
+    m_EditTarget = mappedSystemFor(sd->name);
+    if (m_EditTarget != nullptr)
+    {
+        const auto snap = m_EditTarget->snapshot();
+        if (snap.haveStatus && snap.status.contains("displays") &&
+            snap.status["displays"].is_array())
+        {
+            for (const auto& d : snap.status["displays"])
+            {
+                if (d.value("name", "") == sd->name)
+                {
+                    de.monitor = d.value("monitor", "");
+                    break;
+                }
+            }
+        }
+    }
+    m_EditDisplayId = docDisplayId;
+    // The System dropdown starts on the entry's current mapping.
     m_EditSystem = -1;
     for (int i = 0; i < static_cast<int>(m_Systems.size()); ++i)
     {
-        if (m_Systems[static_cast<size_t>(i)].get() == target)
+        if (m_Systems[static_cast<size_t>(i)].get() == m_EditTarget)
         {
             m_EditSystem = i;
             break;
@@ -1330,82 +1451,127 @@ void ControlGuiApp::openDisplayEdit(const json& display, SystemConnection* targe
 
 bool ControlGuiApp::applyDisplayEdit()
 {
-    if (!m_EditTarget || m_EditDisplayId == kInvalidId)
+    if (m_EditDisplayId == kInvalidId)
     {
         return false;
     }
     DisplayEdit& de = m_DisplayEdits[m_EditDisplayId];
     m_EditError.clear();
-    // The system the display should be linked to (the dialog's System
-    // dropdown). Usually the system the dialog was opened on.
-    SystemConnection* target = m_EditTarget;
-    if (m_EditSystem >= 0 && m_EditSystem < static_cast<int>(m_Systems.size()) &&
-        m_Systems[static_cast<size_t>(m_EditSystem)].get() != m_EditTarget)
+    if (de.name.empty())
     {
-        target = m_Systems[static_cast<size_t>(m_EditSystem)].get();
-    }
-
-    nlohmann::json result;
-    std::string error;
-    if (target != m_EditTarget)
-    {
-        // Move (issue 14): recreate the display on the target with the
-        // dialog's values, then remove it from the source. Create first: if
-        // the add fails the source display is untouched; if the remove
-        // fails afterwards, the error says exactly which side now holds the
-        // display.
-        if (!target->send("display.add",
-                          {{"x", de.x}, {"y", de.y}, {"width", de.width}, {"height", de.height},
-                           {"name", de.name}},
-                          result, error))
-        {
-            m_EditError = "display.add on '" + target->name() + "' failed: " + error;
-            return false;
-        }
-        const Id newId = static_cast<Id>(result.value("id", 0u));
-        // display.add does not carry brightness/enabled/alwaysOnTop/vsync:
-        // apply the dialog's values to the recreated display.
-        if (!target->send("display.set",
-                          {{"display", newId}, {"brightness", de.brightness},
-                           {"enabled", de.enabled}, {"alwaysOnTop", de.alwaysOnTop},
-                           {"vsync", de.vsync}},
-                          result, error))
-        {
-            m_EditError = "display.set on '" + target->name() + "' after the move failed: " + error;
-            return false;
-        }
-        nlohmann::json removed;
-        std::string removeError;
-        if (!m_EditTarget->send("display.remove", {{"display", m_EditDisplayId}}, removed, removeError))
-        {
-            m_EditError = "display added on '" + target->name() + "' but the remove on '" +
-                          m_EditTarget->name() + "' failed: " + removeError;
-            return false;
-        }
-        log("moved display '" + de.name + "' (" + std::to_string(m_EditDisplayId) + ") from '" +
-            m_EditTarget->name() + "' to " + target->name() + " (new id " + std::to_string(newId) +
-            ")");
-        // Track the display on its new system (the dialog closes now; this
-        // also leaves the edits map ready if the dialog reopens).
-        m_DisplayEdits[newId] = de;
-        m_EditDisplayId = newId;
-        m_EditTarget = target;
-        m_EditModal = false;
-        return true;
-    }
-
-    if (!target->send("display.set",
-                      {{"display", m_EditDisplayId}, {"name", de.name},
-                       {"x", de.x}, {"y", de.y},
-                       {"width", de.width}, {"height", de.height},
-                       {"brightness", de.brightness}, {"enabled", de.enabled},
-                       {"alwaysOnTop", de.alwaysOnTop}, {"vsync", de.vsync}},
-                      result, error))
-    {
-        m_EditError = error;
+        m_EditError = "the display name must not be empty";
         return false;
     }
-    log("display " + std::to_string(m_EditDisplayId) + " settings applied on " + target->name());
+    if (de.width <= 0 || de.height <= 0)
+    {
+        m_EditError = "the display size must be positive";
+        return false;
+    }
+    ShowDisplay* sd = nullptr;
+    for (auto& d : m_Editor.show().displays)
+    {
+        if (d.id == m_EditDisplayId)
+        {
+            sd = &d;
+            break;
+        }
+    }
+    if (sd == nullptr)
+    {
+        m_EditError = "the display is no longer in the show";
+        m_EditModal = false;
+        return false;
+    }
+    const std::string oldName = sd->name;
+
+    // 1) Persistence: the dialog's values become the show file's wall
+    //    entry. The auto-push (the touch below) propagates the wall to
+    //    every connected system - the engine builds it on the next show
+    //    load; with no system connected the settings are simply saved.
+    sd->name = de.name;
+    sd->x = de.x;
+    sd->y = de.y;
+    sd->width = de.width;
+    sd->height = de.height;
+    sd->brightness = de.brightness;
+    sd->enabled = de.enabled;
+    sd->alwaysOnTop = de.alwaysOnTop;
+    sd->statusOverlay = de.statusOverlay;
+    sd->vsync = de.vsync;
+    m_Editor.touch();
+
+    // 2) Live effect: while the entry runs on a connected system (a live
+    //    display with the old name), apply the values there at once.
+    //    Selecting a different system in the dialog's System dropdown moves
+    //    the live display there (a temporary override - the show's wall is
+    //    re-applied on the next show load; issue 14).
+    SystemConnection* mapped = mappedSystemFor(oldName);
+    SystemConnection* selected =
+        (m_EditSystem >= 0 && m_EditSystem < static_cast<int>(m_Systems.size()))
+            ? m_Systems[static_cast<size_t>(m_EditSystem)].get()
+            : nullptr;
+    if (mapped != nullptr && selected != nullptr)
+    {
+        const Id liveId = liveDisplayIdFor(mapped, oldName);
+        nlohmann::json result;
+        std::string error;
+        if (selected != mapped)
+        {
+            // Move: recreate the display on the selected system with the
+            // dialog's values, then remove it from the mapped system.
+            // Create first: if the add fails the source display is
+            // untouched; if the remove fails afterwards, the error says
+            // exactly which side now holds the display.
+            if (!selected->send("display.add",
+                                {{"x", de.x}, {"y", de.y}, {"width", de.width},
+                                 {"height", de.height}, {"name", de.name}},
+                                result, error))
+            {
+                m_EditError = "display.add on '" + selected->name() + "' failed: " + error;
+                return false;
+            }
+            const Id newId = static_cast<Id>(result.value("id", 0u));
+            // display.add does not carry brightness/enabled/flags: apply
+            // the dialog's values to the recreated display.
+            if (!selected->send("display.set",
+                                {{"display", newId}, {"brightness", de.brightness},
+                                 {"enabled", de.enabled}, {"alwaysOnTop", de.alwaysOnTop},
+                                 {"statusOverlay", de.statusOverlay}, {"vsync", de.vsync}},
+                                result, error))
+            {
+                m_EditError = "display.set on '" + selected->name() +
+                              "' after the move failed: " + error;
+                return false;
+            }
+            if (liveId != kInvalidId &&
+                !mapped->send("display.remove", {{"display", liveId}}, result, error))
+            {
+                m_EditError = "display added on '" + selected->name() +
+                              "' but the remove on '" + mapped->name() + "' failed: " + error;
+                return false;
+            }
+            log("moved display '" + de.name + "' from '" + mapped->name() + "' to " +
+                selected->name() + " (live id " + std::to_string(newId) + ")");
+        }
+        else if (liveId != kInvalidId)
+        {
+            if (!mapped->send("display.set",
+                              {{"display", liveId}, {"name", de.name},
+                               {"x", de.x}, {"y", de.y},
+                               {"width", de.width}, {"height", de.height},
+                               {"brightness", de.brightness}, {"enabled", de.enabled},
+                               {"alwaysOnTop", de.alwaysOnTop},
+                               {"statusOverlay", de.statusOverlay}, {"vsync", de.vsync}},
+                              result, error))
+            {
+                m_EditError = "display.set on '" + mapped->name() + "' failed: " + error;
+                return false;
+            }
+            log("display '" + de.name + "' settings applied on " + mapped->name());
+        }
+    }
+    // Unmapped (no system runs this display): the document write above is
+    // the whole change; the wall takes effect on the next show push.
     m_EditModal = false;
     return true;
 }
@@ -1462,50 +1628,32 @@ void ControlGuiApp::openMediaDetails(const json& media, SystemConnection* target
     ImGui::OpenPopup(modalPopupId("Media details"));
 }
 
-void ControlGuiApp::openWarpEdit(const json& display, SystemConnection* target)
+void ControlGuiApp::openWarpEdit(Id docDisplayId)
 {
-    if (target == nullptr)
+    const ShowDisplay* sd = nullptr;
+    for (const auto& d : m_Editor.show().displays)
     {
-        return;
-    }
-    // Drop warp state for systems that no longer exist (keyed by the
-    // connection pointer).
-    for (auto it = m_WarpEdits.begin(); it != m_WarpEdits.end();)
-    {
-        const bool stillThere =
-            std::any_of(m_Systems.begin(), m_Systems.end(),
-                        [&](const auto& s) { return s.get() == it->first; });
-        it = stillThere ? ++it : m_WarpEdits.erase(it);
-    }
-    WarpEdit& we = m_WarpEdits[target][static_cast<Id>(display.value("id", 0u))];
-    // The display JSON reports the engine's current warp (mode, grid and
-    // absolute node positions): open the editor on what is actually
-    // applied, not on the last locally used grid.
-    if (display.contains("warp") && display["warp"].is_object())
-    {
-        const json& warp = display["warp"];
-        if (warp.contains("points") && warp["points"].is_array())
+        if (d.id == docDisplayId)
         {
-            const json& pts = warp["points"];
-            const int rows = static_cast<int>(warp.value("rows", 0));
-            if (rows >= 2 && rows * rows == static_cast<int>(pts.size()))
-            {
-                we.n = rows;
-                we.spline = warp.value("mode", "grid") == "spline";
-                we.points.clear();
-                for (const auto& p : pts)
-                {
-                    if (p.is_array() && p.size() == 2)
-                    {
-                        we.points.push_back(
-                            {static_cast<float>(p[0].get<double>()),
-                             static_cast<float>(p[1].get<double>())});
-                    }
-                }
-                we.valid = static_cast<int>(we.points.size()) == rows * rows;
-            }
+            sd = &d;
+            break;
         }
     }
+    if (sd == nullptr)
+    {
+        return; // the entry went away (removed by another edit)
+    }
+    WarpEdit& we = m_WarpEdits[docDisplayId];
+    // Open the editor on the document entry's warp: the show file's wall is
+    // what gets pushed to the systems (the engine applies it on show load).
+    const WarpMap& warp = sd->warp;
+    we.n = warp.rows();
+    we.spline = warp.interpolation() == WarpInterpolation::Spline;
+    we.points = warp.pointPositions();
+    // The node pad is a square; the warp the engine accepts is square too
+    // (display.warp.set), so anything else degrades to the 2x2 identity.
+    we.valid = warp.cols() == we.n && we.n >= 2 &&
+               static_cast<int>(we.points.size()) == we.n * we.n;
     if (!we.valid)
     {
         we.n = 2;
@@ -1514,64 +1662,64 @@ void ControlGuiApp::openWarpEdit(const json& display, SystemConnection* target)
         we.valid = true;
     }
     m_WarpDragNode = -1;
-    m_WarpTarget = target;
-    m_WarpDisplayId = static_cast<Id>(display.value("id", 0u));
+    // The live preview target: the system that runs a same-named display
+    // (nullptr when the entry is unmapped - Apply then only edits the show).
+    m_WarpTarget = mappedSystemFor(sd->name);
+    m_WarpDisplayId = docDisplayId;
     m_WarpError.clear();
     m_WarpModal = true;
     ImGui::OpenPopup(modalPopupId("Projection warp"));
 }
 
-void ControlGuiApp::renderDisplaysBlock(const SystemConnection::Snapshot& snap)
+void ControlGuiApp::renderDisplaysBlock()
 {
-    // Multi-display: add a panel to this system (tiled right of the current
-    // wall at 1920x1080 by the server's defaults). Shown even when the
-    // system has no displays left, so it is possible to recover.
+    // The wall is the show document's display list (the persistence target
+    // for display settings): listed and editable with no system connected.
+    // "Add display" works offline - the entry is a document edit, the
+    // auto-push propagates it to connected systems, and the engine builds
+    // the wall on the next show load.
+    Show& show = m_Editor.show();
     if (ImGui::Button("Add display"))
     {
-        std::string error;
-        sendActive("display.add", json::object(), error);
+        addShowDisplay();
     }
-
-    if (!snap.status.contains("displays") || snap.status["displays"].empty())
+    if (show.displays.empty())
     {
-        ImGui::TextDisabled("(none)");
+        ImGui::TextDisabled("(none - Add display defines the show's wall)");
         return;
     }
-    const json& displays = snap.status["displays"];
 
-    // Bulk enable/disable for the whole wall (the per-display toggle is the
-    // "on" checkbox in the table below).
+    // Bulk enable/disable for the whole wall (document edits; the
+    // auto-push propagates them). The per-display toggle is the "on"
+    // checkbox in the table below.
     if (ImGui::Button("Enable all##dispenall"))
     {
-        std::string error;
-        for (const auto& d : displays)
+        for (auto& d : show.displays)
         {
-            sendActive("display.set", {{"display", static_cast<Id>(d.value("id", 0u))},
-                                       {"enabled", true}},
-                       error);
+            d.enabled = true;
         }
+        m_Editor.touch();
     }
     ImGui::SameLine();
     if (ImGui::Button("Disable all##dispenoff"))
     {
-        std::string error;
-        for (const auto& d : displays)
+        for (auto& d : show.displays)
         {
-            sendActive("display.set", {{"display", static_cast<Id>(d.value("id", 0u))},
-                                       {"enabled", false}},
-                       error);
+            d.enabled = false;
         }
+        m_Editor.touch();
     }
 
-    // The table is a read-only overview: values are read straight from the
-    // snapshot (always the engine's current state). Editing happens in the
-    // "Display settings" dialog (Edit...) and the warp in its own dialog
-    // (Warp...); the enabled and overlay checkboxes apply immediately.
-    if (ImGui::BeginTable("displays", 10,
+    // One row per document display. The System column shows the connected
+    // system that currently runs a same-named live display ("unmapped"
+    // when none does); the on/overlay checkboxes edit the document entry
+    // and apply live to the mapped system at once; Edit/Warp open the
+    // settings and warp dialogs for the entry.
+    if (ImGui::BeginTable("displays", 11,
                           ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_BordersOuter))
     {
-        ImGui::TableSetupColumn("##id", ImGuiTableColumnFlags_WidthFixed, 34.0f);
         ImGui::TableSetupColumn("name");
+        ImGui::TableSetupColumn("system", ImGuiTableColumnFlags_WidthFixed, 100.0f);
         ImGui::TableSetupColumn("x", ImGuiTableColumnFlags_WidthFixed, 56.0f);
         ImGui::TableSetupColumn("y", ImGuiTableColumnFlags_WidthFixed, 56.0f);
         ImGui::TableSetupColumn("w", ImGuiTableColumnFlags_WidthFixed, 56.0f);
@@ -1580,62 +1728,95 @@ void ControlGuiApp::renderDisplaysBlock(const SystemConnection::Snapshot& snap)
         ImGui::TableSetupColumn("on", ImGuiTableColumnFlags_WidthFixed, 48.0f);
         ImGui::TableSetupColumn("overlay", ImGuiTableColumnFlags_WidthFixed, 62.0f);
         ImGui::TableSetupColumn("##actions", ImGuiTableColumnFlags_WidthFixed, 196.0f);
-        for (const auto& d : displays)
+        for (auto& d : show.displays)
         {
-            const Id id = static_cast<Id>(d.value("id", 0u));
-            const std::string name = d.value("name", "display");
-            SystemConnection* target = activeConnection();
+            // The live mapping: the first connected system running a
+            // same-named display (the wall entry's "System" column).
+            SystemConnection* mapped = mappedSystemFor(d.name);
             ImGui::TableNextRow();
             ImGui::TableNextColumn();
-            ImGui::Text("%u", id);
+            ImGui::TextUnformatted(d.name.c_str());
             ImGui::TableNextColumn();
-            ImGui::TextUnformatted(name.c_str());
-            ImGui::TableNextColumn();
-            ImGui::Text("%d", static_cast<int>(d.value("x", 0)));
-            ImGui::TableNextColumn();
-            ImGui::Text("%d", static_cast<int>(d.value("y", 0)));
-            ImGui::TableNextColumn();
-            ImGui::Text("%d", static_cast<int>(d.value("width", 0)));
-            ImGui::TableNextColumn();
-            ImGui::Text("%d", static_cast<int>(d.value("height", 0)));
-            ImGui::TableNextColumn();
-            ImGui::Text("%.2f", static_cast<double>(d.value("brightness", 1.0)));
-            ImGui::TableNextColumn();
-            // Enabled toggle (moved here from the Display settings dialog,
-            // which no longer exposes it): state comes from the snapshot, so
-            // a failed command simply snaps back on the next poll.
-            bool enabled = d.value("enabled", true);
-            if (ImGui::Checkbox(("##enabledisp" + std::to_string(id)).c_str(), &enabled))
+            if (mapped != nullptr)
             {
-                std::string error;
-                sendActive("display.set", {{"display", id}, {"enabled", enabled}}, error);
+                ImGui::TextUnformatted(mapped->name().c_str());
+            }
+            else
+            {
+                ImGui::TextDisabled("unmapped");
+            }
+            ImGui::TableNextColumn();
+            ImGui::Text("%d", d.x);
+            ImGui::TableNextColumn();
+            ImGui::Text("%d", d.y);
+            ImGui::TableNextColumn();
+            ImGui::Text("%d", d.width);
+            ImGui::TableNextColumn();
+            ImGui::Text("%d", d.height);
+            ImGui::TableNextColumn();
+            ImGui::Text("%.2f", static_cast<double>(d.brightness));
+            ImGui::TableNextColumn();
+            // Enabled (document value; applied live to the mapped system
+            // at once, so a connected wall reacts immediately).
+            if (ImGui::Checkbox(("##enabledisp" + std::to_string(d.id)).c_str(), &d.enabled))
+            {
+                m_Editor.touch();
+                if (mapped != nullptr)
+                {
+                    const Id liveId = liveDisplayIdFor(mapped, d.name);
+                    if (liveId != kInvalidId)
+                    {
+                        std::string error;
+                        nlohmann::json result;
+                        if (!mapped->send("display.set",
+                                          {{"display", liveId}, {"enabled", d.enabled}}, result,
+                                          error))
+                        {
+                            log("display.set (enabled) on " + mapped->name() + " failed: " + error);
+                        }
+                    }
+                }
             }
             ImGui::TableNextColumn();
             // Per-display status overlay (system IP, display name/number,
-            // measured fps, resolution and frame timing drawn by the engine;
-            // core overlay/StatusOverlay). State comes from the snapshot, so
-            // a failed command simply snaps back on the next poll.
-            bool overlayOn = d.value("statusOverlay", false);
-            if (ImGui::Checkbox(("##overlaydisp" + std::to_string(id)).c_str(), &overlayOn))
+            // measured fps, resolution and frame timing drawn by the
+            // engine; core overlay/StatusOverlay).
+            if (ImGui::Checkbox(("##overlaydisp" + std::to_string(d.id)).c_str(),
+                                &d.statusOverlay))
             {
-                std::string error;
-                sendActive("display.set", {{"display", id}, {"statusOverlay", overlayOn}}, error);
+                m_Editor.touch();
+                if (mapped != nullptr)
+                {
+                    const Id liveId = liveDisplayIdFor(mapped, d.name);
+                    if (liveId != kInvalidId)
+                    {
+                        std::string error;
+                        nlohmann::json result;
+                        if (!mapped->send("display.set",
+                                          {{"display", liveId},
+                                           {"statusOverlay", d.statusOverlay}},
+                                          result, error))
+                        {
+                            log("display.set (overlay) on " + mapped->name() + " failed: " +
+                                error);
+                        }
+                    }
+                }
             }
             ImGui::TableNextColumn();
-            if (ImGui::Button(("Edit##editdisp" + std::to_string(id)).c_str()))
+            if (ImGui::Button(("Edit##editdisp" + std::to_string(d.id)).c_str()))
             {
-                openDisplayEdit(d, target);
+                openDisplayEdit(d.id);
             }
             ImGui::SameLine();
-            if (ImGui::Button(("Warp##warpdisp" + std::to_string(id)).c_str()))
+            if (ImGui::Button(("Warp##warpdisp" + std::to_string(d.id)).c_str()))
             {
-                openWarpEdit(d, target);
+                openWarpEdit(d.id);
             }
             ImGui::SameLine();
-            if (ImGui::Button(("Remove##removedisp" + std::to_string(id)).c_str()))
+            if (ImGui::Button(("Remove##removedisp" + std::to_string(d.id)).c_str()))
             {
-                std::string error;
-                sendActive("display.remove", {{"display", id}}, error);
+                removeShowDisplay(d.id);
             }
         }
         ImGui::EndTable();
@@ -3117,21 +3298,35 @@ void ControlGuiApp::renderModals()
         modalStartSize(420.0f);
         if (ImGui::BeginPopupModal("Display settings", &m_EditModal))
         {
-            if (m_EditTarget && m_EditDisplayId != kInvalidId)
+            if (m_EditDisplayId != kInvalidId)
             {
                 DisplayEdit& de = m_DisplayEdits[m_EditDisplayId];
-                // Where this display lives: the system it is linked to and
-                // the physical output its window is on (issue 15).
-                ImGui::Text("Display %u on %s", m_EditDisplayId, m_EditTarget->name().c_str());
+                // Which show wall entry this is, and where it runs live:
+                // the connected system that has a same-named display (if
+                // any), and the physical output its window is on (issue 15).
+                if (m_EditTarget != nullptr)
+                {
+                    ImGui::Text("Display '%s' on %s", de.name.c_str(), m_EditTarget->name().c_str());
+                }
+                else
+                {
+                    ImGui::Text("Display '%s'", de.name.c_str());
+                    ImGui::TextDisabled(
+                        "(unmapped: no connected system runs this display - Apply saves it to "
+                        "the show; the systems pick it up on the next show push)");
+                }
                 ImGui::TextDisabled("Physical output: %s",
                                      de.monitor.empty() ? "unknown" : de.monitor.c_str());
                 ImGui::Spacing();
                 ImGui::InputText("Name##editname", &de.name);
                 ImGui::Spacing();
-                // The system this display is linked to (issue 14): picking
-                // a different system and pressing Apply moves the display
-                // there (recreated with these settings, then removed from
-                // the old system) instead of just applying them.
+                // The system this display's live settings apply to (issue
+                // 14): picking a different system and pressing Apply moves
+                // the live display there (recreated with these settings,
+                // then removed from the old system) instead of just
+                // applying them. The show's wall itself is one list - every
+                // system that loads the show builds it - so a live move is
+                // a temporary override.
                 int sysIdx = m_EditSystem;
                 if (sysIdx < 0 || sysIdx >= static_cast<int>(m_Systems.size()))
                 {
@@ -3147,7 +3342,9 @@ void ControlGuiApp::renderModals()
                 }
                 const char* sysPreview =
                     sysIdx >= 0 ? m_Systems[static_cast<size_t>(sysIdx)]->name().c_str()
-                                : m_EditTarget->name().c_str();
+                                : "(no system)";
+                const bool haveSystems = !m_Systems.empty();
+                ImGui::BeginDisabled(!haveSystems);
                 if (ImGui::BeginCombo("System##editsys", sysPreview))
                 {
                     for (int i = 0; i < static_cast<int>(m_Systems.size()); ++i)
@@ -3161,6 +3358,11 @@ void ControlGuiApp::renderModals()
                         }
                     }
                     ImGui::EndCombo();
+                }
+                ImGui::EndDisabled();
+                if (!haveSystems)
+                {
+                    ImGui::TextDisabled("(no system connected)");
                 }
                 m_EditSystem = sysIdx;
                 ImGui::Spacing();
@@ -3214,9 +3416,9 @@ void ControlGuiApp::renderModals()
         modalStartSize(560.0f);
         if (ImGui::BeginPopupModal("Projection warp", &m_WarpModal))
         {
-            if (m_WarpTarget && m_WarpDisplayId != kInvalidId)
+            if (m_WarpDisplayId != kInvalidId)
             {
-                WarpEdit& we = m_WarpEdits[m_WarpTarget][m_WarpDisplayId];
+                WarpEdit& we = m_WarpEdits[m_WarpDisplayId];
                 if (!we.valid)
                 {
                     we.n = 2;
@@ -3224,7 +3426,31 @@ void ControlGuiApp::renderModals()
                     we.points = identityWarpPoints(we.n);
                     we.valid = true;
                 }
-                ImGui::Text("Display %u on %s", m_WarpDisplayId, m_WarpTarget->name().c_str());
+                // Which show wall entry this is, and where it runs live
+                // (the entry may have been removed from the show while the
+                // dialog was open: degrade the label, Apply reports it).
+                const ShowDisplay* sd = nullptr;
+                for (const auto& d : m_Editor.show().displays)
+                {
+                    if (d.id == m_WarpDisplayId)
+                    {
+                        sd = &d;
+                        break;
+                    }
+                }
+                if (m_WarpTarget != nullptr)
+                {
+                    ImGui::Text("Display '%s' on %s",
+                                sd != nullptr ? sd->name.c_str() : "(unknown)",
+                                m_WarpTarget->name().c_str());
+                }
+                else
+                {
+                    ImGui::Text("Display '%s'", sd != nullptr ? sd->name.c_str() : "(unknown)");
+                    ImGui::TextDisabled(
+                        "(unmapped: no connected system runs this display - Apply saves the "
+                        "warp to the show only)");
+                }
                 ImGui::TextWrapped(
                     "Drag the nodes to shape the projection (display-local UV, (0,0) top-left "
                     "to (1,1) bottom-right). Grid mode blends between the nodes linearly; "
@@ -3424,27 +3650,81 @@ void ControlGuiApp::renderModals()
                 if (ImGui::Button("Apply warp##warp"))
                 {
                     m_WarpError.clear();
-                    json pts = json::array();
-                    for (const auto& pt : we.points)
+                    // Persist first: the grid becomes the show entry's warp
+                    // (the auto-push propagates it; the engine applies it on
+                    // the next show load).
+                    ShowDisplay* entry = nullptr;
+                    for (auto& d : m_Editor.show().displays)
                     {
-                        pts.push_back({pt[0], pt[1]});
+                        if (d.id == m_WarpDisplayId)
+                        {
+                            entry = &d;
+                            break;
+                        }
                     }
-                    nlohmann::json result;
-                    std::string error;
-                    if (m_WarpTarget->send("display.warp.set",
-                                           {{"display", m_WarpDisplayId}, {"points", pts},
-                                            {"mode", we.spline ? "spline" : "grid"}},
-                                           result, error))
+                    if (entry == nullptr)
                     {
-                        log("warp (" + std::string(we.spline ? "spline" : "grid") +
-                            ", " + std::to_string(we.n) + "x" + std::to_string(we.n) +
-                            ") applied to display " + std::to_string(m_WarpDisplayId) + " on " +
-                            m_WarpTarget->name());
+                        m_WarpError = "the display is no longer in the show";
                         m_WarpModal = false;
                     }
                     else
                     {
-                        m_WarpError = error;
+                        WarpMap warp(we.n, we.n,
+                                     we.spline ? WarpInterpolation::Spline
+                                               : WarpInterpolation::Bilinear);
+                        const int count =
+                            std::min(we.n * we.n, static_cast<int>(we.points.size()));
+                        for (int i = 0; i < count; ++i)
+                        {
+                            warp.setPointPosition(i / we.n, i % we.n,
+                                                  we.points[static_cast<size_t>(i)][0],
+                                                  we.points[static_cast<size_t>(i)][1]);
+                        }
+                        entry->warp = std::move(warp);
+                        m_Editor.touch();
+                        // Live preview while the entry is mapped: the same
+                        // grid, sent to the mapped system's same-named
+                        // display now (the show push applies it a second
+                        // later anyway).
+                        if (m_WarpTarget != nullptr)
+                        {
+                            json pts = json::array();
+                            for (const auto& pt : we.points)
+                            {
+                                pts.push_back({pt[0], pt[1]});
+                            }
+                            nlohmann::json result;
+                            std::string error;
+                            const Id liveId = liveDisplayIdFor(m_WarpTarget, entry->name);
+                            if (liveId != kInvalidId &&
+                                m_WarpTarget->send("display.warp.set",
+                                                   {{"display", liveId}, {"points", pts},
+                                                    {"mode", we.spline ? "spline" : "grid"}},
+                                                   result, error))
+                            {
+                                log("warp (" + std::string(we.spline ? "spline" : "grid") +
+                                    ", " + std::to_string(we.n) + "x" + std::to_string(we.n) +
+                                    ") saved to display '" + entry->name + "' (live on " +
+                                    m_WarpTarget->name() + ")");
+                                m_WarpModal = false;
+                            }
+                            else
+                            {
+                                m_WarpError =
+                                    (liveId == kInvalidId
+                                         ? "no live display named '" + entry->name + "' on " +
+                                               m_WarpTarget->name() + ": "
+                                         : error + "; ") +
+                                    "the warp is saved in the show, but the live update failed";
+                            }
+                        }
+                        else
+                        {
+                            log("warp (" + std::string(we.spline ? "spline" : "grid") +
+                                ", " + std::to_string(we.n) + "x" + std::to_string(we.n) +
+                                ") saved to display '" + entry->name + "' (no system mapped)");
+                            m_WarpModal = false;
+                        }
                     }
                 }
                 if (!m_WarpError.empty())
@@ -3632,29 +3912,28 @@ void ControlGuiApp::openModal(const std::string& which)
     }
     else if (which == "edit" || which == "warp")
     {
-        // The real buttons fill the state from a table row; the test hook
-        // uses the active system's first display when it has one (the
+        // The real buttons fill the state from a table row (a show document
+        // display); the test hook uses the document's first display (the
         // helpers open the popup themselves, so return early).
         bool opened = false;
-        if (SystemConnection* active = activeConnection())
+        if (!m_Editor.show().displays.empty())
         {
-            const auto snap = active->snapshot();
-            if (snap.haveStatus && snap.status.contains("displays") &&
-                !snap.status["displays"].empty())
+            const Id docId = m_Editor.show().displays.front().id;
+            if (which == "edit")
             {
-                if (which == "edit")
-                {
-                    openDisplayEdit(snap.status["displays"][0], active);
-                }
-                else
-                {
-                    openWarpEdit(snap.status["displays"][0], active);
-                }
-                opened = true;
+                openDisplayEdit(docId);
             }
+            else
+            {
+                openWarpEdit(docId);
+            }
+            opened = true;
         }
         if (!opened)
         {
+            // The show has no displays yet: still open the dialog (it shows
+            // the "no display selected" line); the hook only needs it to
+            // open and close.
             if (which == "edit")
             {
                 m_EditModal = true;
@@ -3828,6 +4107,85 @@ bool ControlGuiApp::testLoadShowFile(const std::string& path)
 {
     std::string error;
     return loadShowFile(path, error);
+}
+
+Id ControlGuiApp::testAddDisplay()
+{
+    const Id id = ShowEditor::nextDisplayId(m_Editor.show());
+    addShowDisplay();
+    return id;
+}
+
+int ControlGuiApp::testSeedDisplaysFromActive()
+{
+    SystemConnection* active = activeConnection();
+    if (active == nullptr)
+    {
+        return 0;
+    }
+    const auto snap = active->snapshot();
+    if (!snap.haveStatus || !snap.status.contains("displays") || !snap.status["displays"].is_array())
+    {
+        return 0;
+    }
+    const json& displays = snap.status["displays"];
+    if (displays.empty())
+    {
+        return 0;
+    }
+    Show& show = m_Editor.show();
+    int seeded = 0;
+    for (const auto& d : displays)
+    {
+        ShowDisplay sd;
+        sd.id = ShowEditor::nextDisplayId(show);
+        sd.name = d.value("name", "display");
+        sd.x = static_cast<std::int32_t>(d.value("x", 0));
+        sd.y = static_cast<std::int32_t>(d.value("y", 0));
+        sd.width = static_cast<std::int32_t>(d.value("width", 1920));
+        sd.height = static_cast<std::int32_t>(d.value("height", 1080));
+        sd.brightness = static_cast<float>(d.value("brightness", 1.0));
+        sd.enabled = d.value("enabled", true);
+        sd.alwaysOnTop = d.value("alwaysOnTop", true);
+        sd.statusOverlay = d.value("statusOverlay", false);
+        sd.vsync = d.value("vsync", true);
+        if (d.contains("warp") && d["warp"].is_object())
+        {
+            const json& w = d["warp"];
+            const int rows = static_cast<int>(w.value("rows", 2));
+            const int cols = static_cast<int>(w.value("cols", 2));
+            const bool spline = w.value("mode", "grid") == "spline";
+            if (rows >= 2 && cols >= 2 && w.contains("points") && w["points"].is_array() &&
+                w["points"].size() == static_cast<std::size_t>(rows * cols))
+            {
+                WarpMap warp(rows, cols,
+                             spline ? WarpInterpolation::Spline : WarpInterpolation::Bilinear);
+                int i = 0;
+                for (const auto& p : w["points"])
+                {
+                    if (p.is_array() && p.size() == 2)
+                    {
+                        warp.setPointPosition(i / cols, i % cols,
+                                               static_cast<float>(p[0].get<double>()),
+                                               static_cast<float>(p[1].get<double>()));
+                    }
+                    ++i;
+                }
+                sd.warp = std::move(warp);
+            }
+        }
+        show.displays.push_back(std::move(sd));
+        ++seeded;
+    }
+    // No touch: seeding mirrors live state into the document without
+    // marking the show edited (an auto-push must not fire for it).
+    return seeded;
+}
+
+std::string ControlGuiApp::testDisplayMappedSystem(const std::string& displayName) const
+{
+    SystemConnection* mapped = mappedSystemFor(displayName);
+    return mapped != nullptr ? mapped->name() : std::string();
 }
 
 bool ControlGuiApp::testDockLayoutPlaybackConsoleTabs() const

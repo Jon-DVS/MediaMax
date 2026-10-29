@@ -306,7 +306,10 @@ against `CommandServer`.
 
 `--gui` runs the operator interface (Dear ImGui docking on GLFW + a minimal
 raw-Vulkan surface): one dockspace with Systems (top-left) and the
-Displays/Media tabs (bottom-left), a center column split into the 2D Show
+Displays/Media tabs (bottom-left — the Displays tab lists the **show
+document's display wall**, editable offline; each entry shows the connected
+system that currently runs a same-named live display, or *unmapped*), a
+center column split into the 2D Show
 view (top) over the Playback + Console tab block (bottom — the two windows
 share one dock node, tabbed in the order Playback, Console), and Show
 Editor (right). The initial layout is built once by

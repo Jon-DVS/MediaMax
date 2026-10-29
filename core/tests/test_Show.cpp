@@ -172,6 +172,31 @@ TEST_CASE("fromJson rejects malformed input")
                                   nlohmann::json::array(
                                       {{{"name", "a"}, {"host", "b"}, {"port", 99999}}})}};
     CHECK_FALSE(Show::fromJson(badSysPort, error).has_value());
+
+    // A display entry must carry a non-empty name (the name is the wall's
+    // identity).
+    nlohmann::json badDisplay = {{"app", "mediamax-show"},
+                                 {"version", 1},
+                                 {"displays", nlohmann::json::array({{{"x", 0}}})}};
+    CHECK_FALSE(Show::fromJson(badDisplay, error).has_value());
+    CHECK(error.find("display") != std::string::npos);
+
+    // Warp points, when present, must be exactly rows*cols [u, v] pairs.
+    const nlohmann::json warpWithBadPoints = {
+        {"name", "a"},
+        {"warp",
+         {
+             {"rows", 2},
+             {"cols", 2},
+             {"points", nlohmann::json::array({{0.0, 0.0}})}, // one point, need 4
+         }},
+    };
+    const nlohmann::json badWarpPoints = {
+        {"app", "mediamax-show"},
+        {"version", 1},
+        {"displays", nlohmann::json::array({warpWithBadPoints})},
+    };
+    CHECK_FALSE(Show::fromJson(badWarpPoints, error).has_value());
 }
 
 TEST_CASE("fromJson tolerates optional fields")
@@ -207,6 +232,81 @@ TEST_CASE("findScene and findMedia")
     CHECK(show.findMedia(test::kMediaA) != nullptr);
     CHECK(show.findMedia(test::kMediaA)->path == "media/video-a.mp4");
     CHECK(show.findMedia(999) == nullptr);
+}
+
+TEST_CASE("Round trip: display wall (geometry, flags, warp)")
+{
+    Show show = test::makeTestShow();
+
+    ShowDisplay main;
+    main.id = 1;
+    main.name = "Wall A";
+    main.x = 0;
+    main.y = 0;
+    main.width = 3840;
+    main.height = 2160;
+    main.brightness = 0.85f;
+    main.alwaysOnTop = false;
+    main.statusOverlay = true;
+    main.vsync = false;
+    main.warp = WarpMap(3, 3, WarpInterpolation::Spline);
+    main.warp.setPointPosition(1, 1, 0.55f, 0.475f); // nudged center node
+
+    ShowDisplay side;
+    side.id = 2;
+    side.name = "Wall B";
+    side.x = 3840;
+    // y / brightness / enabled / vsync / warp left at defaults
+    show.displays.push_back(main);
+    show.displays.push_back(side);
+
+    const nlohmann::json json = show.toJson();
+    REQUIRE(json.contains("displays"));
+    CHECK(json["displays"].size() == 2);
+
+    std::string error;
+    auto parsed = Show::fromJson(json, error);
+    REQUIRE(parsed.has_value());
+    CHECK(error.empty());
+
+    const Show& s = *parsed;
+    CHECK(s.displays.size() == 2);
+    const ShowDisplay& a = s.displays[0];
+    CHECK(a.id == 1);
+    CHECK(a.name == "Wall A");
+    CHECK(a.x == 0);
+    CHECK(a.y == 0);
+    CHECK(a.width == 3840);
+    CHECK(a.height == 2160);
+    CHECK(a.brightness == doctest::Approx(0.85f));
+    CHECK(a.enabled);
+    CHECK(!a.alwaysOnTop);
+    CHECK(a.statusOverlay);
+    CHECK(!a.vsync);
+    CHECK(a.warp.interpolation() == WarpInterpolation::Spline);
+    CHECK(a.warp.rows() == 3);
+    CHECK(a.warp.cols() == 3);
+    const auto center = a.warp.pointPositions()[4]; // row 1, col 1 of a 3x3
+    CHECK(center[0] == doctest::Approx(0.55f));
+    CHECK(center[1] == doctest::Approx(0.475f));
+
+    // The second display round-trips its defaults (2x2 identity warp).
+    const ShowDisplay& b = s.displays[1];
+    CHECK(b.id == 2);
+    CHECK(b.name == "Wall B");
+    CHECK(b.x == 3840);
+    CHECK(b.y == 0);
+    CHECK(b.width == 1920);
+    CHECK(b.height == 1080);
+    CHECK(b.vsync);
+    CHECK(b.warp.rows() == 2);
+    CHECK(b.warp.cols() == 2);
+
+    // A show with no displays omits the section entirely, so saving such a
+    // show leaves existing documents (and a system's live display set)
+    // untouched.
+    Show bare = test::makeTestShow();
+    CHECK_FALSE(bare.toJson().contains("displays"));
 }
 
 } // TEST_SUITE("Show")

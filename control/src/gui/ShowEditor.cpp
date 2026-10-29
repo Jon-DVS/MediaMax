@@ -98,4 +98,14 @@ Id ShowEditor::nextMediaId(const Show& show)
     return next;
 }
 
+Id ShowEditor::nextDisplayId(const Show& show)
+{
+    Id next = 1;
+    for (const auto& display : show.displays)
+    {
+        next = std::max(next, display.id + 1);
+    }
+    return next;
+}
+
 } // namespace mediamax::gui

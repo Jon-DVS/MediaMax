@@ -126,8 +126,9 @@ private:
     nlohmann::json handleDisplaySet(const nlohmann::json& params) const;
     nlohmann::json handleDisplayWarpSet(const nlohmann::json& params) const;
 
-    // Parses a show document, loads and remaps its media, and makes it
-    // active. Shared by show.load (after the file read) and show.loadJson.
+    // Parses a show document, loads and remaps its media, makes it active
+    // and applies its display wall (see applyShowDisplays). Shared by
+    // show.load (after the file read) and show.loadJson.
     // `context` is only used in error messages ("show file" / "show JSON").
     // `preserveState` keeps the live playback state across the load (see
     // PlaybackEngine::loadShow). `mediaBase` is the directory that relative
@@ -137,6 +138,19 @@ private:
     nlohmann::json applyShowDocument(const nlohmann::json& parsed, const char* context,
                                      bool preserveState,
                                      const std::filesystem::path& mediaBase) const;
+
+    // Applies the show's display definitions (when the document has a
+    // `displays` section) to the display manager: the show file is where
+    // display settings persist, so loading a show makes the system's wall
+    // follow the document. Identity is the display NAME - document entries
+    // the engine does not have are added (through the DisplayAddedFunction
+    // callback, so the app creates the window/swapchain surface for them),
+    // entries present on both sides are updated to the document's values,
+    // and engine displays the document no longer defines are removed
+    // (through the DisplayRemovedFunction callback). A document without a
+    // `displays` section leaves the display set untouched (the operator's
+    // live wall - including moves made after the push - stands).
+    void applyShowDisplays(const Show& show) const;
 
     // Parameter extraction helpers (throw protocol::ParameterError).
     static std::string requireString(const nlohmann::json& params, const char* key);

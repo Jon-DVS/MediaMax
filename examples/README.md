@@ -63,13 +63,17 @@ pauses and holds; `playback.play` resumes it to the end.
 
 ```bat
 cd examples\06_multi_display
-..\..\build\playback\Release\mediamax_playback.exe --show show.json --display 1920x1080@0+0 --display 1920x1080@1920+0
+..\..\build\playback\Release\mediamax_playback.exe --show show.json
 ```
 
-Two HD windows appear side by side. Content is laid out in the shared wall
-space (3840x1080, origin top-left): the video is centered on the left
-display (x=960), the logo on the right (x=2880), and the 3840 px plasma
-strip crosses **both** windows. At 8 s the panels swap.
+The show file carries the wall itself (`displays` section: two 1920x1080
+panels side by side), so no `--display` flags are needed — the engine
+starts with one default window and loads the show's wall on top of it
+(Display 1 updated in place, Display 2 added). Two HD windows appear side
+by side. Content is laid out in the shared wall space (3840x1080, origin
+top-left): the video is centered on the left display (x=960), the logo on
+the right (x=2880), and the 3840 px plasma strip crosses **both** windows.
+At 8 s the panels swap.
 
 While it runs, try a projection warp from the control console (display 1,
 a 2x2 grid of display-local UV points — a mild trapezoid):

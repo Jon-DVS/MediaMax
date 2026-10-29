@@ -95,6 +95,20 @@ public:
     // the engine received the loaded show (the load pushes it to every
     // connected system immediately).
     bool testLoadShowFile(const std::string& path);
+    // Adds a display to the show document exactly like the Displays tab's
+    // Add display button (works with no system connected); returns the
+    // document display's id (kInvalidId when nothing was added).
+    Id testAddDisplay();
+    // Copies the active system's live display records into the show
+    // document (name, geometry, settings and warp) without touching the
+    // editor: the self-test's display phases then work on document entries
+    // that mirror the live wall. Returns the number of entries copied
+    // (0 when the active system has no snapshot with displays yet).
+    int testSeedDisplaysFromActive();
+    // The name of the connected system that currently runs a live display
+    // with the given name ("" when none - the entry is "unmapped"): the
+    // same mapping the Displays tab's System column shows.
+    std::string testDisplayMappedSystem(const std::string& displayName) const;
     // True when the live dock layout has Playback and Console in one tab
     // block, in that order (the default layout's invariant; the self-test
     // runs it after the frame phases have built the dockspace).
@@ -197,15 +211,33 @@ private:
     // One-shot ping against a not-yet-registered address (the "Test" button);
     // blocking (<= ~2 s), run from the UI thread on explicit user action.
     void testSystemAddress(const std::string& host, int port);
-    // The Displays window (left column, bottom): the active system's
-    // displays and media library in tabs. Relinking a display to another
-    // system is done from its Display settings dialog's System dropdown
-    // (issue 14).
+    // The Displays window (left column, bottom): the show document's display
+    // wall and the media library in tabs. The Displays tab is document-
+    // driven (works with no system connected; each entry is mapped to the
+    // connected system that currently runs a same-named live display, or
+    // marked "unmapped"). Relinking a display to another system is a live
+    // override from the Display settings dialog's System dropdown (issue 14).
     void renderDisplaysWindow();
     void renderPlaybackWindow();
     void renderTransportBlock(const SystemConnection::Snapshot& snap);
     void renderScenesBlock(const SystemConnection::Snapshot& snap);
-    void renderDisplaysBlock(const SystemConnection::Snapshot& snap);
+    // The Displays tab: the show document's displays (the persistent wall)
+    // with their live mapping column; Add display works offline (it edits
+    // the document, and the auto-push propagates it to connected systems).
+    void renderDisplaysBlock();
+    // Appends a new display to the show document, tiled right of the
+    // document's current wall at 1920x1080 (works with no system connected).
+    void addShowDisplay();
+    // Removes the document display (the engine drops it on the next show
+    // push - a removal is an edit, so the auto-push handles it).
+    void removeShowDisplay(Id docDisplayId);
+    // The connected system that currently runs a live display with this
+    // name (first one in the systems list), or nullptr when none does
+    // (the entry is "unmapped").
+    SystemConnection* mappedSystemFor(const std::string& displayName) const;
+    // The live id of the display with this name on `system` (kInvalidId
+    // when the snapshot has no such display).
+    Id liveDisplayIdFor(const SystemConnection* system, const std::string& displayName) const;
     // The 2D show view (center, top): the active system's current frame as
     // a free-camera 2D picture - the display wall, the visible layers (color
     // quads, media with thumbnails, video badges) and the "Reset view"
@@ -215,15 +247,17 @@ private:
     // displays, ~10% margin; an unknown wall shows a 1920x1080 box),
     // centered in the scene child (childSize in screen px).
     void fitShowViewCamera(const ImVec2& childSize, const std::string& signature);
-    // Opens the "Display settings" / "Projection warp" dialog for the given
-    // display record. The settings dialog starts on `target` (the system the
-    // record came from) and can relink the display to another system via its
-    // System dropdown (Apply then moves it - issue 14); the warp dialog
-    // sends display.warp.set to `target`.
-    void openDisplayEdit(const nlohmann::json& display, SystemConnection* target);
-    // The Display settings Apply button: display.set on the selected system,
-    // or - when that is not the display's current system - a move there
-    // (display.add + display.set on the target, display.remove on the
+    // Opens the "Display settings" dialog for the show document display at
+    // `docDisplayId` (the persistent wall entry; the dialog edits it). The
+    // System dropdown defaults to the entry's current mapping (the system
+    // that runs a live same-named display) and can relink it to another
+    // connected system (Apply then performs the live move - issue 14).
+    void openDisplayEdit(Id docDisplayId);
+    // The Display settings Apply button: writes the dialog's values to the
+    // show document entry (the persistence path; the auto-push propagates
+    // them) and, while the entry is mapped to a connected system, applies
+    // them live there (display.set, or a move to the selected system:
+    // display.add + display.set on the target, display.remove on the
     // source; issue 14). Closes the dialog on success.
     bool applyDisplayEdit();
     // Opens the "System settings" dialog for the system at `index`
@@ -233,7 +267,11 @@ private:
     // host / port) - the connection is restarted when it was running.
     // Closes the dialog on success; marks the systems list dirty.
     bool applySystemSettings();
-    void openWarpEdit(const nlohmann::json& display, SystemConnection* target);
+    // Opens the "Projection warp" dialog for the show document display at
+    // `docDisplayId`: it edits the entry's warp, and Apply stores it in the
+    // document and (while the entry is mapped) sends display.warp.set to
+    // the mapped system for an immediate live preview.
+    void openWarpEdit(Id docDisplayId);
     // Opens the "Media details" dialog for the given media record (the
     // system it came from is shown in the dialog title; the details are
     // re-read from that system's snapshot every frame, so an unloaded
@@ -404,15 +442,18 @@ private:
                              // in the Displays block, not the dialog)
         bool alwaysOnTop = true;
         bool vsync = true;
+        bool statusOverlay = false;
         std::string name; // carried through a move (display.add takes a name)
         std::string monitor; // physical output (read-only in the dialog)
     };
+    // Keyed by the show document's display id (the Displays block is
+    // document-driven; the live id only exists while the entry is mapped).
     std::map<Id, DisplayEdit> m_DisplayEdits;
 
     // Warp editor state (Warp... in the Displays block), the last grid,
-    // points and interpolation per (system, display). Seeded from the
-    // engine's current warp (the display JSON's `warp` object) when the
-    // snapshot reports it, so the dialog opens on what is actually applied.
+    // points and interpolation per show-document display, keyed by its
+    // document id. Seeded from the document entry's warp when the dialog
+    // opens, so it edits what the show file says is applied.
     struct WarpEdit
     {
         int n = 2;
@@ -420,7 +461,7 @@ private:
         bool spline = false;
         bool valid = false; // grid filled in
     };
-    std::map<const SystemConnection*, std::map<Id, WarpEdit>> m_WarpEdits;
+    std::map<Id, WarpEdit> m_WarpEdits;
     // Node-based warp pad: the point index currently dragged with the mouse
     // (-1 when none). Transient - reset when the dialog opens or closes.
     int m_WarpDragNode = -1;

@@ -54,6 +54,7 @@ public:
     static Id nextSceneId(const Show& show);
     static Id nextLayerId(const Show& show);
     static Id nextMediaId(const Show& show);
+    static Id nextDisplayId(const Show& show);
 
 private:
     Show m_Show;

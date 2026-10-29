@@ -394,6 +394,52 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
     modalOk = modalOk && titleBarOnly;
     modalReport += std::string(titleBarOnly ? "PASS " : "FAIL ") +
                    "windows are movable only by their title bar\n";
+    // The Display settings / warp dialogs edit show-document entries (the
+    // persistent wall), so the modal loop below needs one: headless adds
+    // one through the offline Add display button (which must work with no
+    // system connected), live mirrors the engine's live display into the
+    // document. The System column's mapping is checked on the same entry:
+    // the offline one is "unmapped", the mirrored one maps to its system.
+    if (haveLiveSystem)
+    {
+        // The active system's snapshot polls every 500 ms; wait until it
+        // reports displays before seeding from it.
+        bool snapHasDisplay = false;
+        const auto seedDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (!snapHasDisplay && std::chrono::steady_clock::now() < seedDeadline)
+        {
+            snapHasDisplay = app.testActiveHasDisplay();
+            if (!snapHasDisplay)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(150));
+            }
+        }
+        const int seeded = snapHasDisplay ? app.testSeedDisplaysFromActive() : 0;
+        const bool seededOk = seeded > 0;
+        modalOk = modalOk && seededOk;
+        modalReport += std::string(seededOk ? "PASS " : "FAIL ") +
+                       "display wall seeded into the show document (live mirror, " +
+                       std::to_string(seeded) + " entries)\n";
+        const std::string mapped = app.testDisplayMappedSystem("Display 1");
+        const bool mappedOk = mapped == "self-test";
+        modalOk = modalOk && mappedOk;
+        modalReport += std::string(mappedOk ? "PASS " : "FAIL ") +
+                       "seeded display is mapped to its live system ('" + mapped + "')\n";
+    }
+    else
+    {
+        const Id added = app.testAddDisplay();
+        const bool addedOk = added != kInvalidId;
+        modalOk = modalOk && addedOk;
+        modalReport += std::string(addedOk ? "PASS " : "FAIL ") +
+                       "Add display works with no system connected (document entry, id " +
+                       std::to_string(added) + ")\n";
+        const std::string mapped = app.testDisplayMappedSystem("Display 1");
+        const bool mappedOk = mapped.empty();
+        modalOk = modalOk && mappedOk;
+        modalReport += std::string(mappedOk ? "PASS " : "FAIL ") +
+                       "offline display entry is marked unmapped\n";
+    }
     std::vector<const char*> modalNames = {"about", "open", "saveas", "media", "pull", "edit",
                                            "warp", "mediadetails"};
     if (haveLiveSystem)
@@ -627,18 +673,20 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
         liveOk = liveOk && secondUp;
     }
 
-    // 4c) Display settings dialog (issues 14 + 15): the dialog's System
-    //     dropdown relinks a display to another system - Apply with a
-    //     different selection moves it (display.add + display.set on the
-    //     target, display.remove on the source) - and its Name field
-    //     renames it (display.set carries the name). Open the dialog on
-    //     the engine's first display (it opened on the active system,
-    //     self-test-2 after 4b), rename it, point the System dropdown at
-    //     the other system and Apply: verify the engine holds the display
-    //     under a fresh id (display ids never repeat) with the new name
-    //     and the same geometry and brightness. Then reopen the dialog on
-    //     the moved display, rename it back and Apply on its own system:
-    //     a plain display.set, no move.
+    // 4c) Display settings dialog (issues 14 + 15): the dialog edits the
+    //     show document's wall entry (persistence) and applies it live on
+    //     the mapped system. Its System dropdown targets the live apply -
+    //     Apply with a different selection moves the live display (display.
+    //     add + display.set on the target, display.remove on the mapped
+    //     source) - and its Name field renames the entry (display.set
+    //     carries the name). Step 4a replaced the document with a
+    //     displays-less show, so mirror the engine's live display into it
+    //     again first. Then: open the dialog on the entry, rename it,
+    //     point the System dropdown at the OTHER system and Apply - a move
+    //     (the engine holds the display under a fresh id, display ids never
+    //     repeat, same geometry and brightness). Reopen the dialog on the
+    //     moved entry (the dropdown defaults to its mapped system), rename
+    //     it back and Apply: a plain display.set, no move.
     if (haveLiveSystem && !autoPushName.empty() && liveOk)
     {
         const std::string movedName = "Self-test moved";
@@ -660,11 +708,11 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
             haveDisplay ? before["displays"][0].value("brightness", -1.0) : -1.0;
 
         bool opened = false;
-        // The dialog opens from the active system's snapshot (the UI's
-        // Edit... button only exists on a display row, which only exists
-        // when the snapshot reports displays). The active system's first
+        // The dialog opens on a show-document display (the UI's Edit...
+        // button only exists on a wall row). The active system's first
         // status poll lands ~500 ms after its connect (step 4b), which can
-        // still be in flight here - wait for it before opening.
+        // still be in flight here - wait for it, then mirror its live
+        // displays into the document (step 4a's loaded show has none).
         bool snapHasDisplay = false;
         const auto snapDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
         while (!snapHasDisplay && std::chrono::steady_clock::now() < snapDeadline)
@@ -675,10 +723,14 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
                 std::this_thread::sleep_for(std::chrono::milliseconds(150));
             }
         }
-        liveReport += std::string(snapHasDisplay ? "PASS " : "FAIL ") +
-                      "active system snapshot reports the displays\n";
-        liveOk = liveOk && snapHasDisplay;
-        if (haveDisplay && snapHasDisplay)
+        const int reseeded = snapHasDisplay ? app.testSeedDisplaysFromActive() : 0;
+        const bool reseededOk = reseeded > 0;
+        liveReport += std::string(snapHasDisplay && reseededOk ? "PASS " : "FAIL ") +
+                      "active system snapshot reports the displays (wall re-mirrored into "
+                      "the show, " +
+                      std::to_string(reseeded) + " entries)\n";
+        liveOk = liveOk && snapHasDisplay && reseededOk;
+        if (haveDisplay && snapHasDisplay && reseededOk)
         {
             app.testOpenModal("edit"); // deferred: the next frame opens it
             for (int i = 0; i < 3 && !opened; ++i)
@@ -694,13 +746,15 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
         bool applied = false;
         if (opened)
         {
-            // The dialog opened on the active system (index 1, self-test-2);
-            // rename the display (issue 15) and select the other system so
-            // Apply is a move that carries the new name (display.add takes
-            // it), then press the dialog's Apply button (the exact action
-            // the UI runs).
+            // The dialog opened on the show's wall entry; its System
+            // dropdown defaults to the entry's mapped system (index 0,
+            // self-test - the first connection running the same-named
+            // display). Rename the entry (issue 15) and select the OTHER
+            // system (index 1) so Apply is a live move that carries the
+            // new name (display.add takes it), then press the dialog's
+            // Apply button (the exact action the UI runs).
             app.testSetDisplayEditName(movedName);
-            app.testSelectDisplayEditSystem(0);
+            app.testSelectDisplayEditSystem(1);
             applied = app.testApplyDisplayEdit();
         }
 
@@ -748,16 +802,16 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
         liveOk = liveOk && movedOk;
 
         // Same-system rename (issue 15): reopen the dialog - it opens on
-        // the active system's first display, now the moved one, with the
-        // dropdown on its owning system - rename it back and Apply: a
-        // plain display.set with the new name, no move.
+        // the show's wall entry, now the moved one, with the dropdown on
+        // its mapped system - rename it back and Apply: a plain display.set
+        // with the new name, no move.
         bool renamedOk = false;
         nlohmann::json after2;
         if (movedOk)
         {
             // The active system's snapshot polls every 500 ms; wait until
-            // it reports the moved display, or the reopen could open on
-            // the stale (already removed) record.
+            // it reports the moved display, so the entry's mapping (and the
+            // dialog's dropdown default) is fresh before the reopen.
             bool snapHasNew = false;
             const auto snap2Deadline =
                 std::chrono::steady_clock::now() + std::chrono::seconds(5);

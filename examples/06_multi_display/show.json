@@ -87,5 +87,33 @@
     { "time": 0.0,  "name": "sides", "action": { "type": "playScene", "scene": 1 } },
     { "time": 8.0,  "name": "swap",  "action": { "type": "playScene", "scene": 2 } },
     { "time": 16.0, "name": "end",   "action": { "type": "stop" } }
+  ],
+  "displays": [
+    {
+      "id": 1,
+      "name": "Display 1",
+      "x": 0,
+      "y": 0,
+      "width": 1920,
+      "height": 1080,
+      "brightness": 1.0,
+      "enabled": true,
+      "alwaysOnTop": true,
+      "statusOverlay": false,
+      "vsync": true
+    },
+    {
+      "id": 2,
+      "name": "Display 2",
+      "x": 1920,
+      "y": 0,
+      "width": 1920,
+      "height": 1080,
+      "brightness": 1.0,
+      "enabled": true,
+      "alwaysOnTop": true,
+      "statusOverlay": false,
+      "vsync": true
+    }
   ]
 }

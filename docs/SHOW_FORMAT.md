@@ -21,7 +21,8 @@ Reference implementation: `Show::toJson` / `Show::fromJson`
   "media": [ ... ],
   "scenes": [ ... ],
   "cues": [ ... ],
-  "systems": [ ... ]
+  "systems": [ ... ],
+  "displays": [ ... ]
 }
 ```
 
@@ -36,6 +37,7 @@ Reference implementation: `Show::toJson` / `Show::fromJson`
 | `scenes` | array | yes* | Scenes (below) — a show without scenes is empty |
 | `cues` | array | no | Timeline cues (below) |
 | `systems` | array | no | Target systems (below) — where the show runs |
+| `displays` | array | no | The display wall (below) — the show's displays, persistent in the file |
 
 \* "required" in the sense that an empty show is valid but useless; the
 parser accepts all lists as empty.
@@ -236,6 +238,53 @@ the show is saved or pushed, and the CLI resolves `--system <name|idx>`
 from it (`--show <file>`). This is **client-side targeting info** — the
 playback engine parses and stores the field but does not use it for
 rendering.
+
+## Displays (the wall)
+
+```json
+"displays": [
+  {
+    "id": 1,
+    "name": "Wall A",
+    "x": 0, "y": 0, "width": 3840, "height": 2160,
+    "brightness": 1.0,
+    "enabled": true,
+    "alwaysOnTop": true,
+    "statusOverlay": false,
+    "vsync": true,
+    "warp": { "mode": "grid", "rows": 2, "cols": 2,
+              "points": [[0, 0], [1, 0], [0, 1], [1, 1]] }
+  }
+]
+```
+
+| Field | Type | Required | Meaning |
+| --- | --- | --- | --- |
+| `name` | string | yes | Non-empty; the display's identity — the engine reconciles its live displays to this list **by name** |
+| `id` | int | no | File-local identity for editing tools; the engine ignores it (live display ids are the engine's own) |
+| `x` / `y` | int | no | Position in the wall's pixel space (default 0) |
+| `width` / `height` | int | no | Panel size in pixels (default 1920 x 1080) |
+| `brightness` | number | no | 0..1 output brightness (default 1.0) |
+| `enabled` | bool | no | Display on/off (default true) |
+| `alwaysOnTop` | bool | no | Window flag (default true) |
+| `statusOverlay` | bool | no | Draw the engine's status overlay (default false) |
+| `vsync` | bool | no | FIFO (true) vs MAILBOX (false) present mode (default true) |
+| `warp` | object | no | Projection warp: `mode` `"grid"` (bilinear) or `"spline"` (cubic B-spline), `rows`, `cols` (both ≥ 2), `points` — exactly `rows*cols` absolute `[u, v]` positions in display UV, row-major (default: 2x2 identity) |
+
+The show file is where display settings are **persistent**: the control
+GUI edits this list (Displays tab: Add/Edit/Warp/Remove work with no
+system connected; entries that no connected system currently runs are
+marked *unmapped*), and the list follows the document — a `show.load` /
+`show.loadJson` (including the GUI's debounced auto-push) reconciles the
+engine's live displays to it: displays in the list are added or updated
+by name, live displays the list no longer defines are removed. A show
+without a `displays` section leaves the engine's display wall untouched
+(the field is omitted from saved files for such shows, so loading an old
+file is non-breaking — format version stays `1`).
+
+Live-only operations (e.g. moving a display to a different system from
+the settings dialog) apply to the running engine but not to the document;
+the next show push re-applies the wall from this list.
 
 ## Minimal example
 

@@ -270,6 +270,42 @@ nlohmann::json Show::toJson() const
     }
     j["systems"] = systemsArr;
 
+    // The display wall. Optional in the document: a show that never defined
+    // displays omits the field, so saving such a show leaves the file (and a
+    // system's live display set) untouched.
+    if (!displays.empty())
+    {
+        nlohmann::json displaysArr = nlohmann::json::array();
+        for (const auto& d : displays)
+        {
+            nlohmann::json points = nlohmann::json::array();
+            for (const auto& p : d.warp.pointPositions())
+            {
+                points.push_back({p[0], p[1]});
+            }
+            displaysArr.push_back({
+                {"id", d.id},
+                {"name", d.name},
+                {"x", d.x},
+                {"y", d.y},
+                {"width", d.width},
+                {"height", d.height},
+                {"brightness", d.brightness},
+                {"enabled", d.enabled},
+                {"alwaysOnTop", d.alwaysOnTop},
+                {"statusOverlay", d.statusOverlay},
+                {"vsync", d.vsync},
+                {"warp",
+                 {{"mode", d.warp.interpolation() == WarpInterpolation::Spline ? "spline"
+                                                                                : "grid"},
+                  {"rows", d.warp.rows()},
+                  {"cols", d.warp.cols()},
+                  {"points", points}}},
+            });
+        }
+        j["displays"] = displaysArr;
+    }
+
     return j;
 }
 
@@ -470,6 +506,67 @@ std::optional<Show> Show::fromJson(const nlohmann::json& in, std::string& error)
                 sys.port = static_cast<std::uint16_t>(sj["port"].get<int>());
             }
             show.systems.push_back(std::move(sys));
+        }
+    }
+
+    // Display wall (optional - see toJson).
+    if (in.contains("displays") && in["displays"].is_array())
+    {
+        for (const auto& dj : in["displays"])
+        {
+            if (!dj.is_object() || !dj.contains("name") || !dj["name"].is_string() ||
+                dj["name"].get<std::string>().empty())
+            {
+                error = "show file: invalid display entry (a non-empty name is required)";
+                return std::nullopt;
+            }
+            ShowDisplay d;
+            d.name = dj["name"].get<std::string>();
+            if (dj.contains("id") && dj["id"].is_number())
+            {
+                d.id = static_cast<Id>(dj["id"].get<std::uint64_t>());
+            }
+            d.x = static_cast<std::int32_t>(dj.value("x", 0));
+            d.y = static_cast<std::int32_t>(dj.value("y", 0));
+            d.width = static_cast<std::int32_t>(dj.value("width", 1920));
+            d.height = static_cast<std::int32_t>(dj.value("height", 1080));
+            d.brightness = static_cast<float>(dj.value("brightness", 1.0));
+            d.enabled = dj.value("enabled", true);
+            d.alwaysOnTop = dj.value("alwaysOnTop", true);
+            d.statusOverlay = dj.value("statusOverlay", false);
+            d.vsync = dj.value("vsync", true);
+            if (dj.contains("warp") && dj["warp"].is_object())
+            {
+                const auto& wj = dj["warp"];
+                const int rows = std::max(2, static_cast<int>(wj.value("rows", 2)));
+                const int cols = std::max(2, static_cast<int>(wj.value("cols", 2)));
+                WarpMap warp(rows, cols, wj.value("mode", std::string("grid")) == "spline"
+                                                  ? WarpInterpolation::Spline
+                                                  : WarpInterpolation::Bilinear);
+                if (wj.contains("points"))
+                {
+                    if (!wj["points"].is_array() ||
+                        static_cast<int>(wj["points"].size()) != rows * cols)
+                    {
+                        error = "show file: invalid display warp points";
+                        return std::nullopt;
+                    }
+                    for (int i = 0; i < rows * cols; ++i)
+                    {
+                        const auto& p = wj["points"].at(static_cast<std::size_t>(i));
+                        if (!p.is_array() || p.size() != 2 || !p[0].is_number() || !p[1].is_number())
+                        {
+                            error = "show file: invalid display warp point";
+                            return std::nullopt;
+                        }
+                        warp.setPointPosition(i / cols, i % cols,
+                                              static_cast<float>(p[0].get<double>()),
+                                              static_cast<float>(p[1].get<double>()));
+                    }
+                }
+                d.warp = std::move(warp);
+            }
+            show.displays.push_back(std::move(d));
         }
     }
 

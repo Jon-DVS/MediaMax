@@ -121,7 +121,8 @@ working directory; absolute media paths are used as written.
 
 - Params: `path` (string, required) — path readable by the engine process;
   `preserveState` (bool, optional, default `false`) — see `show.loadJson`.
-- Result: `{"name","scenes":<n>,"media":<n>}`
+- Result: `{"name","scenes":<n>,"media":<n>,"displays":<n>}` (`displays`
+  counts the document's display-wall entries; 0 when the show has none)
 
 #### `show.loadJson`
 
@@ -137,7 +138,8 @@ show editor) push an edited show to a system without a shared filesystem.
   file; when omitted, relative paths are used as written (engine working
   directory);
   `preserveState` (bool, optional, default `false`).
-- Result: `{"name","scenes":<n>,"media":<n>}` (same as `show.load`).
+- Result: `{"name","scenes":<n>,"media":<n>,"displays":<n>}` (same as
+  `show.load`).
 - Errors: missing/non-object `show` parameter, an invalid document, or a
   malformed file are reported the same way as for `show.load`. Media
   loading (and skipping of missing media files) is identical.
@@ -147,6 +149,20 @@ The document may carry a `systems` array (target systems, see
 control GUI stores in the show file with the show itself. The engine parses
 and stores the field, so it round-trips through `show.save`, but it is not
 used for rendering.
+
+The document may also carry a `displays` array (the display wall, see
+[SHOW_FORMAT.md](SHOW_FORMAT.md)): when present, loading a show
+**reconciles the engine's live displays to the list by name** — entries
+the engine does not have yet are added (with the document's geometry,
+settings and warp), entries that exist are updated in place (keeping the
+engine's display id), and live displays the list no longer defines are
+removed. A show without a `displays` array leaves the engine's display wall
+untouched. The control GUI edits this list in its show document (the
+Displays tab works with no system connected; entries no connected system
+runs are marked *unmapped*), and its debounced auto-push propagates wall
+edits to every connected system. Live-only changes (e.g. moving a display
+to another system from its settings dialog) apply to the running engine
+until the next push re-applies the wall.
 
 Without `preserveState`, loading a show resets playback (stopped, time 0,
 no scene/layer overrides). With `preserveState: true`, the live playback
@@ -402,18 +418,32 @@ read-only. `warp` is the display's current projection warp: `mode` is
 restore its warp editor from the display object. A display that has never
 been warped reports the 2x2 identity grid.
 
-The control GUI's Displays pane lists every display with the system it is
-linked to and the physical output its window is on. The Playback tab's
-Displays block carries the per-display **on** checkbox (a `display.set`
-with `enabled`) and **Enable all / Disable all** buttons for the whole
-wall. The Display settings dialog (Edit...) shows the display's location -
-the system and the physical output - plus an editable **Name** field, an
-**Always on top** checkbox, a **Vsync** checkbox, and a **System** dropdown:
-the system a display is linked to. Applying settings to the current system
-is a plain `display.set`; applying them to a different system **moves** the
-display there — `display.add` + `display.set` (brightness/enabled/
-alwaysOnTop/vsync, which `display.add` does not carry) on the target, then
-`display.remove` on the source.
+The control GUI's Displays tab lists the **show document's display wall**
+(see [SHOW_FORMAT.md](SHOW_FORMAT.md)) — it works with no system
+connected. Each row shows the entry's geometry and settings plus a
+**System** column: the connected system that currently runs a same-named
+live display, or *unmapped* when none does. **Add display** appends an
+entry to the document (tiled right of the wall at 1920x1080, named
+`Display <n>`); **Remove** deletes it; both are document edits, so the
+debounced auto-push propagates them and the systems' engines reconcile
+their live walls to the document on the next show load. The per-display
+**on** checkbox (a document edit + an immediate `display.set` with
+`enabled` on the mapped system) and the **Enable all / Disable all**
+buttons (document edits) react live while a system is connected.
+
+The Display settings dialog (Edit...) edits the document entry — **Name**,
+**X/Y/Width/Height**, **Brightness**, **Always on top**, **Vsync**, and a
+**System** dropdown — and Apply writes the values to the show document
+(persistence; the auto-push propagates them) while also applying them
+immediately on the mapped system: a plain `display.set` for the mapped
+system, or a **move** when a different system is selected — `display.add`
++ `display.set` (brightness/enabled/alwaysOnTop/statusOverlay/vsync, which
+`display.add` does not carry) on the target, then `display.remove` on the
+mapped source. The move is a live-only override: the entry stays in the
+show's wall, so the next show push rebuilds it on every system that loads
+the show. The warp dialog (Warp...) works the same way: it edits the
+entry's warp, Apply stores it in the document and sends
+`display.warp.set` to the mapped system for an immediate preview.
 
 #### `display.add`
 

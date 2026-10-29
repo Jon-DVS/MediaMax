@@ -98,6 +98,20 @@ nlohmann::json idArray(const std::vector<Id>& ids)
     return arr;
 }
 
+// The engine display that carries this name (the show file's display
+// entries key on the name; see applyShowDisplays).
+std::optional<Id> findDisplayIdByName(DisplayManager& displays, const std::string& name)
+{
+    for (const auto& d : displays.displays())
+    {
+        if (d.name == name)
+        {
+            return d.id;
+        }
+    }
+    return std::nullopt;
+}
+
 // Layer ids are validated against the loaded show (the engine's override
 // storage is generic and would silently accept unknown ids).
 bool layerExistsInShow(const Show& show, Id layerId)
@@ -538,11 +552,87 @@ nlohmann::json CommandServer::applyShowDocument(const nlohmann::json& parsed,
     }
 
     m_Engine.loadShow(*show, preserveState);
+    // The show's display wall follows the document (a no-op for shows
+    // without a `displays` section).
+    applyShowDisplays(*show);
     return {
         {"name", show->name},
         {"scenes", show->scenes.size()},
         {"media", show->media.size()},
+        {"displays", show->displays.size()},
     };
+}
+
+void CommandServer::applyShowDisplays(const Show& show) const
+{
+    if (show.displays.empty())
+    {
+        return;
+    }
+    // 1. Add every document display the engine does not have yet. The
+    //    DisplayAddedFunction callback lets the app create the window and
+    //    swapchain for the new record (it only queues the surface work;
+    //    see DisplayAddedFunction's header comment).
+    for (const ShowDisplay& sd : show.displays)
+    {
+        if (findDisplayIdByName(m_Displays, sd.name))
+        {
+            continue;
+        }
+        const std::int32_t w = sd.width > 0 ? sd.width : 1920;
+        const std::int32_t h = sd.height > 0 ? sd.height : 1080;
+        const Display added = m_Displays.addDisplay(sd.name, sd.x, sd.y, w, h);
+        m_Displays.setDisplayBrightness(added.id, sd.brightness);
+        m_Displays.setDisplayEnabled(added.id, sd.enabled);
+        m_Displays.setDisplayAlwaysOnTop(added.id, sd.alwaysOnTop);
+        m_Displays.setDisplayStatusOverlay(added.id, sd.statusOverlay);
+        m_Displays.setDisplayVsync(added.id, sd.vsync);
+        if (const auto record = m_Displays.find(added.id))
+        {
+            (*record)->warp = sd.warp;
+            if (m_DisplayAdded)
+            {
+                m_DisplayAdded(*(*record));
+            }
+        }
+    }
+    // 2. Update every document display that exists on both sides.
+    for (const ShowDisplay& sd : show.displays)
+    {
+        const auto id = findDisplayIdByName(m_Displays, sd.name);
+        if (!id)
+        {
+            continue;
+        }
+        if (sd.width > 0 && sd.height > 0)
+        {
+            m_Displays.setDisplayGeometry(*id, sd.x, sd.y, sd.width, sd.height);
+        }
+        m_Displays.setDisplayBrightness(*id, sd.brightness);
+        m_Displays.setDisplayEnabled(*id, sd.enabled);
+        m_Displays.setDisplayAlwaysOnTop(*id, sd.alwaysOnTop);
+        m_Displays.setDisplayStatusOverlay(*id, sd.statusOverlay);
+        m_Displays.setDisplayVsync(*id, sd.vsync);
+        if (const auto record = m_Displays.find(*id))
+        {
+            (*record)->warp = sd.warp;
+        }
+    }
+    // 3. Remove engine displays the document no longer defines.
+    const std::vector<Display> current = m_Displays.displayList();
+    for (const auto& d : current)
+    {
+        const bool inShow = std::any_of(show.displays.begin(), show.displays.end(),
+                                        [&](const ShowDisplay& sd) { return sd.name == d.name; });
+        if (!inShow)
+        {
+            if (m_DisplayRemoved)
+            {
+                m_DisplayRemoved(d.id);
+            }
+            m_Displays.removeDisplay(d.id);
+        }
+    }
 }
 
 nlohmann::json CommandServer::handleShowLoadJson(const nlohmann::json& params) const
