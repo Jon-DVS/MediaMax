@@ -114,6 +114,12 @@ The version is exposed to code as the `MEDIAMAX_VERSION` compile define
 (core, `PUBLIC`, so the apps and the tests see it too), is reported in the
 `status` protocol result, and is shown in the control GUI (Help > About).
 
+**Every commit and subsequent push to `origin` must include a tag with the
+current MediaMax version** (the value of `PROJECT_VERSION` at that commit,
+prefixed with `v`, e.g. `v0.2.1`). Create the tag on the commit and push it
+with `git push origin main --tags` (or `git push origin <tag>`), so each
+commit in the remote history is individually addressable by its version.
+
 ## Coding conventions
 
 - C++20, no C++23. `#pragma once` on headers.
