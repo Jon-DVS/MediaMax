@@ -29,6 +29,19 @@ struct Display
     // map (with the grid the client sent).
     WarpMap warp{2, 2};
 
+    // Projection warp on/off (on by default). When off the renderer skips
+    // the warp entirely - no warp texture upload, no per-pixel lookup -
+    // so a wall that does not need correction pays nothing for it. The
+    // warp grid itself is kept (the toggle does not reset it).
+    bool warpEnabled = true;
+
+    // Transient (not persisted in the show file): when true the renderer
+    // draws the warp grid and the node markers over this output, so the
+    // operator can see the control lattice on the physical screen while
+    // adjusting the warp in the control GUI (the GUI sets it while the
+    // warp editor is open and clears it again when the editor closes).
+    bool warpPreview = false;
+
     // Global brightness multiplier applied to this output (1.0 = 100%).
     float brightness = 1.f;
 

@@ -79,6 +79,10 @@ nlohmann::json displayToJson(const Display& d)
         {"alwaysOnTop", d.alwaysOnTop},
         {"statusOverlay", d.statusOverlay},
         {"vsync", d.vsync},
+        {"warpEnabled", d.warpEnabled},
+        // Transient operator state (the warp editor's live preview overlay),
+        // reported so clients can see it and reconcile after reconnects.
+        {"warpPreview", d.warpPreview},
         {"monitor", d.monitor},
         // The current projection warp (display.warp.set's `points` layout:
         // absolute positions in display-local UV, row-major). Clients use
@@ -589,6 +593,7 @@ void CommandServer::applyShowDisplays(const Show& show) const
         m_Displays.setDisplayAlwaysOnTop(added.id, sd.alwaysOnTop);
         m_Displays.setDisplayStatusOverlay(added.id, sd.statusOverlay);
         m_Displays.setDisplayVsync(added.id, sd.vsync);
+        m_Displays.setDisplayWarpEnabled(added.id, sd.warpEnabled);
         if (const auto record = m_Displays.find(added.id))
         {
             (*record)->warp = sd.warp;
@@ -615,6 +620,7 @@ void CommandServer::applyShowDisplays(const Show& show) const
         m_Displays.setDisplayAlwaysOnTop(*id, sd.alwaysOnTop);
         m_Displays.setDisplayStatusOverlay(*id, sd.statusOverlay);
         m_Displays.setDisplayVsync(*id, sd.vsync);
+        m_Displays.setDisplayWarpEnabled(*id, sd.warpEnabled);
         if (const auto record = m_Displays.find(*id))
         {
             (*record)->warp = sd.warp;
@@ -1051,6 +1057,18 @@ nlohmann::json CommandServer::handleDisplaySet(const nlohmann::json& params) con
     if (params.contains("vsync"))
     {
         m_Displays.setDisplayVsync(id, params["vsync"].get<bool>());
+    }
+    // Projection warp on/off: when off the renderer skips the warp texture
+    // and the per-pixel lookup entirely (the grid itself is kept).
+    if (params.contains("warpEnabled"))
+    {
+        m_Displays.setDisplayWarpEnabled(id, params["warpEnabled"].get<bool>());
+    }
+    // Transient warp-preview overlay (grid + nodes on the output while the
+    // warp editor is open); off by default, cleared by the editor's close.
+    if (params.contains("warpPreview"))
+    {
+        m_Displays.setDisplayWarpPreview(id, params["warpPreview"].get<bool>());
     }
     if (params.contains("name") && params["name"].is_string())
     {

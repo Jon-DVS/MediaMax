@@ -9,7 +9,10 @@ layout(push_constant) uniform DisplayPush
     vec2 sceneSize; // output space size in pixels
     float brightness; // output brightness multiplier
     int useWarp; // 1 => sample the warp texture
-    float pad;
+    int useOverlay; // 1 => blend the status overlay on top
+    int useWarpPreview; // 1 => draw the warp grid + node markers
+    int warpRows; // warp-preview lattice size (rows)
+    int warpCols; // warp-preview lattice size (cols)
 } pc;
 
 layout(location = 0) in vec2 a_pos; // display-local pixels

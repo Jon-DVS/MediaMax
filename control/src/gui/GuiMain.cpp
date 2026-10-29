@@ -511,7 +511,83 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
         modalReport += "\n";
     }
 
-    // 3b) Show editor "Add cue" (issue 12): each press must add a cue. The
+    // 3a) Displays tree (Displays tab rework): the tab renders one labeled
+    //     tree node per document display (the old table is gone). The
+    //     offline entry added above must appear in it.
+    {
+        const auto& entries = app.testDisplaysTreeEntries();
+        std::string names;
+        for (const auto& n : entries)
+        {
+            if (!names.empty())
+            {
+                names += ", ";
+            }
+            names += n;
+        }
+        const bool treeOk = !entries.empty() && entries.front() == "Display 1";
+        modalOk = modalOk && treeOk;
+        modalReport += std::string(treeOk ? "PASS " : "FAIL ") +
+                       "Displays tab is a tree view (entries: " + names + ")\n";
+    }
+    // 3b) Warp editor pad: open it on the document's display and verify
+    //     the pad's view state - aspect-ratioed to the display (the
+    //     offline entry is 1920x1080 => 16:9), the whole-lattice view
+    //     (zoom 1, pan 0), the nodes' screen positions and the reset
+    //     button - then close it again.
+    {
+        app.testOpenModal("warp");
+        bool shown = false;
+        for (int i = 0; i < 3 && !shown; ++i)
+        {
+            glfwPollEvents();
+            if (runtime.renderFrame())
+            {
+                shown = app.testModalOpen("warp");
+            }
+        }
+        float aspect = 0.0f;
+        float zoom = 0.0f;
+        ImVec2 pan{0.0f, 0.0f};
+        float nodeX = 0.0f;
+        float nodeY = 0.0f;
+        float resetX = 0.0f;
+        float resetY = 0.0f;
+        const bool infoOk =
+            shown && app.testWarpEditorOpen() && app.testWarpPadInfo(aspect, zoom, pan);
+        const bool viewOk = infoOk &&
+                            std::abs(aspect - 1920.0f / 1080.0f) < 1e-3f && // 16:9 pad
+                            zoom == 1.0f && pan.x == 0.0f && pan.y == 0.0f;
+        const bool nodeOk = app.testWarpNodeScreenPos(0, nodeX, nodeY) && nodeX > 0.0f &&
+                            nodeY > 0.0f && nodeX < 1280.0f && nodeY < 720.0f;
+        const bool resetOk = app.testWarpResetButtonPos(resetX, resetY) && resetX > 0.0f &&
+                             resetY > 0.0f;
+        const bool padOk = shown && infoOk && viewOk && nodeOk && resetOk;
+        modalOk = modalOk && padOk;
+        modalReport += std::string(padOk ? "PASS " : "FAIL ") +
+                       "warp editor: aspect-ratioed pad at the whole-lattice view" +
+                       (padOk ? std::string()
+                              : " (shown=" + std::string(shown ? "y" : "n") +
+                                    " aspect=" + std::to_string(aspect) +
+                                    " zoom=" + std::to_string(zoom) + " pan=" +
+                                    std::to_string(pan.x) + "," +
+                                    std::to_string(pan.y) + " node=" +
+                                    std::to_string(nodeX) + "," + std::to_string(nodeY) +
+                                    " reset=" + std::to_string(resetX) + "," +
+                                    std::to_string(resetY) + ")") +
+                       "\n";
+        app.testCloseModal("warp");
+        bool stillOpen = true;
+        for (int i = 0; i < 3 && stillOpen; ++i)
+        {
+            glfwPollEvents();
+            runtime.renderFrame();
+            stillOpen = app.testModalOpen("warp");
+        }
+        modalOk = modalOk && !stillOpen;
+    }
+
+    // 3c) Show editor "Add cue" (issue 12): each press must add a cue. The
     //     self-test editor starts with an empty timeline, so the first press
     //     adds one cue (at t=0) and the second must add another - before the
     //     fix the new cue's default time equalled the last cue's, so
@@ -524,7 +600,7 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
                    "editor Add cue adds on every press (cues: " + std::to_string(cuesAfter1) + ", " +
                    std::to_string(cuesAfter2) + ")\n";
 
-    // 3c) Show view interaction state (headless): the mode setters and the
+    // 3d) Show view interaction state (headless): the mode setters and the
     //     selection are pure GUI state - no system needed.
     {
         app.testShowViewSetMode("layer");
@@ -1600,6 +1676,282 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
                           std::to_string(livePort) + " -> " + std::to_string(badPort) +
                           " offline -> " + std::to_string(livePort) + " back online)\n";
             liveOk = liveOk && retargetOk;
+        }
+    }
+
+    // 4w) Displays tree + warp editor (Displays tab rework + warp editor
+    //     overhaul): the tree lists the document's displays with labeled
+    //     controls; the warp editor drives the live engine in real time -
+    //     while it is open the display shows the warp grid + nodes
+    //     (display.set warpPreview), node edits stream through (display.
+    //     warp.set), sticky selection + arrow-key nudge adjust one node,
+    //     and scroll zoom / the reset button adjust the pad's view.
+    if (haveLiveSystem && liveOk)
+    {
+        SystemConnection warpConn("warp-check", liveHost, livePort);
+        nlohmann::json list;
+        std::string listError;
+        bool haveDisplay = false;
+        std::uint32_t liveDispId = 0;
+        int dispW = 0;
+        int dispH = 0;
+        if (warpConn.send("display.list", nlohmann::json::object(), list, listError) &&
+            list.contains("displays"))
+        {
+            for (const auto& d : list["displays"])
+            {
+                if (d.value("name", std::string()) == "Display 1")
+                {
+                    haveDisplay = true;
+                    liveDispId = d.value("id", 0u);
+                    dispW = d.value("width", 0);
+                    dispH = d.value("height", 0);
+                    break;
+                }
+            }
+        }
+        // The tree lists the document's wall (the mirrored "Display 1").
+        bool treeOk = false;
+        for (const auto& n : app.testDisplaysTreeEntries())
+        {
+            if (n == "Display 1")
+            {
+                treeOk = true;
+                break;
+            }
+        }
+        liveReport += std::string(treeOk ? "PASS " : "FAIL ") +
+                      "Displays tree lists the show's display wall\n";
+        liveOk = liveOk && treeOk && haveDisplay;
+        if (haveDisplay)
+        {
+            auto sendRaw = [&](const std::string& method, const nlohmann::json& params,
+                               nlohmann::json& out) {
+                std::string rawError;
+                return warpConn.send(method, params, out, rawError);
+            };
+            auto statusDisplay = [&](std::uint32_t id, nlohmann::json& out) {
+                nlohmann::json st;
+                if (!sendRaw("status", nlohmann::json::object(), st) ||
+                    !st.contains("displays"))
+                {
+                    return false;
+                }
+                for (const auto& d : st["displays"])
+                {
+                    if (d.value("id", 0u) == id)
+                    {
+                        out = d;
+                        return true;
+                    }
+                }
+                return false;
+            };
+            // display.set warpEnabled round-trips through the engine (the
+            // renderer skips the warp entirely when it is off).
+            bool enabledOk = false;
+            nlohmann::json setResult;
+            if (sendRaw("display.set", {{"display", liveDispId}, {"warpEnabled", false}},
+                        setResult))
+            {
+                enabledOk = setResult.value("warpEnabled", true) == false &&
+                            sendRaw("display.set",
+                                    {{"display", liveDispId}, {"warpEnabled", true}}, setResult);
+                enabledOk = enabledOk && setResult.value("warpEnabled", false) == true;
+            }
+            liveReport += std::string(enabledOk ? "PASS " : "FAIL ") +
+                          "display.set warpEnabled round-trips (off -> on)\n";
+            liveOk = liveOk && enabledOk;
+            // The warp editor drives the live display: open it (the
+            // document's first entry, mapped to its live system).
+            app.testOpenModal("warp");
+            bool editorShown = false;
+            for (int i = 0; i < 3 && !editorShown; ++i)
+            {
+                glfwPollEvents();
+                if (runtime.renderFrame())
+                {
+                    editorShown = app.testModalOpen("warp");
+                }
+            }
+            bool previewOk = false;
+            nlohmann::json rec;
+            if (editorShown && statusDisplay(liveDispId, rec))
+            {
+                // The overlay is on in the GUI's state AND on the engine.
+                previewOk =
+                    app.testWarpPreviewSent() && rec.value("warpPreview", false) == true;
+            }
+            liveReport += std::string(previewOk ? "PASS " : "FAIL ") +
+                          "warp editor open turns the live preview on (status warpPreview)\n";
+            liveOk = liveOk && previewOk;
+            // The pad is aspect-ratioed to the display and starts at the
+            // whole-lattice view (zoom 1, pan 0).
+            float aspect = 0.0f;
+            float zoom = 0.0f;
+            ImVec2 pan{0.0f, 0.0f};
+            const bool aspectOk = editorShown && app.testWarpPadInfo(aspect, zoom, pan) &&
+                                  dispW > 0 && dispH > 0 &&
+                                  std::abs(aspect -
+                                           static_cast<float>(dispW) /
+                                           static_cast<float>(dispH)) < 1e-3f &&
+                                  zoom == 1.0f && pan.x == 0.0f && pan.y == 0.0f;
+            liveReport += std::string(aspectOk ? "PASS " : "FAIL ") +
+                          "warp pad is aspect-ratioed to the display (" + std::to_string(dispW) +
+                          "x" + std::to_string(dispH) + ", pad aspect " +
+                          std::to_string(aspect) + ")\n";
+            liveOk = liveOk && aspectOk;
+            // The pad's screen position settles when the hidden window's
+            // framebuffer size settles (the popup re-centres on the viewport
+            // change): render frames until two consecutive frames report the
+            // same pad rect, and only then read the node positions to click.
+            float padX = -1.0f;
+            float padY = -1.0f;
+            float padW = -1.0f;
+            float padH = -1.0f;
+            float prevPadX = 0.0f;
+            float prevPadY = 0.0f;
+            bool padStable = false;
+            for (int i = 0; i < 8 && !padStable; ++i)
+            {
+                glfwPollEvents();
+                runtime.renderFrame();
+                app.testWarpPadRect(padX, padY, padW, padH);
+                padStable = (padX == prevPadX && padY == prevPadY);
+                prevPadX = padX;
+                prevPadY = padY;
+            }
+            // One synthetic click: press + release at a screen point (the
+            // same injection path as the show-view checks).
+            auto clickAt = [&](float sx, float sy) {
+                runtime.preNewFrameHook = [sx, sy] {
+                    ImGui::GetIO().AddMousePosEvent(sx, sy);
+                    ImGui::GetIO().AddMouseButtonEvent(0, true);
+                };
+                glfwPollEvents();
+                runtime.renderFrame();
+                runtime.preNewFrameHook = [sx, sy] {
+                    ImGui::GetIO().AddMousePosEvent(sx, sy);
+                    ImGui::GetIO().AddMouseButtonEvent(0, false);
+                };
+                glfwPollEvents();
+                runtime.renderFrame();
+                runtime.preNewFrameHook = nullptr;
+            };
+            // Sticky selection: a click selects the node under the cursor
+            // and the selection survives the release (the u/v fields below
+            // the pad stay on it).
+            int selNode = -2;
+            float selU = -1.0f;
+            float selV = -1.0f;
+            bool selectionOk = false;
+            float nodeX = 0.0f;
+            float nodeY = 0.0f;
+            if (aspectOk && app.testWarpNodeScreenPos(0, nodeX, nodeY))
+            {
+                clickAt(nodeX, nodeY);
+                selectionOk = app.testWarpSelection(selNode, selU, selV) && selNode == 0 &&
+                              selU >= 0.0f && selU < 0.01f && selV >= 0.0f && selV < 0.01f;
+            }
+            liveReport += std::string(selectionOk ? "PASS " : "FAIL ") +
+                          "warp editor node click is a sticky selection (node " +
+                          std::to_string(selNode) + " at u=" + std::to_string(selU) + ", v=" +
+                          std::to_string(selV) + ")\n";
+            liveOk = liveOk && selectionOk;
+            // Arrow-key nudge: the selected node moves a small fraction -
+            // and the engine's warp follows (the editor streams every
+            // change as display.warp.set while it is open).
+            bool nudgeOk = false;
+            if (selectionOk)
+            {
+                runtime.preNewFrameHook = [] {
+                    ImGui::GetIO().AddKeyEvent(ImGuiKey_RightArrow, true);
+                };
+                glfwPollEvents();
+                runtime.renderFrame();
+                runtime.preNewFrameHook = [] {
+                    ImGui::GetIO().AddKeyEvent(ImGuiKey_RightArrow, false);
+                };
+                glfwPollEvents();
+                runtime.renderFrame();
+                runtime.preNewFrameHook = nullptr;
+                const bool moved = app.testWarpSelection(selNode, selU, selV) && selNode == 0 &&
+                                   selU > 0.002f && selU < 0.003f && selV < 0.001f;
+                const bool engineFollowed =
+                    statusDisplay(liveDispId, rec) && rec.contains("warp") &&
+                    rec["warp"]["points"].size() >= 1 &&
+                    rec["warp"]["points"][0][0].get<double>() > 0.002 &&
+                    rec["warp"]["points"][0][1].get<double>() < 0.001;
+                nudgeOk = moved && engineFollowed;
+            }
+            liveReport += std::string(nudgeOk ? "PASS " : "FAIL ") +
+                          "arrow keys nudge the selected node (u " + std::to_string(selU) +
+                          ", engine warp follows)\n";
+            liveOk = liveOk && nudgeOk;
+            // Scroll zoom: the view zooms in around the cursor, and the
+            // "Reset view" button brings back the whole lattice.
+            bool zoomOk = false;
+            float resetX = 0.0f;
+            float resetY = 0.0f;
+            float zoom2 = 0.0f;
+            ImVec2 pan2{0.0f, 0.0f};
+            float zoom3 = 0.0f;
+            ImVec2 pan3{0.0f, 0.0f};
+            if (nudgeOk)
+            {
+                float wheelX = 0.0f;
+                float wheelY = 0.0f;
+                if (app.testWarpNodeScreenPos(3, wheelX, wheelY))
+                {
+                    // The wheel must be its own frame: with the event-queue
+                    // trickling (the default), a mouse move queued in the
+                    // same frame drops the wheel event.
+                    runtime.preNewFrameHook = [wheelX, wheelY] {
+                        ImGui::GetIO().AddMousePosEvent(wheelX, wheelY);
+                    };
+                    glfwPollEvents();
+                    runtime.renderFrame();
+                    runtime.preNewFrameHook = [] {
+                        ImGui::GetIO().AddMouseWheelEvent(0.0f, 1.0f);
+                    };
+                    glfwPollEvents();
+                    runtime.renderFrame();
+                    runtime.preNewFrameHook = nullptr;
+                    zoomOk = app.testWarpPadInfo(aspect, zoom2, pan2) && zoom2 > 1.0f;
+                    if (zoomOk && app.testWarpResetButtonPos(resetX, resetY))
+                    {
+                        clickAt(resetX, resetY);
+                        zoomOk = app.testWarpPadInfo(aspect, zoom3, pan3) && zoom3 == 1.0f &&
+                                 pan3.x == 0.0f && pan3.y == 0.0f;
+                    }
+                }
+            }
+            liveReport += std::string(zoomOk ? "PASS " : "FAIL ") +
+                          "warp pad scroll-zooms and reset restores the whole-lattice view" +
+                          (zoomOk
+                               ? std::string()
+                               : " (zoom " + std::to_string(zoom2) +
+                                     " after wheel, " + std::to_string(zoom3) +
+                                     " after reset)") +
+                          "\n";
+            liveOk = liveOk && zoomOk;
+            // Closing the editor turns the live preview off again.
+            app.testCloseModal("warp");
+            bool stillOpen = true;
+            for (int i = 0; i < 3 && stillOpen; ++i)
+            {
+                glfwPollEvents();
+                runtime.renderFrame();
+                stillOpen = app.testModalOpen("warp");
+            }
+            bool previewOff = !stillOpen && !app.testWarpPreviewSent();
+            if (previewOff && statusDisplay(liveDispId, rec))
+            {
+                previewOff = rec.value("warpPreview", true) == false;
+            }
+            liveReport += std::string(previewOff ? "PASS " : "FAIL ") +
+                          "closing the warp editor turns the live preview off\n";
+            liveOk = liveOk && previewOff;
         }
     }
 

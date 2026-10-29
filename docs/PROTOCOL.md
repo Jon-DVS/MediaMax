@@ -389,6 +389,7 @@ Display object shape (used by `display.list`, `display.set`, `status`):
 {"id":1, "name":"Wall A", "x":0, "y":0,
  "width":1920, "height":1080, "brightness":1.0, "enabled":true,
  "alwaysOnTop":true, "statusOverlay":false, "vsync":true,
+ "warpEnabled":true, "warpPreview":false,
  "monitor":"NVIDIA GeForce RTX 4090",
  "warp":{"mode":"grid", "rows":2, "cols":2,
          "points":[[0,0],[1,0],[0,1],[1,1]]}}
@@ -411,7 +412,19 @@ the engine's next frame (the command result already reports the new value). `mon
 window is on (the OS monitor name, empty when the window is not on a
 monitor); the playback engine maintains it — it follows the window when
 the window manager moves it to another output — and clients treat it as
-read-only. `warp` is the display's current projection warp: `mode` is
+read-only. `warpEnabled` (default `true`) switches the display's projection
+warp on or off. When off, the renderer skips the warp texture and the
+per-pixel lookup entirely (the output is an undistorted rectangle); the
+display's warp grid is kept, so turning it back on restores the same warp.
+`display.set` can change it. `warpPreview` (default `false`) is transient
+operator state, not a setting: while true, the engine draws a live-preview
+overlay on that output — a 1px reference grid at the nodes' ideal
+positions plus a dot at each node's current position — so the operator can
+see the warp (and edits to it) on the display itself. The control GUI's
+warp editor turns it on while its dialog is open and off again on close;
+it is reported in the display object so other clients can see the overlay
+is active and reconcile after a reconnect.
+`warp` is the display's current projection warp: `mode` is
 `"grid"` (bilinear) or `"spline"` (a cubic B-spline through the nodes), and
 `points` are the absolute node positions in display-local UV (row-major,
 `rows x cols`) — the same layout `display.warp.set` takes, so a client can
@@ -419,17 +432,26 @@ restore its warp editor from the display object. A display that has never
 been warped reports the 2x2 identity grid.
 
 The control GUI's Displays tab lists the **show document's display wall**
-(see [SHOW_FORMAT.md](SHOW_FORMAT.md)) — it works with no system
-connected. Each row shows the entry's geometry and settings plus a
-**System** column: the connected system that currently runs a same-named
-live display, or *unmapped* when none does. **Add display** appends an
-entry to the document (tiled right of the wall at 1920x1080, named
-`Display <n>`); **Remove** deletes it; both are document edits, so the
-debounced auto-push propagates them and the systems' engines reconcile
-their live walls to the document on the next show load. The per-display
-**on** checkbox (a document edit + an immediate `display.set` with
-`enabled` on the mapped system) and the **Enable all / Disable all**
-buttons (document edits) react live while a system is connected.
+(see [SHOW_FORMAT.md](SHOW_FORMAT.md)) as a tree view — it works with no
+system connected. The header row has **Add display** (appends an entry to
+the document, tiled right of the wall at 1920x1080, named `Display <n>`)
+and the bulk **Enable all / Disable all** buttons (document edits). Each
+display is a tree node titled `name (widthxheight) @ system` — the
+connected system that currently runs a same-named live display, or
+*unmapped* when none does — and the first entry starts expanded.
+
+An expanded node shows the entry's **System**, **X/Y/Width/Height**,
+**Brightness**, and the **Enabled / Vsync / Always on top / Status
+overlay** checkboxes. Every one of these controls is a document edit
+(the debounced auto-push propagates it, and the systems' engines
+reconcile their live walls to the document on the next show load) *and*
+an immediate `display.set` on the mapped system when one is connected, so
+the change reaches the running engine at once. The node's **Warp (n x n,
+mode, on|off)** section has the **Warp enabled** checkbox (the same dual
+edit, as `display.set` `warpEnabled`) and a **Warp editor...** button.
+**Edit settings...** opens the Display settings dialog; **Remove**
+deletes the entry from the document (a document edit — the systems drop
+the display on the next show push).
 
 The Display settings dialog (Edit...) edits the document entry — **Name**,
 **X/Y/Width/Height**, **Brightness**, **Always on top**, **Vsync**, and a
@@ -441,9 +463,22 @@ system, or a **move** when a different system is selected — `display.add`
 `display.add` does not carry) on the target, then `display.remove` on the
 mapped source. The move is a live-only override: the entry stays in the
 show's wall, so the next show push rebuilds it on every system that loads
-the show. The warp dialog (Warp...) works the same way: it edits the
-entry's warp, Apply stores it in the document and sends
-`display.warp.set` to the mapped system for an immediate preview.
+the show.
+
+The warp editor (Warp editor...) is real-time: while it is open on a
+mapped display it sends `display.set` `warpPreview` `true` (the engine
+draws the reference grid and the nodes on the output itself) and streams
+every change to the mapped system as `display.warp.set` — dragging a
+node, click-selecting one (the selection is sticky) and editing its U/V
+fields or nudging it with the arrow keys, the **Mode** (grid/spline) and
+**Grid** size (2x2..6x6) — plus **Identity** to reset the lattice to the
+undistorted rectangle. The node pad keeps the display's aspect ratio; the
+scroll wheel zooms around the cursor, the middle or right button pans,
+and **Reset view** brings back the whole lattice. **Apply warp** stores
+the grid in the show document (the auto-push propagates it; the engine
+applies it on the next show load) and sends it to the mapped system once
+more; **Cancel** closes without saving the document. Closing the dialog
+any way sends `warpPreview` `false` again.
 
 #### `display.add`
 
@@ -485,12 +520,21 @@ Update any subset of a display's properties.
   (ints, applied as one geometry update), `name` (string, the display's
   label), `brightness` (number, default 1.0), `enabled` (bool),
   `alwaysOnTop` (bool, default true), `statusOverlay` (bool, default false),
-  `vsync` (bool, default true).
+  `vsync` (bool, default true), `warpEnabled` (bool, default true),
+  `warpPreview` (bool, default false).
 - Result: the updated display object.
 
 `vsync` changes the display's swapchain present mode (FIFO on, MAILBOX
 off with a FIFO fallback where unsupported); the engine applies it by
 recreating the swapchain on its next frame.
+
+`warpEnabled` switches the projection warp on or off: when off the
+display pass skips the warp texture and the per-pixel lookup (the output
+is undistorted), the warp grid itself is kept. `warpPreview` toggles the
+transient live-preview overlay (the reference grid at the nodes' ideal
+positions plus a dot at each node's current position); it is operator
+state — the control GUI's warp editor sets it on while its dialog is open
+and off on close — not a persisted setting.
 
 `statusOverlay` toggles the per-display status overlay: when true, the
 playback engine draws a small screen-aligned text block over that output
@@ -530,6 +574,10 @@ node's target position and is C1 continuous between them (boundary nodes are
 clamped, keeping the surface anchored to the grid edges). The display object
 reports the current mode (and grid) in its `warp` field, so clients can
 restore their warp editor state from `display.list` / `status`.
+
+The command stores the grid either way; if the display's `warpEnabled` is
+`false`, the renderer skips it until the warp is switched back on (see
+`display.set`).
 
 ### Frame
 

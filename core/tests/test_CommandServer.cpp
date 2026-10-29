@@ -892,6 +892,57 @@ TEST_CASE("display.set toggles vsync (default on)")
     CHECK_FALSE(f.run("display.set", {{"display", 999}, {"vsync", true}}).ok);
 }
 
+TEST_CASE("display.set toggles the warp on/off (default on)")
+{
+    Fixture f;
+    // Default: on (reported in the display record so clients can show it).
+    const Response list = f.run("display.list");
+    REQUIRE(list.ok);
+    CHECK(list.result.at("displays").at(0).at("warpEnabled").get<bool>() == true);
+
+    // Off: the renderer skips the warp texture and the per-pixel lookup
+    // entirely; the grid itself is kept (the toggle does not reset it).
+    const Response off = f.run("display.set", {{"display", f.displayA}, {"warpEnabled", false}});
+    REQUIRE(off.ok);
+    CHECK(off.result.at("warpEnabled").get<bool>() == false);
+    const auto display = f.displays.find(f.displayA);
+    REQUIRE(display.has_value());
+    CHECK((*display)->warpEnabled == false);
+    CHECK((*display)->warp.isIdentity());
+
+    // Back on + invalid ids rejected.
+    const Response on = f.run("display.set", {{"display", f.displayA}, {"warpEnabled", true}});
+    REQUIRE(on.ok);
+    CHECK(on.result.at("warpEnabled").get<bool>() == true);
+    CHECK((*display)->warpEnabled == true);
+    CHECK_FALSE(f.run("display.set", {{"display", 999}, {"warpEnabled", true}}).ok);
+}
+
+TEST_CASE("display.set toggles the warp preview overlay (default off)")
+{
+    Fixture f;
+    // Default: off (transient operator state - the control GUI's warp editor
+    // turns it on while the dialog is open; reported so clients can see it).
+    const Response list = f.run("display.list");
+    REQUIRE(list.ok);
+    CHECK(list.result.at("displays").at(0).at("warpPreview").get<bool>() == false);
+
+    // On (the engine draws the warp grid + node markers on the output).
+    const Response on = f.run("display.set", {{"display", f.displayA}, {"warpPreview", true}});
+    REQUIRE(on.ok);
+    CHECK(on.result.at("warpPreview").get<bool>() == true);
+    const auto display = f.displays.find(f.displayA);
+    REQUIRE(display.has_value());
+    CHECK((*display)->warpPreview == true);
+
+    // Off again + invalid ids rejected.
+    const Response off = f.run("display.set", {{"display", f.displayA}, {"warpPreview", false}});
+    REQUIRE(off.ok);
+    CHECK(off.result.at("warpPreview").get<bool>() == false);
+    CHECK((*display)->warpPreview == false);
+    CHECK_FALSE(f.run("display.set", {{"display", 999}, {"warpPreview", true}}).ok);
+}
+
 TEST_CASE("show.save then show.load round trips the show")
 {
     Fixture f;
@@ -1136,7 +1187,7 @@ TEST_CASE("show.loadJson with a displays section reconciles the engine's wall")
         "displays": [
             {"id": 1, "name": "main", "x": 0, "y": 0, "width": 3840, "height": 2160,
              "brightness": 0.7, "enabled": true, "alwaysOnTop": false,
-             "statusOverlay": true, "vsync": false,
+             "statusOverlay": true, "vsync": false, "warpEnabled": false,
              "warp": {"mode": "spline", "rows": 2, "cols": 2,
                       "points": [[0,0],[1,0],[0,1],[1,1]]}},
             {"id": 2, "name": "extra", "x": 3840, "y": 0, "width": 1920, "height": 1080}
@@ -1177,6 +1228,7 @@ TEST_CASE("show.loadJson with a displays section reconciles the engine's wall")
     CHECK(mainJson.at("alwaysOnTop").get<bool>() == false);
     CHECK(mainJson.at("statusOverlay").get<bool>() == true);
     CHECK(mainJson.at("vsync").get<bool>() == false);
+    CHECK(mainJson.at("warpEnabled").get<bool>() == false); // document value
     CHECK(mainJson.at("warp").at("mode") == "spline");
     CHECK(mainJson.at("warp").at("rows") == 2);
 
@@ -1187,6 +1239,7 @@ TEST_CASE("show.loadJson with a displays section reconciles the engine's wall")
     CHECK(extraJson.at("height").get<int>() == 1080);
     CHECK(extraJson.at("enabled").get<bool>() == true);
     CHECK(extraJson.at("vsync").get<bool>() == true); // document default
+    CHECK(extraJson.at("warpEnabled").get<bool>() == true); // document default
 
     // "side" is not in the document anymore: it is gone.
     for (const auto& d : displays)

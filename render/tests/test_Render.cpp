@@ -662,6 +662,51 @@ TEST_CASE("Display pass with identity warp texture")
     });
 }
 
+TEST_CASE("Display pass draws the warp preview overlay (grid + nodes)")
+{
+    runGpuTest("warp preview", [](Gpu& g) {
+        auto target = makeOffscreenTarget(g.context.nvrhiDevice(), 256, 256);
+        std::string error;
+        REQUIRE(g.renderer.ensureDisplayPipeline(nvrhi::Format::RGBA8_UNORM, error));
+
+        SceneRenderer::FrameInput frame;
+        frame.layers.push_back(colorLayer(Color4{0.3f, 0.6f, 0.9f, 1.f}));
+        SceneRenderer::DisplayTarget targetDesc;
+        targetDesc.image = target.Get();
+        targetDesc.rect = Rect2i{0, 0, 256, 256};
+        targetDesc.isSwapchainImage = false;
+        targetDesc.warpPreview = true;
+        targetDesc.warpRows = 3;
+        targetDesc.warpCols = 3;
+        frame.displays.push_back(targetDesc);
+
+        renderOneFrame(g.renderer, frame);
+
+        std::vector<std::uint8_t> rgba;
+        REQUIRE(readBackTexture(g.context.nvrhiDevice(), target, rgba));
+        // Scene reference (far from any grid line or node marker).
+        const Pixel scene = pixelAt(rgba, 256, 96, 64);
+        checkClose("scene r", scene.r, 0.3f, 2);
+        checkClose("scene g", scene.g, 0.6f, 2);
+        checkClose("scene b", scene.b, 0.9f, 2);
+        // The grid: a white reference line at u = 0.5 (a 3x3 lattice on a
+        // 256 px display => the middle vertical line runs through x = 128).
+        // It is anti-aliased to ~half coverage here, so it must be clearly
+        // brighter than the scene, not exactly white.
+        const Pixel line = pixelAt(rgba, 256, 128, 64);
+        CHECK_MESSAGE(line.r > scene.r + 15, "grid line r actual=" << line.r);
+        CHECK_MESSAGE(line.g > scene.g + 15, "grid line g actual=" << line.g);
+        // The nodes: a marker at each node's current position - the center
+        // node of the 3x3 lattice sits at (128, 128). The marker is
+        // yellowish (1.0, 0.85, 0.25) at full coverage in its center: much
+        // redder and bluer-down than the scene under it.
+        const Pixel node = pixelAt(rgba, 256, 128, 128);
+        CHECK_MESSAGE(node.r > 250, "node marker r actual=" << node.r);
+        CHECK_MESSAGE(node.g > 200, "node marker g actual=" << node.g);
+        CHECK_MESSAGE(node.b < 100, "node marker b actual=" << node.b);
+    });
+}
+
 TEST_CASE("Display pass blends the status overlay on top")
 {
     runGpuTest("overlay", [](Gpu& g) {

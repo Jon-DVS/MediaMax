@@ -252,6 +252,7 @@ rendering.
     "alwaysOnTop": true,
     "statusOverlay": false,
     "vsync": true,
+    "warpEnabled": true,
     "warp": { "mode": "grid", "rows": 2, "cols": 2,
               "points": [[0, 0], [1, 0], [0, 1], [1, 1]] }
   }
@@ -269,12 +270,14 @@ rendering.
 | `alwaysOnTop` | bool | no | Window flag (default true) |
 | `statusOverlay` | bool | no | Draw the engine's status overlay (default false) |
 | `vsync` | bool | no | FIFO (true) vs MAILBOX (false) present mode (default true) |
+| `warpEnabled` | bool | no | Projection warp on/off — when false the renderer skips the warp lookup entirely (the grid is kept) (default true) |
 | `warp` | object | no | Projection warp: `mode` `"grid"` (bilinear) or `"spline"` (cubic B-spline), `rows`, `cols` (both ≥ 2), `points` — exactly `rows*cols` absolute `[u, v]` positions in display UV, row-major (default: 2x2 identity) |
 
 The show file is where display settings are **persistent**: the control
-GUI edits this list (Displays tab: Add/Edit/Warp/Remove work with no
-system connected; entries that no connected system currently runs are
-marked *unmapped*), and the list follows the document — a `show.load` /
+GUI edits this list (Displays tab: the per-display tree's Add / Edit
+settings / Warp editor / Remove work with no system connected; entries
+that no connected system currently runs are marked *unmapped*), and the
+list follows the document — a `show.load` /
 `show.loadJson` (including the GUI's debounced auto-push) reconciles the
 engine's live displays to it: displays in the list are added or updated
 by name, live displays the list no longer defines are removed. A show

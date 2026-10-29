@@ -295,6 +295,7 @@ nlohmann::json Show::toJson() const
                 {"alwaysOnTop", d.alwaysOnTop},
                 {"statusOverlay", d.statusOverlay},
                 {"vsync", d.vsync},
+                {"warpEnabled", d.warpEnabled},
                 {"warp",
                  {{"mode", d.warp.interpolation() == WarpInterpolation::Spline ? "spline"
                                                                                 : "grid"},
@@ -535,6 +536,9 @@ std::optional<Show> Show::fromJson(const nlohmann::json& in, std::string& error)
             d.alwaysOnTop = dj.value("alwaysOnTop", true);
             d.statusOverlay = dj.value("statusOverlay", false);
             d.vsync = dj.value("vsync", true);
+            // Older show files (before the warp on/off toggle) omit it: the
+            // warp is on, matching the runtime default.
+            d.warpEnabled = dj.value("warpEnabled", true);
             if (dj.contains("warp") && dj["warp"].is_object())
             {
                 const auto& wj = dj["warp"];

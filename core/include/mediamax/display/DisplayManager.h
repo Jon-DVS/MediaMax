@@ -42,6 +42,10 @@ public:
     bool setDisplayStatusOverlay(Id id, bool statusOverlay);
     // Vsync (swapchain present mode) for this output.
     bool setDisplayVsync(Id id, bool vsync);
+    // Projection warp on/off (the renderer skips the warp when off).
+    bool setDisplayWarpEnabled(Id id, bool warpEnabled);
+    // Transient warp-preview overlay flag (grid + nodes drawn on output).
+    bool setDisplayWarpPreview(Id id, bool warpPreview);
     // The display name (shown in the UI and the status overlay).
     bool setDisplayName(Id id, std::string name);
     // The physical output the display's window is on (the playback engine

@@ -224,6 +224,27 @@ public:
     // the Edit... action's "add from live" path runs).
     void testRemoveDocumentDisplay(const std::string& name);
 
+    // --- Displays tree + warp editor self-test hooks ------------------------
+    // The display names renderDisplaysBlock() drew as tree nodes (document
+    // order) - the "Displays tab is a tree view" check.
+    const std::vector<std::string>& testDisplaysTreeEntries() const;
+    // Warp editor state after a frame that rendered the dialog (all false
+    // when the dialog is not open): the pad's display aspect (width/height),
+    // the current zoom/pan, a node's screen position (for synthetic clicks),
+    // the sticky selection + its u/v, the "Reset view" button's center, and
+    // whether the live preview overlay has been requested on the mapped
+    // system.
+    bool testWarpEditorOpen() const;
+    bool testWarpPadInfo(float& aspect, float& zoom, ImVec2& pan) const;
+    bool testWarpNodeScreenPos(int nodeIndex, float& sx, float& sy) const;
+    bool testWarpResetButtonPos(float& sx, float& sy) const;
+    bool testWarpSelection(int& node, float& u, float& v) const;
+    bool testWarpPreviewSent() const { return m_WarpPreviewSent; }
+    // The warp pad's screen rect (x, y, w, h) - the self-test waits for it
+    // to settle before clicking (the popup re-centres as the window size
+    // settles).
+    bool testWarpPadRect(float& x, float& y, float& w, float& h) const;
+
 private:
     // --- systems -----------------------------------------------------------
 
@@ -323,10 +344,28 @@ private:
     // Closes the dialog on success; marks the systems list dirty.
     bool applySystemSettings();
     // Opens the "Projection warp" dialog for the show document display at
-    // `docDisplayId`: it edits the entry's warp, and Apply stores it in the
-    // document and (while the entry is mapped) sends display.warp.set to
-    // the mapped system for an immediate live preview.
+    // `docDisplayId`: it edits the entry's warp (aspect-ratioed node pad
+    // with zoom/pan, sticky node selection + arrow-key nudge). While the
+    // dialog is open and the entry is mapped, node changes are sent to the
+    // mapped system as they happen (display.warp.set) and the physical
+    // output shows the warp grid + nodes (display.set warpPreview); both
+    // stop when the dialog closes. Apply persists the grid in the show
+    // document (the auto-push propagates it).
     void openWarpEdit(Id docDisplayId);
+    // Sends the editor's current grid to the live display behind `entry`
+    // (display.warp.set; a no-op with a log line when unmapped/offline).
+    // The real-time half of the warp preview while the dialog is open.
+    struct WarpEdit;
+    void sendWarpLive(const WarpEdit& we, const ShowDisplay& entry);
+    // Requests (or clears) the warp-preview overlay on the live display
+    // behind `entry` (display.set warpPreview) and tracks it in
+    // m_WarpPreviewSent; unmapped/offline clears the flag without a send.
+    void setWarpPreviewLive(const ShowDisplay& entry, bool on);
+    // Sends one display.set field to the live display behind `entry` (the
+    // Displays tree's live-apply path; a no-op with a log line when
+    // unmapped/offline).
+    void liveSetDisplayField(const ShowDisplay& entry, const char* field,
+                             const nlohmann::json& value);
     // Opens the "Media details" dialog for the given media record (the
     // system it came from is shown in the dialog title; the details are
     // re-read from that system's snapshot every frame, so an unloaded
@@ -549,11 +588,35 @@ private:
         std::vector<std::array<float, 2>> points; // absolute positions, row-major
         bool spline = false;
         bool valid = false; // grid filled in
+        // Node pad view (per display, so each editor remembers its own):
+        // zoom (1.0 = the whole lattice) + pan in pad pixels. "Reset view"
+        // returns to zoom 1 / pan (0,0).
+        float zoom = 1.0f;
+        ImVec2 pan{0.0f, 0.0f};
+        // Sticky node selection (-1 = none): it survives the mouse release
+        // (and the dialog reopening) so the node's u/v stay visible in the
+        // fields below the pad and can be nudged with the arrow keys.
+        int selectedNode = -1;
     };
     std::map<Id, WarpEdit> m_WarpEdits;
     // Node-based warp pad: the point index currently dragged with the mouse
     // (-1 when none). Transient - reset when the dialog opens or closes.
     int m_WarpDragNode = -1;
+    // True while the warp editor's live preview overlay has been requested
+    // on the mapped system (display.set warpPreview: the grid + nodes are
+    // drawn on the physical output while the editor is open). Cleared with
+    // a warpPreview false in the dialog-close cleanup.
+    bool m_WarpPreviewSent = false;
+    // Per-frame warp editor render state for the self-test (screen
+    // positions under the current view; valid only while the dialog
+    // rendered a pad this frame).
+    std::vector<ImVec2> m_TestWarpNodeScreen;
+    ImVec2 m_TestWarpResetPos{0.0f, 0.0f};
+    bool m_TestWarpResetValid = false;
+    ImVec4 m_TestWarpPadRect{0.0f, 0.0f, 0.0f, 0.0f};
+    // The display names renderDisplaysBlock() drew as tree nodes (document
+    // order), recorded for the self-test's tree-view check.
+    std::vector<std::string> m_TestDisplaysTree;
 
     // Show editor selection (scenes tab).
     int m_SelectedSceneIdx = 0;

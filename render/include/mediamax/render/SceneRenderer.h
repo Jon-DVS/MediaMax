@@ -126,7 +126,9 @@ public:
     {
         nvrhi::ITexture* image = nullptr; // swapchain image (or offscreen RT)
         Rect2i rect; // the display's rectangle in output space
-        nvrhi::ITexture* warp = nullptr; // null for identity warp
+        // Warp texture for this output; null = identity (the app also keeps
+        // it null when the display's warp is switched off).
+        nvrhi::ITexture* warp = nullptr;
         // Status overlay texture (straight-alpha RGBA8); null = no overlay.
         // Drawn screen-aligned on top of the unwarped scene output.
         nvrhi::ITexture* overlay = nullptr;
@@ -135,6 +137,15 @@ public:
         // Present state at the end of the pass (required for the present).
         // False for offscreen render targets (e.g. self-test).
         bool isSwapchainImage = true;
+        // Warp-preview overlay (warp editor open on the control side): draw
+        // the ideal node lattice and the node markers (at their current,
+        // warped positions) over the output. Only takes effect with
+        // warpRows/warpCols >= 2. (New fields after isSwapchainImage on
+        // purpose: DisplayTarget is positional-aggregate-initialized in the
+        // render tests.)
+        bool warpPreview = false;
+        int warpRows = 0;
+        int warpCols = 0;
     };
 
     struct FrameInput
@@ -174,8 +185,11 @@ public:
         float brightness;
         int useWarp;
         int useOverlay;
+        int useWarpPreview;
+        int warpRows;
+        int warpCols;
     };
-    static_assert(sizeof(DisplayPush) == 36);
+    static_assert(sizeof(DisplayPush) == 48);
 
     // --- Diagnostics / self-test ---------------------------------------------
 

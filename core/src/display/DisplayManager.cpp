@@ -124,6 +124,28 @@ bool DisplayManager::setDisplayVsync(Id id, bool vsync)
     return true;
 }
 
+bool DisplayManager::setDisplayWarpEnabled(Id id, bool warpEnabled)
+{
+    auto display = find(id);
+    if (!display)
+    {
+        return false;
+    }
+    (*display)->warpEnabled = warpEnabled;
+    return true;
+}
+
+bool DisplayManager::setDisplayWarpPreview(Id id, bool warpPreview)
+{
+    auto display = find(id);
+    if (!display)
+    {
+        return false;
+    }
+    (*display)->warpPreview = warpPreview;
+    return true;
+}
+
 bool DisplayManager::setDisplayName(Id id, std::string name)
 {
     auto display = find(id);

@@ -249,6 +249,7 @@ TEST_CASE("Round trip: display wall (geometry, flags, warp)")
     main.alwaysOnTop = false;
     main.statusOverlay = true;
     main.vsync = false;
+    main.warpEnabled = false;
     main.warp = WarpMap(3, 3, WarpInterpolation::Spline);
     main.warp.setPointPosition(1, 1, 0.55f, 0.475f); // nudged center node
 
@@ -283,6 +284,7 @@ TEST_CASE("Round trip: display wall (geometry, flags, warp)")
     CHECK(!a.alwaysOnTop);
     CHECK(a.statusOverlay);
     CHECK(!a.vsync);
+    CHECK(!a.warpEnabled);
     CHECK(a.warp.interpolation() == WarpInterpolation::Spline);
     CHECK(a.warp.rows() == 3);
     CHECK(a.warp.cols() == 3);
@@ -299,8 +301,24 @@ TEST_CASE("Round trip: display wall (geometry, flags, warp)")
     CHECK(b.width == 1920);
     CHECK(b.height == 1080);
     CHECK(b.vsync);
+    CHECK(b.warpEnabled); // the default (on)
     CHECK(b.warp.rows() == 2);
     CHECK(b.warp.cols() == 2);
+
+    // Older show files predate the warp on/off toggle: a display entry
+    // that omits warpEnabled reads back as on (the runtime default).
+    const nlohmann::json legacyDisplays = nlohmann::json::array({
+        {{"id", 1},
+         {"name", "Wall A"},
+         {"x", 0},
+         {"y", 0},
+         {"width", 1920},
+         {"height", 1080}}});
+    nlohmann::json legacyDoc = json;
+    legacyDoc["displays"] = legacyDisplays;
+    auto legacyShow = Show::fromJson(legacyDoc, error);
+    REQUIRE(legacyShow.has_value());
+    CHECK(legacyShow->displays[0].warpEnabled);
 
     // A show with no displays omits the section entirely, so saving such a
     // show leaves existing documents (and a system's live display set)

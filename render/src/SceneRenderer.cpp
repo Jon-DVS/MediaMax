@@ -705,6 +705,10 @@ void SceneRenderer::recordFrame(nvrhi::ICommandList* cmd, const FrameInput& fram
         pc.brightness = d.brightness;
         pc.useWarp = d.warp ? 1 : 0;
         pc.useOverlay = d.overlay ? 1 : 0;
+        pc.useWarpPreview =
+            d.warpPreview && d.warpRows >= 2 && d.warpCols >= 2 ? 1 : 0;
+        pc.warpRows = d.warpRows;
+        pc.warpCols = d.warpCols;
 
         nvrhi::GraphicsState gs;
         gs.setPipeline(pipelineIt->second.Get())

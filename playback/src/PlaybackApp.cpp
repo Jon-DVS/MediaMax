@@ -960,11 +960,20 @@ void PlaybackApp::renderFrame(const FrameSnapshot& snap)
         target.rect = display->rect();
         target.brightness = display->brightness;
         target.isSwapchainImage = true;
-        if (!display->warp.isIdentity())
+        // The warp is skipped entirely (no texture rebuild, no bind, no
+        // per-pixel lookup) when it is switched off or still the identity;
+        // the change-detection in updateWarpTexture also keeps the upload
+        // out of steady state when it is on but unchanged.
+        if (display->warpEnabled && !display->warp.isIdentity())
         {
             updateWarpTexture(*ds, *display);
             target.warp = m_Scene.warpTexture(display->id).Get();
         }
+        // Warp preview overlay (the control GUI's warp editor is open on a
+        // mapped system): the lattice size is the display's own warp grid.
+        target.warpPreview = display->warpPreview && display->warpEnabled;
+        target.warpRows = display->warp.rows();
+        target.warpCols = display->warp.cols();
         if (display->statusOverlay)
         {
             updateStatusOverlay(*ds, *display);
