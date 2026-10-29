@@ -367,7 +367,11 @@ dereference. A top-level window's id is a plain name hash, so the host's
 popup id is computable from anywhere; the host must have no `PushID`s.
 `OpenPopup()` itself also dereferences the current window, so it may only
 run inside a frame (the self-test's modal opens are therefore deferred to
-`frame()` via a pending flag).
+`frame()` via a pending flag). Every window (modals, file dialogs) is
+movable by its top window bar only: `GuiRuntime::init` sets
+`io.ConfigWindowsMoveFromTitleBarOnly = true`, because Dear ImGui's default
+also starts a window move from a press-and-move on any non-interactive
+part of the window content.
 
 Crash diagnostics (`src/gui/GuiCrash.cpp`): the GUI thread installs an
 unhandled-exception filter that appends a crash report — registers plus a

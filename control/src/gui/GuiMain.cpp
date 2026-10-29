@@ -90,6 +90,10 @@ bool GuiRuntime::init(GLFWwindow* window, ControlGuiApp* app, std::string& error
     // no-op and the DockBuilder* calls below crash on a NULL node.
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
     io.IniFilename = nullptr; // the layout is deterministic (rebuilt each start)
+    // Popups, modals and the file dialogs must be dragged by their top
+    // window bar only: with Dear ImGui's default, a press-and-move on any
+    // non-interactive part of the window grabs the window itself.
+    io.ConfigWindowsMoveFromTitleBarOnly = true;
     ImGui::StyleColorsDark();
 
     if (!ImGui_ImplGlfw_InitForVulkan(window, true))
@@ -376,6 +380,13 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
     //    kModalHostName in ControlGui.cpp).
     std::string modalReport;
     bool modalOk = true;
+    // Windows are movable by their title bar only (GuiRuntime::init sets
+    // io.ConfigWindowsMoveFromTitleBarOnly): a content-area press must not
+    // drag the popup with it.
+    const bool titleBarOnly = ImGui::GetIO().ConfigWindowsMoveFromTitleBarOnly;
+    modalOk = modalOk && titleBarOnly;
+    modalReport += std::string(titleBarOnly ? "PASS " : "FAIL ") +
+                   "windows are movable only by their title bar\n";
     std::vector<const char*> modalNames = {"about", "open", "saveas", "media", "pull", "edit",
                                            "warp", "mediadetails"};
     if (haveLiveSystem)
