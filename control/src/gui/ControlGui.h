@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -88,6 +89,11 @@ public:
     // Registers a system in the GUI list (the self-test's entries; nothing
     // is persisted - the show file is where the list is stored, issue 18).
     void testAddSystem(const std::string& name, const std::string& host, int port);
+    // Loads a show file through the exact File > Open path (loadShowFile):
+    // the self-test writes a small show document, loads it, and verifies
+    // the engine received the loaded show (the load pushes it to every
+    // connected system immediately).
+    bool testLoadShowFile(const std::string& path);
     // True once a registered system reports its poll connection up.
     bool testSystemConnected(const std::string& name) const;
     // Gives the fresh self-test editor a deterministic scene (id 1) with one
@@ -279,6 +285,19 @@ private:
     // show.load of that file would. An unsaved document carries no mediaDir.
     nlohmann::json showPushParams();
     void pushToActiveSystem();
+    // Pushes the current document to the given systems: one show.loadJson
+    // (preserveState) per system, per-target log lines. Returns true when
+    // every target accepted it (or the list is empty); a partial failure
+    // sets m_EditorError and returns false.
+    bool pushShowToSystems(std::span<SystemConnection*> targets, const char* reason);
+    // Pushes the current document to EVERY connected system.
+    bool pushShowToAllConnected(const char* reason);
+    // Loads a show file exactly as File > Open does: loads the document,
+    // takes the system list from it, then immediately pushes the loaded
+    // show to every connected system (a load is a statement of what the
+    // systems should be playing, so it is not left to the next edit's
+    // auto-push). On failure, fills `error`.
+    bool loadShowFile(const std::string& path, std::string& error);
     // Debounced auto-push of edited shows to every connected system
     // (show.loadJson with preserveState, so live edits do not restart
     // playback). Called from frame().

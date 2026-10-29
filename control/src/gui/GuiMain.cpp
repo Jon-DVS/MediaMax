@@ -532,6 +532,62 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
         liveOk = liveOk && systemsInDoc;
     }
 
+    // 4a) Loading a show (File > Open) pushes it to every connected system
+    //     right away: the self-test writes a small show file whose
+    //     `systems` list carries the "self-test" entry (so
+    //     applyShowSystems reuses the live connection), loads it through
+    //     the same routine the Open dialog uses, and polls show.info for
+    //     the loaded name.
+    if (haveLiveSystem && !autoPushName.empty())
+    {
+        const std::string loadedName = "Load push check";
+        const std::string loadDocPath =
+            (std::filesystem::temp_directory_path() / "gui_load_push_show.json").string();
+        {
+            std::ofstream out(loadDocPath);
+            out << nlohmann::json{{"app", "mediamax-show"},
+                                  {"version", 1},
+                                  {"name", loadedName},
+                                  {"frameRate", {{"num", 60}, {"den", 1}}},
+                                  {"media", nlohmann::json::array()},
+                                  {"scenes", nlohmann::json::array()},
+                                  {"cues", nlohmann::json::array()},
+                                  {"systems", {{{"name", "self-test"},
+                                                {"host", liveHost},
+                                                {"port", static_cast<int>(livePort)}}}}}
+                        .dump(2);
+        }
+        const bool loadOk = app.testLoadShowFile(loadDocPath);
+        bool arrived = false;
+        if (loadOk)
+        {
+            SystemConnection check("load-push-check", liveHost, livePort);
+            nlohmann::json result;
+            std::string checkError;
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            while (!arrived && std::chrono::steady_clock::now() < deadline)
+            {
+                glfwPollEvents();
+                runtime.renderFrame();
+                if (check.send("show.info", nlohmann::json::object(), result, checkError) &&
+                    result.value("name", std::string()) == loadedName)
+                {
+                    arrived = true;
+                }
+                else
+                {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+                }
+            }
+        }
+        std::error_code fsError;
+        std::filesystem::remove(loadDocPath, fsError);
+        std::cout << ((loadOk && arrived) ? "PASS" : "FAIL")
+                  << " loading a show pushes it to connected systems (show.info name = "
+                  << (arrived ? loadedName : "<not received>") << ")" << std::endl;
+        liveOk = liveOk && loadOk && arrived;
+    }
+
     // 4b) A second system entry on the same engine: proves multi-system
     //     polling and - since addSystem activates the entry it adds - makes
     //     this the active system the display-move check in 4c needs.

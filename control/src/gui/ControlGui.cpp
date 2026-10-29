@@ -468,6 +468,70 @@ void ControlGuiApp::pushToActiveSystem()
     }
 }
 
+bool ControlGuiApp::pushShowToSystems(std::span<SystemConnection*> targets, const char* reason)
+{
+    if (targets.empty())
+    {
+        return true; // nothing to do; the caller decides how to count that
+    }
+    json params = showPushParams();
+    bool allOk = true;
+    for (SystemConnection* target : targets)
+    {
+        json result;
+        std::string error;
+        if (target->send("show.loadJson", params, result, error))
+        {
+            log("pushed show '" + m_Editor.show().name + "' to " + target->name() + " (" +
+                reason + ")");
+        }
+        else
+        {
+            log("show push to " + target->name() + " failed (" + reason + "): " + error);
+            allOk = false;
+        }
+    }
+    if (allOk)
+    {
+        m_EditorError.clear();
+    }
+    else
+    {
+        // The console log carries the per-target errors; the editor line
+        // just says the push did not reach everything.
+        m_EditorError = "show push failed for some systems (see console)";
+    }
+    return allOk;
+}
+
+bool ControlGuiApp::pushShowToAllConnected(const char* reason)
+{
+    std::vector<SystemConnection*> targets;
+    for (auto& system : m_Systems)
+    {
+        if (system->pollConnected())
+        {
+            targets.push_back(system.get());
+        }
+    }
+    return pushShowToSystems(targets, reason);
+}
+
+bool ControlGuiApp::loadShowFile(const std::string& path, std::string& error)
+{
+    if (!m_Editor.loadFile(path, error))
+    {
+        return false; // `error` from ShowEditor::loadFile
+    }
+    // The show file carries the system list (issue 18): the document's
+    // entries become the GUI's connections.
+    applyShowSystems();
+    // Push the loaded show to every connected system right away - see
+    // loadShowFile's header comment.
+    pushShowToAllConnected("show load");
+    return true;
+}
+
 // kAutoPushDelay: how long after the last edit before an auto-push goes out
 // (keeps a burst of edits to a single push), and the retry throttle after a
 // failed one.
@@ -503,35 +567,16 @@ void ControlGuiApp::autoPushEditedShow()
     }
     if (targets.empty())
     {
-        return; // nothing to push to; re-checked on later frames
+        // Nothing to push to: do NOT mark the generation pushed, so an edit
+        // made while offline still goes out when a system comes online.
+        return;
     }
     m_NextAutoPushAttempt = now + kAutoPushDelay;
 
-    json params = showPushParams();
-    bool allOk = true;
-    for (SystemConnection* target : targets)
-    {
-        json result;
-        std::string error;
-        if (target->send("show.loadJson", params, result, error))
-        {
-            log("auto-pushed show '" + m_Editor.show().name + "' to " + target->name());
-        }
-        else
-        {
-            log("auto-push to " + target->name() + " failed: " + error);
-            allOk = false;
-        }
-    }
-    if (allOk)
+    // Retry on a later frame (throttled) until every system accepted it.
+    if (pushShowToSystems(targets, "auto-push"))
     {
         m_AutoPushedGeneration = generation;
-        m_EditorError.clear();
-    }
-    else
-    {
-        // Retry on a later frame (throttled) until every system accepted it.
-        m_EditorError = "auto-push failed for some systems (see console)";
     }
 }
 
@@ -2897,14 +2942,10 @@ void ControlGuiApp::renderFileDialogs()
             const auto selection = dlg->GetSelection();
             if (!selection.empty())
             {
+                // Load + sync the system list + push the loaded show to
+                // every connected system (see loadShowFile).
                 std::string error;
-                if (m_Editor.loadFile(selection.begin()->second, error))
-                {
-                    m_EditorError.clear();
-                    // The show file carries the system list (issue 18).
-                    applyShowSystems();
-                }
-                else
+                if (!loadShowFile(selection.begin()->second, error))
                 {
                     m_EditorError = error;
                 }
@@ -3775,6 +3816,12 @@ bool ControlGuiApp::testSystemConnected(const std::string& name) const
         }
     }
     return false;
+}
+
+bool ControlGuiApp::testLoadShowFile(const std::string& path)
+{
+    std::string error;
+    return loadShowFile(path, error);
 }
 
 void ControlGuiApp::testGiveEditorALayer()
