@@ -1475,7 +1475,7 @@ void ControlGuiApp::renderScenesBlock(const SystemConnection::Snapshot& snap)
             {
                 ImGui::PushStyleColor(ImGuiCol_Button, kActiveSceneColor);
             }
-            if (ImGui::Button(label.c_str(), ImVec2(-FLT_MAX, kSceneButtonHeight)))
+            if (ImGui::Button(label.c_str(), ImVec2(300.0f, kSceneButtonHeight)))
             {
                 std::string error;
                 sendActive("scene.toggle", {{"index", i}}, error);
@@ -1493,7 +1493,7 @@ void ControlGuiApp::renderScenesBlock(const SystemConnection::Snapshot& snap)
         }
         ImGui::EndTable();
     }
-    if (ImGui::Button("Return to timeline (scene.clear)", ImVec2(-FLT_MAX, kSceneButtonHeight)))
+    if (ImGui::Button("Clear Scene(s)", ImVec2(0.0f, kSceneButtonHeight)))
     {
         std::string error;
         sendActive("scene.clear", json::object(), error);
@@ -2424,7 +2424,7 @@ void ControlGuiApp::renderShowViewWindow()
     const float wLayer = widgetWidth("Layer");
     const float wDisplay = widgetWidth("Display");
     const float stripRight = winSize.x - 8.f;
-    const float stripY = frameH + 8.f;
+    const float stripY = frameH - 8.f;
     const float xReset = stripRight - wReset;
     const float xShow = xReset - itemSpacing - wShow;
     const float xLayer = xShow - itemSpacing - wLayer;
@@ -3289,6 +3289,7 @@ void ControlGuiApp::renderScenesTab()
             break;
         }
     }
+    ImGui::NewLine();
     if (ImGui::Button("Add layer"))
     {
         Layer layer;
@@ -3307,6 +3308,7 @@ void ControlGuiApp::renderLayerDetails(Layer& layer)
     Show& show = m_Editor.show();
     bool changed = false;
 
+    ImGui::NewLine();
     if (ImGui::InputText("Name##lname", &layer.name))
     {
         changed = true;
@@ -3384,6 +3386,7 @@ void ControlGuiApp::renderLayerDetails(Layer& layer)
         }
     }
 
+    ImGui::NewLine();
     ImGui::SeparatorText("Transform");
     // x | y share a line; rotation and each anchor get their own line
     // (five fields on one row would not fit a narrow pane). The input
@@ -3431,6 +3434,7 @@ void ControlGuiApp::renderLayerDetails(Layer& layer)
         changed = true;
     }
 
+    ImGui::NewLine();
     ImGui::SeparatorText("Appearance");
     ImGui::SetNextItemWidth(ImMax(80.0f, rowW - 64.0f));
     if (ImGui::SliderFloat("Opacity", &layer.opacity, 0.0f, 1.0f, "%.2f"))
@@ -3457,6 +3461,7 @@ void ControlGuiApp::renderLayerDetails(Layer& layer)
     {
         m_Editor.touch();
     }
+    ImGui::NewLine();
     renderLayerTracks(layer);
 }
 
@@ -3584,7 +3589,7 @@ void ControlGuiApp::renderLayerTracks(Layer& layer)
                 trackChanged = true;
             }
             recordTestEditorItem(layer.id, std::string("add") + entry.label, false);
-            ImGui::SameLine();
+            //ImGui::SameLine();
             if (track.keyCount() > 0 && ImGui::Button("Clear track"))
             {
                 track.clear();
