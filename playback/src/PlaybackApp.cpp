@@ -114,10 +114,18 @@ PlaybackApp::~PlaybackApp()
 int PlaybackApp::run()
 {
     auto& log = Logger::instance();
-    log.info("MediaMax playback starting (system: {}, {} display{})",
-             m_Args.systemName.empty() ? "unnamed" : m_Args.systemName,
-             m_Args.displays.empty() ? 1 : m_Args.displays.size(),
-             m_Args.displays.size() == 1 ? "" : "s");
+    if (m_Args.explicitWindow)
+    {
+        log.info("MediaMax playback starting (system: {}, {} display{})",
+                 m_Args.systemName.empty() ? "unnamed" : m_Args.systemName,
+                 m_Args.displays.empty() ? 1 : m_Args.displays.size(),
+                 m_Args.displays.size() == 1 ? "" : "s");
+    }
+    else
+    {
+        log.info("MediaMax playback starting (system: {}, windowless)",
+                 m_Args.systemName.empty() ? "unnamed" : m_Args.systemName);
+    }
 
     if (!initWindowsAndDisplays())
     {
@@ -147,9 +155,16 @@ int PlaybackApp::run()
         }
     }
 
+    // Windowless startup: the wall is empty until a show (or display.add)
+    // defines it, so the scene size is undefined for now - renderFrame()
+    // picks it up from the first non-empty snapshot.
     {
         std::lock_guard lock(m_StateMutex);
-        m_Scene.setSceneSize(m_Displays.outputBounds().size());
+        const Size2i bounds = m_Displays.outputBounds().size();
+        if (bounds.valid())
+        {
+            m_Scene.setSceneSize(bounds);
+        }
     }
 
     // System IP + computer name for the status overlay and the status
@@ -162,10 +177,19 @@ int PlaybackApp::run()
     m_CommandServer->setSystemIp(m_SystemIp);
 
     // Auto-play the startup show (under the state mutex: the control server
-    // is already serving commands by this point).
+    // is already serving commands by this point). Without a startup show the
+    // engine stays stopped and waits: a show loaded via the control
+    // interface takes its play state from the load (a stopped engine stays
+    // stopped until the operator starts playback).
+    if (!m_Args.showPath.empty())
     {
         std::lock_guard lock(m_StateMutex);
         m_Engine.play();
+    }
+    else
+    {
+        log.info("waiting: no startup show - load one via the control interface (the "
+                 "playback stays stopped until playback.play)");
     }
 
     auto lastTime = std::chrono::steady_clock::now();
@@ -223,12 +247,21 @@ bool PlaybackApp::initWindowsAndDisplays()
         m_InstanceExtensions.push_back(exts[i]);
     }
 
-    // One window per physical output; a single default display without
-    // --display flags.
+    // One window per --display flag; an explicit --width/--height gives a
+    // single display at (0,0). Without any of them the engine starts
+    // windowless and waits: displays (and their windows) are created when a
+    // show with a "displays" section is loaded or display.add arrives, via
+    // the same addSurfaceForDisplay path (the control server is already
+    // running by the time the frame loop processes those).
     std::vector<DisplaySpec> specs = m_Args.displays;
-    if (specs.empty())
+    if (specs.empty() && m_Args.explicitWindow)
     {
         specs.push_back(DisplaySpec{m_Args.width, m_Args.height, 0, 0});
+    }
+    if (specs.empty())
+    {
+        log.info("no display requested: waiting for a show with display information");
+        return true;
     }
 
     for (std::size_t i = 0; i < specs.size(); ++i)
@@ -1364,7 +1397,8 @@ bool PlaybackApp::initEngine()
     }
     else
     {
-        log.info("no --show given: running with an empty show (load one via the control interface)");
+        log.info("no --show given: waiting with an empty show (load one via the control "
+                 "interface)");
     }
 
     m_ControlServer = std::make_unique<ControlServer>(m_Args.host, m_Args.port);

@@ -22,12 +22,13 @@ cd examples\01_basics
 ```
 
 A window titled `MediaMax - Display 1` opens and the show starts playing
-automatically (each startup show auto-plays). The engine opens a 1920x1080
-window by default - the HD output space all the example shows are laid out
-in - and runs them at their show frame rate (60 fps); `--width`/`--height`
-change the window, `--display WxH@X+Y` adds off-default displays (see
-`06_multi_display`). The control interface listens on port 47600; in a
-second terminal:
+automatically (each startup show auto-plays). The engine starts windowless
+- no display flags, no default window - and opens the display window(s)
+defined by the show's `displays` section: the HD output space (1920x1080)
+all the example shows are laid out in. `--width`/`--height` gives a single
+startup display, `--display WxH@X+Y` a wall, instead of the show's (see
+`06_multi_display`). The shows run at their frame rate (60 fps). The
+control interface listens on port 47600; in a second terminal:
 
 ```bat
 ..\..\build\control\Release\mediamax_control.exe --system 127.0.0.1:47600

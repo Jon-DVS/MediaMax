@@ -105,10 +105,12 @@ bool parseArguments(int argc, char** argv, AppArgs& out, std::string& error)
             else if (a == "--width")
             {
                 out.width = std::stoi(next("--width"));
+                out.explicitWindow = true;
             }
             else if (a == "--height")
             {
                 out.height = std::stoi(next("--height"));
+                out.explicitWindow = true;
             }
             else if (a == "--display")
             {
@@ -118,6 +120,7 @@ bool parseArguments(int argc, char** argv, AppArgs& out, std::string& error)
                     return false;
                 }
                 out.displays.push_back(spec);
+                out.explicitWindow = true;
             }
             else if (a == "--self-test")
             {
@@ -163,9 +166,12 @@ std::string applicationUsage()
        << "  --port <n>             Control server port (default 47600)\n"
        << "  --show <file.json>     Show file to load at startup\n"
        << "  --system-name <name>   Name reported to the control interface\n"
-       << "  --width <n>            Default display width (default 1920)\n"
-       << "  --height <n>           Default display height (default 1080)\n"
+       << "  --width <n>            Startup display width (default 1920)\n"
+       << "  --height <n>           Startup display height (default 1080)\n"
        << "  --display WxH@X+Y      One physical output; repeat for a wall\n"
+       << "                         (without any of these the engine starts\n"
+       << "                          windowless and waits for a show that\n"
+       << "                          carries display information)\n"
        << "  --self-test            Run headless, render offscreen, write a PPM\n"
        << "  --self-test-out <f>    Self-test output PPM (default selftest.ppm)\n"
        << "  --self-test-seconds <n> Self-test duration in seconds (default 3)\n"

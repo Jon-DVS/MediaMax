@@ -128,12 +128,10 @@ bool SceneRenderer::create(const Desc& desc, SceneRenderer& out, std::string& er
         error = "null NVRHI device";
         return false;
     }
-    if (!desc.sceneSize.valid())
-    {
-        error = "invalid scene size";
-        return false;
-    }
     auto& device = out.m_Device = desc.device;
+    // The scene size may be undefined (an engine that starts windowless
+    // has no display wall until a show or display.add defines it): the
+    // scene targets are then created by the first valid setSceneSize.
     out.m_SceneSize = desc.sceneSize;
 
     // --- Sampler ----------------------------------------------------------------
@@ -231,7 +229,11 @@ bool SceneRenderer::create(const Desc& desc, SceneRenderer& out, std::string& er
     }
 
     // --- Scene targets --------------------------------------------------------------------------------
-    if (!out.createSceneTargets(error))
+    // Skipped while the scene size is undefined (windowless start): the
+    // first valid setSceneSize creates them. recordFrame cannot run before
+    // that (it needs an enabled display, which implies a valid wall size,
+    // and renderFrame applies the snapshot's scene size first).
+    if (out.m_SceneSize.valid() && !out.createSceneTargets(error))
     {
         return false;
     }

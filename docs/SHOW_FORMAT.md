@@ -287,6 +287,13 @@ without a `displays` section leaves the engine's display wall untouched
 (the field is omitted from saved files for such shows, so loading an old
 file is non-breaking — format version stays `1`).
 
+A playback engine started without display flags (`--display`,
+`--width`, `--height`) is **windowless**: it has no display wall and no
+output windows until a loaded show (or `display.add`) defines displays —
+the wall and its windows are created as the reconciliation above runs.
+A show loaded into such an engine that carries a `displays` section is
+therefore what brings the engine's output up.
+
 Live-only operations (e.g. moving a display to a different system from
 the settings dialog) apply to the running engine but not to the document;
 the next show push re-applies the wall from this list.

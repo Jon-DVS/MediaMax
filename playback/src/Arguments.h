@@ -9,8 +9,10 @@
 //                     [--self-test-seconds <n>]
 //
 // --display may be repeated; each occurrence describes one physical output
-// (the "wall"). Without --display the app uses a single display of
-// --width x --height at (0,0).
+// (the "wall"). Without --display/--width/--height the app starts windowless
+// and waits for a show whose "displays" section defines the wall (or for
+// display.add commands); an explicit --width/--height creates a single
+// display of that size at (0,0).
 
 #include <cstdint>
 #include <string>
@@ -36,6 +38,11 @@ struct AppArgs
     std::vector<DisplaySpec> displays;
     int width = 1920;
     int height = 1080;
+    // True when --display, --width or --height was given explicitly: only
+    // then does the engine create startup windows. Otherwise it starts
+    // windowless and waits for display information (a show's "displays"
+    // section or display.add).
+    bool explicitWindow = false;
 
     bool selfTest = false;
     std::string selfTestOut = "selftest.ppm";

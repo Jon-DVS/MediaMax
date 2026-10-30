@@ -292,6 +292,16 @@ commit in the remote history is individually addressable by its version.
   frame loop); the self-test builds its own renderer. `setSceneSize()` on
   an uncreated renderer is a null dereference (only `recordFrame()` is
   null-guarded).
+- **The engine starts windowless without display flags.** No
+  `--display`/`--width`/`--height` ⇒ zero displays/windows until a show
+  (or `display.add`) defines them; `SceneRenderer` is created with an
+  undefined scene size and its scene targets wait for the first valid
+  `setSceneSize` (so `create()` must tolerate an invalid `sceneSize`, and
+  `recordFrame` must never run without them — the `presenting.empty()`
+  early-out in `renderFrame` is the guard). `VulkanContext::initDevice`
+  enables `VK_KHR_swapchain` whenever the driver offers it, NOT only when
+  a surface exists at init time: `vkCreateSwapchainKHR` for a
+  display added at runtime is a NULL driver pointer (crash) without it.
 - **Silent crash diagnosis (no console, no debugger attached):** the
   Windows Application event log records every crash —
   `Get-WinEvent -LogName Application` (provider "Application Error") gives

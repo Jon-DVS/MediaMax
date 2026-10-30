@@ -1,6 +1,7 @@
 #include "mediamax/render/VulkanContext.h"
 
 #include <algorithm>
+#include <cstring>
 
 #include "mediamax/util/Logger.h"
 
@@ -247,9 +248,32 @@ bool VulkanContext::initDevice(std::string& error)
         return false;
     }
 
+    // The swapchain device extension is enabled whenever the driver offers
+    // it - not only when a surface already exists: displays (windows,
+    // surfaces and their swapchains) can be created after device
+    // initialization, when a show's display wall or a display.add arrives
+    // at an engine that started windowless.
     if (m_HasSurface)
     {
         m_DeviceExtensions.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+    }
+    else
+    {
+        std::uint32_t extCount = 0;
+        vkEnumerateDeviceExtensionProperties(m_PhysicalDevice, nullptr, &extCount, nullptr);
+        if (extCount > 0)
+        {
+            std::vector<VkExtensionProperties> exts(extCount);
+            vkEnumerateDeviceExtensionProperties(m_PhysicalDevice, nullptr, &extCount, exts.data());
+            for (const auto& e : exts)
+            {
+                if (std::strcmp(e.extensionName, VK_KHR_SWAPCHAIN_EXTENSION_NAME) == 0)
+                {
+                    m_DeviceExtensions.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+                    break;
+                }
+            }
+        }
     }
 
     const float priority = 1.f;

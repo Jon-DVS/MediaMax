@@ -98,5 +98,20 @@
   "cues": [
     { "time": 0.0,  "name": "start", "action": { "type": "playScene", "scene": 1 } },
     { "time": 12.0, "name": "end",   "action": { "type": "stop" } }
+  ],
+  "displays": [
+    {
+      "id": 1,
+      "name": "Display 1",
+      "x": 0,
+      "y": 0,
+      "width": 1920,
+      "height": 1080,
+      "brightness": 1.0,
+      "enabled": true,
+      "alwaysOnTop": true,
+      "statusOverlay": false,
+      "vsync": true
+    }
   ]
 }

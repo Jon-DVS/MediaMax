@@ -142,9 +142,12 @@ mediamax_playback [options]
   --port <n>             Control server port (default 47600)
   --show <file.json>     Show file to load at startup
   --system-name <name>   Name reported to the control interface
-  --width <n>            Default display width (default 1920)
-  --height <n>           Default display height (default 1080)
+  --width <n>            Startup display width (default 1920)
+  --height <n>           Startup display height (default 1080)
   --display WxH@X+Y      One physical output; repeat for a wall
+                         (without any of these the engine starts
+                          windowless and waits for a show that
+                          carries display information)
   --self-test            Run headless, render offscreen, write a PPM
   --self-test-out <f>    Self-test output PPM (default selftest.ppm)
   --self-test-seconds <n> Self-test duration in seconds (default 3)
@@ -156,6 +159,12 @@ A two-panel wall, 1920x1080 each:
 mediamax_playback --display 1920x1080@0+0 --display 1920x1080@1920+0 \
                   --system-name "Main Wall" --show show.json
 ```
+
+Without `--display`/`--width`/`--height` the engine starts **windowless** and
+waits for a show whose `displays` section defines the wall (shows loaded via
+the control interface carry it - see the show file format); the display
+windows are created as the wall is reconciled. A startup show auto-plays;
+without one the playback stays stopped until `playback.play`.
 
 ## Example shows
 
