@@ -18,14 +18,14 @@
           "name": "BG",
           "mediaId": 0,
           "color": { "r": 0.0, "g": 0.0, "b": 0.0, "a": 1.0 },
-          "transform": { "x": 960.0, "y": 540.0, "scaleX": 1920.0, "scaleY": 1080.0 },
+          "transform": { "x": 960.0, "y": 540.0, "scaleX": 1920.0, "scaleY": 1080.0, "anchorX": 0.5, "anchorY": 0.5 },
           "zIndex": 0
         },
         {
           "id": 12,
           "name": "SMPTE bars (static, the blend target)",
           "mediaId": 1,
-          "transform": { "x": 960.0, "y": 540.0 },
+          "transform": { "x": 960.0, "y": 540.0, "anchorX": 0.5, "anchorY": 0.5 },
           "zIndex": 1
         },
         {
@@ -34,7 +34,7 @@
           "mediaId": 2,
           "blend": "add",
           "opacity": 0.9,
-          "transform": { "x": 960.0, "y": 540.0 },
+          "transform": { "x": 960.0, "y": 540.0, "anchorX": 0.5, "anchorY": 0.5 },
           "zIndex": 2
         }
       ]

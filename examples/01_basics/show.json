@@ -19,7 +19,7 @@
           "name": "BG",
           "mediaId": 0,
           "color": { "r": 0.05, "g": 0.07, "b": 0.15, "a": 1.0 },
-          "transform": { "x": 960.0, "y": 540.0, "scaleX": 1920.0, "scaleY": 1080.0 },
+          "transform": { "x": 960.0, "y": 540.0, "scaleX": 1920.0, "scaleY": 1080.0, "anchorX": 0.5, "anchorY": 0.5 },
           "zIndex": 0
         },
         {
@@ -27,14 +27,14 @@
           "name": "Bars (loops: 4s clip in a 6s scene)",
           "mediaId": 1,
           "loop": true,
-          "transform": { "x": 960.0, "y": 540.0 },
+          "transform": { "x": 960.0, "y": 540.0, "anchorX": 0.5, "anchorY": 0.5 },
           "zIndex": 1
         },
         {
           "id": 13,
           "name": "Still logo (png, half-HD 480x270, zIndex 2 = on top)",
           "mediaId": 3,
-          "transform": { "x": 300.0, "y": 200.0, "scaleX": 0.25, "scaleY": 0.25 },
+          "transform": { "x": 300.0, "y": 200.0, "scaleX": 0.25, "scaleY": 0.25, "anchorX": 0.5, "anchorY": 0.5 },
           "zIndex": 2
         }
       ]
@@ -48,7 +48,7 @@
           "name": "BG",
           "mediaId": 0,
           "color": { "r": 0.0, "g": 0.0, "b": 0.0, "a": 1.0 },
-          "transform": { "x": 960.0, "y": 540.0, "scaleX": 1920.0, "scaleY": 1080.0 },
+          "transform": { "x": 960.0, "y": 540.0, "scaleX": 1920.0, "scaleY": 1080.0, "anchorX": 0.5, "anchorY": 0.5 },
           "zIndex": 0
         },
         {
@@ -57,7 +57,7 @@
           "mediaId": 2,
           "inPoint": 0.5,
           "rate": 0.75,
-          "transform": { "x": 960.0, "y": 540.0 },
+          "transform": { "x": 960.0, "y": 540.0, "anchorX": 0.5, "anchorY": 0.5 },
           "zIndex": 1
         }
       ]
@@ -71,14 +71,14 @@
           "name": "BG",
           "mediaId": 0,
           "color": { "r": 0.25, "g": 0.05, "b": 0.3, "a": 1.0 },
-          "transform": { "x": 960.0, "y": 540.0, "scaleX": 1920.0, "scaleY": 1080.0 },
+          "transform": { "x": 960.0, "y": 540.0, "scaleX": 1920.0, "scaleY": 1080.0, "anchorX": 0.5, "anchorY": 0.5 },
           "zIndex": 0
         },
         {
           "id": 32,
           "name": "Logo (half scale = 960x540)",
           "mediaId": 3,
-          "transform": { "x": 960.0, "y": 540.0, "scaleX": 0.5, "scaleY": 0.5 },
+          "transform": { "x": 960.0, "y": 540.0, "scaleX": 0.5, "scaleY": 0.5, "anchorX": 0.5, "anchorY": 0.5 },
           "zIndex": 1
         }
       ]

@@ -19,14 +19,14 @@
           "name": "BG",
           "mediaId": 0,
           "color": { "r": 0.03, "g": 0.04, "b": 0.08, "a": 1.0 },
-          "transform": { "x": 960.0, "y": 540.0, "scaleX": 1920.0, "scaleY": 1080.0 },
+          "transform": { "x": 960.0, "y": 540.0, "scaleX": 1920.0, "scaleY": 1080.0, "anchorX": 0.5, "anchorY": 0.5 },
           "zIndex": 0
         },
         {
           "id": 12,
           "name": "Orbit (x/y linear tracks = diamond path)",
           "mediaId": 3,
-          "transform": { "x": 960.0, "y": 300.0, "scaleX": 0.25, "scaleY": 0.25 },
+          "transform": { "x": 960.0, "y": 300.0, "scaleX": 0.25, "scaleY": 0.25, "anchorX": 0.5, "anchorY": 0.5 },
           "tracks": {
             "x": [
               { "time": 0.0,  "value": 960.0,  "interpolation": "linear" },
@@ -50,7 +50,7 @@
           "name": "Spinner (rotation track, one turn per 12s)",
           "mediaId": 0,
           "color": { "r": 0.9, "g": 0.3, "b": 0.1, "a": 0.85 },
-          "transform": { "x": 960.0, "y": 540.0, "scaleX": 260.0, "scaleY": 180.0 },
+          "transform": { "x": 960.0, "y": 540.0, "scaleX": 260.0, "scaleY": 180.0, "anchorX": 0.5, "anchorY": 0.5 },
           "tracks": {
             "rotation": [
               { "time": 0.0,  "value": 0.0,      "interpolation": "linear" },
@@ -64,7 +64,7 @@
           "id": 14,
           "name": "Pulse (scale track + step opacity track)",
           "mediaId": 2,
-          "transform": { "x": 960.0, "y": 540.0, "scaleX": 0.5, "scaleY": 0.5 },
+          "transform": { "x": 960.0, "y": 540.0, "scaleX": 0.5, "scaleY": 0.5, "anchorX": 0.5, "anchorY": 0.5 },
           "tracks": {
             "scale": [
               { "time": 0.0, "value": 1.0, "interpolation": "linear" },
@@ -83,7 +83,7 @@
           "id": 15,
           "name": "Fade in (opacity track 0 -> 1 over 3s)",
           "mediaId": 1,
-          "transform": { "x": 300.0, "y": 800.0, "scaleX": 0.25, "scaleY": 0.25 },
+          "transform": { "x": 300.0, "y": 800.0, "scaleX": 0.25, "scaleY": 0.25, "anchorX": 0.5, "anchorY": 0.5 },
           "tracks": {
             "opacity": [
               { "time": 0.0, "value": 0.0, "interpolation": "linear" },

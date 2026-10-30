@@ -18,7 +18,7 @@
           "name": "BG",
           "mediaId": 0,
           "color": { "r": 0.02, "g": 0.1, "b": 0.1, "a": 1.0 },
-          "transform": { "x": 960.0, "y": 540.0, "scaleX": 1920.0, "scaleY": 1080.0 },
+          "transform": { "x": 960.0, "y": 540.0, "scaleX": 1920.0, "scaleY": 1080.0, "anchorX": 0.5, "anchorY": 0.5 },
           "zIndex": 0
         },
         {
@@ -26,14 +26,14 @@
           "name": "Video (faded at 2-4s, jumped at 8.5s)",
           "mediaId": 1,
           "loop": true,
-          "transform": { "x": 960.0, "y": 540.0 },
+          "transform": { "x": 960.0, "y": 540.0, "anchorX": 0.5, "anchorY": 0.5 },
           "zIndex": 1
         },
         {
           "id": 13,
           "name": "Logo (hidden 5.5-7s, half-HD 480x270)",
           "mediaId": 2,
-          "transform": { "x": 1500.0, "y": 250.0, "scaleX": 0.25, "scaleY": 0.25 },
+          "transform": { "x": 1500.0, "y": 250.0, "scaleX": 0.25, "scaleY": 0.25, "anchorX": 0.5, "anchorY": 0.5 },
           "zIndex": 2
         }
       ]
@@ -47,7 +47,7 @@
           "name": "BG (red - you only see it if you seek into 10-16s manually)",
           "mediaId": 0,
           "color": { "r": 0.5, "g": 0.05, "b": 0.05, "a": 1.0 },
-          "transform": { "x": 960.0, "y": 540.0, "scaleX": 1920.0, "scaleY": 1080.0 },
+          "transform": { "x": 960.0, "y": 540.0, "scaleX": 1920.0, "scaleY": 1080.0, "anchorX": 0.5, "anchorY": 0.5 },
           "zIndex": 0
         }
       ]
@@ -61,14 +61,14 @@
           "name": "BG",
           "mediaId": 0,
           "color": { "r": 0.03, "g": 0.25, "b": 0.08, "a": 1.0 },
-          "transform": { "x": 960.0, "y": 540.0, "scaleX": 1920.0, "scaleY": 1080.0 },
+          "transform": { "x": 960.0, "y": 540.0, "scaleX": 1920.0, "scaleY": 1080.0, "anchorX": 0.5, "anchorY": 0.5 },
           "zIndex": 0
         },
         {
           "id": 32,
           "name": "Logo (half scale, centered)",
           "mediaId": 2,
-          "transform": { "x": 960.0, "y": 540.0, "scaleX": 0.5, "scaleY": 0.5 },
+          "transform": { "x": 960.0, "y": 540.0, "scaleX": 0.5, "scaleY": 0.5, "anchorX": 0.5, "anchorY": 0.5 },
           "zIndex": 1
         }
       ]

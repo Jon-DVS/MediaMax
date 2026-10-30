@@ -17,7 +17,7 @@
           "name": "BG",
           "mediaId": 0,
           "color": { "r": 0.02, "g": 0.02, "b": 0.04, "a": 1.0 },
-          "transform": { "x": 960.0, "y": 540.0, "scaleX": 1920.0, "scaleY": 1080.0 },
+          "transform": { "x": 960.0, "y": 540.0, "scaleX": 1920.0, "scaleY": 1080.0, "anchorX": 0.5, "anchorY": 0.5 },
           "zIndex": 0
         },
         {
@@ -27,7 +27,7 @@
           "inPoint": 1.0,
           "outPoint": 6.0,
           "loop": true,
-          "transform": { "x": 960.0, "y": 540.0 },
+          "transform": { "x": 960.0, "y": 540.0, "anchorX": 0.5, "anchorY": 0.5 },
           "tracks": {
             "opacity": [
               { "time": 0.0, "value": 1.0, "interpolation": "linear" },

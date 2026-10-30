@@ -19,7 +19,7 @@
           "name": "BG (spans the whole wall: 3840x1080)",
           "mediaId": 0,
           "color": { "r": 0.04, "g": 0.05, "b": 0.1, "a": 1.0 },
-          "transform": { "x": 1920.0, "y": 540.0, "scaleX": 3840.0, "scaleY": 1080.0 },
+          "transform": { "x": 1920.0, "y": 540.0, "scaleX": 3840.0, "scaleY": 1080.0, "anchorX": 0.5, "anchorY": 0.5 },
           "zIndex": 0
         },
         {
@@ -27,21 +27,21 @@
           "name": "Video (centered on the LEFT display)",
           "mediaId": 1,
           "loop": true,
-          "transform": { "x": 960.0, "y": 540.0 },
+          "transform": { "x": 960.0, "y": 540.0, "anchorX": 0.5, "anchorY": 0.5 },
           "zIndex": 1
         },
         {
           "id": 13,
           "name": "Logo (centered on the RIGHT display, half scale)",
           "mediaId": 2,
-          "transform": { "x": 2880.0, "y": 540.0, "scaleX": 0.5, "scaleY": 0.5 },
+          "transform": { "x": 2880.0, "y": 540.0, "scaleX": 0.5, "scaleY": 0.5, "anchorX": 0.5, "anchorY": 0.5 },
           "zIndex": 1
         },
         {
           "id": 14,
           "name": "Strip (3840px wide - crosses BOTH displays)",
           "mediaId": 3,
-          "transform": { "x": 1920.0, "y": 990.0 },
+          "transform": { "x": 1920.0, "y": 990.0, "anchorX": 0.5, "anchorY": 0.5 },
           "zIndex": 2
         }
       ]
@@ -55,14 +55,14 @@
           "name": "BG",
           "mediaId": 0,
           "color": { "r": 0.04, "g": 0.05, "b": 0.1, "a": 1.0 },
-          "transform": { "x": 1920.0, "y": 540.0, "scaleX": 3840.0, "scaleY": 1080.0 },
+          "transform": { "x": 1920.0, "y": 540.0, "scaleX": 3840.0, "scaleY": 1080.0, "anchorX": 0.5, "anchorY": 0.5 },
           "zIndex": 0
         },
         {
           "id": 22,
           "name": "Logo (now on the LEFT display, half scale)",
           "mediaId": 2,
-          "transform": { "x": 960.0, "y": 540.0, "scaleX": 0.5, "scaleY": 0.5 },
+          "transform": { "x": 960.0, "y": 540.0, "scaleX": 0.5, "scaleY": 0.5, "anchorX": 0.5, "anchorY": 0.5 },
           "zIndex": 1
         },
         {
@@ -70,14 +70,14 @@
           "name": "Video (now on the RIGHT display)",
           "mediaId": 1,
           "loop": true,
-          "transform": { "x": 2880.0, "y": 540.0 },
+          "transform": { "x": 2880.0, "y": 540.0, "anchorX": 0.5, "anchorY": 0.5 },
           "zIndex": 1
         },
         {
           "id": 24,
           "name": "Strip (still spans both)",
           "mediaId": 3,
-          "transform": { "x": 1920.0, "y": 990.0 },
+          "transform": { "x": 1920.0, "y": 990.0, "anchorX": 0.5, "anchorY": 0.5 },
           "zIndex": 2
         }
       ]

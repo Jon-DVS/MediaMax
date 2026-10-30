@@ -40,6 +40,10 @@ displays), `show.info`, `scene.list`, `playback.play`, `playback.pause`,
 `scene.set {"index":0}` (0-based), `layer.set` / `layer.clear`,
 `media.list`, `display.list`, `quit`.
 
+Every layer transform in the example shows sets `anchorX`/`anchorY` to
+0.5 explicitly: the shows were laid out around center-anchored layers,
+and the engine's default layer anchor is the media's top-left (0,0).
+
 ## The examples
 
 | Folder | Demonstrates |
