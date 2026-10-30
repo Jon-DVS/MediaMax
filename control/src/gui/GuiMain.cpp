@@ -1,5 +1,6 @@
 #include "gui/GuiMain.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -35,6 +36,22 @@ namespace
 void glfwErrorCallback(int error, const char* description)
 {
     std::cerr << "GLFW error " << error << ": " << description << std::endl;
+}
+
+// OS file drop: GLFW's drop callback is a plain C function (no user pointer),
+// and the app has exactly one window, so a file-scope queue is the channel
+// between the callback and the per-frame payload emission in
+// GuiRuntime::renderFrame. The dropped paths wait there until a frame
+// publishes them as an external drag payload; the dockspace's drop target
+// (ControlGuiApp::renderDockspace) consumes them on delivery.
+std::vector<std::string> g_PendingDropPaths;
+void fileDropCallback(GLFWwindow*, int count, const char** paths)
+{
+    g_PendingDropPaths.clear();
+    for (int i = 0; i < count; ++i)
+    {
+        g_PendingDropPaths.emplace_back(paths[i]);
+    }
 }
 
 // The UI is dark-themed; opt the window frame into dark mode so it does not
@@ -210,6 +227,29 @@ bool GuiRuntime::renderFrame()
         preNewFrameHook(); // self-test key injection (see the member)
     }
     ImGui::NewFrame();
+    // OS file drop delivered while polling this frame: publish the paths as
+    // an EXTERNAL drag payload (this ImGui build has no OS file-drop API, so
+    // the GLFW callback and the dockspace's drop target meet through the
+    // classic drag/drop payload mechanism). An extern payload is consumed on
+    // the frame AFTER the one it was emitted in (AcceptDragDropPayload flips
+    // Delivery when the source's frame count is older than the current
+    // frame and the target already accepted last frame): emit it exactly
+    // once, here - re-emitting every frame would keep the source frame count
+    // current and the payload would never deliver.
+    if (!g_PendingDropPaths.empty())
+    {
+        std::string blob;
+        for (const auto& path : g_PendingDropPaths)
+        {
+            blob += path;
+            blob += '\0';
+        }
+        g_PendingDropPaths.clear();
+        ImGui::BeginDragDropSource(
+            ImGuiDragDropFlags_SourceExtern | ImGuiDragDropFlags_SourceNoPreviewTooltip);
+        ImGui::SetDragDropPayload("MEDIMAX_FILEPATHS", blob.data(), blob.size());
+        ImGui::EndDragDropSource();
+    }
     m_App->frame();
     ImGui::Render();
 
@@ -271,6 +311,9 @@ int runGui()
         glfwTerminate();
         return 1;
     }
+    // OS file drop: files dropped on the window add media to the show (the
+    // callback queues the paths; renderFrame publishes them as a payload).
+    glfwSetDropCallback(window, fileDropCallback);
 
     ControlGuiApp app;
     GuiRuntime runtime;
@@ -314,7 +357,10 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
     }
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
     glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE); // hidden window
-    GLFWwindow* window = glfwCreateWindow(1280, 720, "MediaMax Control (self-test)", nullptr,
+    // 1080p hidden surface: the show editor's layer details (transform +
+    // appearance + the keyframes submenu) need the full height to render
+    // unclipped, which the self-test's real-UI clicks require.
+    GLFWwindow* window = glfwCreateWindow(1280, 1080, "MediaMax Control (self-test)", nullptr,
                                           nullptr);
     if (!window)
     {
@@ -322,6 +368,9 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
         glfwTerminate();
         return 1;
     }
+    // Same OS file drop plumbing as the windowed GUI (the hidden window
+    // never receives drops, but the frame path stays identical).
+    glfwSetDropCallback(window, fileDropCallback);
 
     // The self-test UI starts with no systems (deterministic; no side
     // effects on real systems).
@@ -558,8 +607,12 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
         const bool viewOk = infoOk &&
                             std::abs(aspect - 1920.0f / 1080.0f) < 1e-3f && // 16:9 pad
                             zoom == 1.0f && pan.x == 0.0f && pan.y == 0.0f;
+        int winW = 0;
+        int winH = 0;
+        glfwGetFramebufferSize(window, &winW, &winH);
         const bool nodeOk = app.testWarpNodeScreenPos(0, nodeX, nodeY) && nodeX > 0.0f &&
-                            nodeY > 0.0f && nodeX < 1280.0f && nodeY < 720.0f;
+                            nodeY > 0.0f && nodeX < static_cast<float>(winW) &&
+                            nodeY < static_cast<float>(winH);
         const bool resetOk = app.testWarpResetButtonPos(resetX, resetY) && resetX > 0.0f &&
                              resetY > 0.0f;
         const bool padOk = shown && infoOk && viewOk && nodeOk && resetOk;
@@ -612,6 +665,183 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
         modalOk = modalOk && svStateOk;
         modalReport += std::string(svStateOk ? "PASS " : "FAIL ") +
                        "show view mode/selection state\n";
+    }
+
+    // 3e) Show editor rework: stable tree ids (renaming a layer must not
+    //     fold its node), the layer reorder (list order = compositing order
+    //     for equal zIndex), the keyframes submenu (folded by default; add /
+    //     remove must keep the headers open), the cue action dropdown, and
+    //     the drop-to-add media path.
+    {
+        auto frame = [&] {
+            glfwPollEvents();
+            runtime.renderFrame();
+        };
+        // Three frames: move, press, release. The mouse move must land on a
+        // SEPARATE frame before the press: tab items use the AllowOverlap
+        // hit-test (ItemHoverable), which only accepts a click if the item
+        // was already hovered on the previous frame.
+        auto clickAt = [&](float sx, float sy) {
+            runtime.preNewFrameHook = [sx, sy] {
+                ImGui::GetIO().AddMousePosEvent(sx, sy);
+            };
+            glfwPollEvents();
+            runtime.renderFrame();
+            runtime.preNewFrameHook = [sx, sy] {
+                ImGui::GetIO().AddMousePosEvent(sx, sy);
+                ImGui::GetIO().AddMouseButtonEvent(0, true);
+            };
+            glfwPollEvents();
+            runtime.renderFrame();
+            runtime.preNewFrameHook = [sx, sy] {
+                ImGui::GetIO().AddMousePosEvent(sx, sy);
+                ImGui::GetIO().AddMouseButtonEvent(0, false);
+            };
+            glfwPollEvents();
+            runtime.renderFrame();
+            runtime.preNewFrameHook = nullptr;
+        };
+        float x = 0.f;
+        float y = 0.f;
+        float w = 0.f;
+        float h = 0.f;
+        app.testEnsureEditorSceneLayer();
+        // The Scenes tab, through the real tab button.
+        const bool tabOk = app.testEditorItemRect(kInvalidId, "tab-scenes", x, y, w, h);
+        if (tabOk)
+        {
+            clickAt(x + w * 0.5f, y + h * 0.5f);
+        }
+        frame();
+        // Layer node: open it, rename the layer (the same model edit the
+        // Name input performs), and the node must stay open - a label-
+        // derived tree id folded it on every keystroke.
+        bool renameOk = false;
+        bool nodeOpen = true;
+        if (tabOk && app.testEditorItemRect(10, "node", x, y, w, h))
+        {
+            clickAt(x + w * 0.25f, y + h * 0.5f); // over the label, not the row's buttons
+            app.testEditorItemOpen(10, "node", nodeOpen);
+            if (nodeOpen && app.testSetLayerName(10, "renamed-red"))
+            {
+                frame();
+                app.testEditorItemOpen(10, "node", nodeOpen);
+                app.testSetLayerName(10, "red");
+                renameOk = nodeOpen;
+            }
+        }
+        modalOk = modalOk && renameOk;
+        modalReport += std::string(renameOk ? "PASS " : "FAIL ") +
+                       "editor: layer node stays open when the layer is renamed\n";
+        // Layer reorder: move layer 10 down one slot and back up, through
+        // the same swap the Scenes tab's Up/Down buttons run. The neighbor
+        // is whatever the list holds (the live self-test has a media layer
+        // between 10 and 11), so the check is "exactly one slot down, then
+        // back to the original order" - and the original order must always
+        // be restored, or the later checks (keyframes, cue defaults) run
+        // against a half-moved list.
+        bool reorderOk = false;
+        {
+            const auto scene1Ids = [&] {
+                std::vector<Id> ids;
+                for (const auto& [sid, lid] : app.testShowSceneLayers())
+                {
+                    if (sid == 1)
+                    {
+                        ids.push_back(lid);
+                    }
+                }
+                return ids;
+            };
+            const auto before = scene1Ids();
+            const auto it10 = std::find(before.begin(), before.end(), 10);
+            if (it10 != before.end() &&
+                app.testMoveLayer(0, static_cast<int>(it10 - before.begin()), false))
+            {
+                const auto moved = scene1Ids();
+                const auto m10 = std::find(moved.begin(), moved.end(), 10);
+                const bool oneSlotDown = m10 != moved.end() &&
+                                         static_cast<int>(m10 - moved.begin()) ==
+                                             static_cast<int>(it10 - before.begin()) + 1;
+                if (oneSlotDown &&
+                    app.testMoveLayer(0, static_cast<int>(m10 - moved.begin()), true))
+                {
+                    reorderOk = scene1Ids() == before;
+                }
+            }
+        }
+        modalOk = modalOk && reorderOk;
+        modalReport += std::string(reorderOk ? "PASS " : "FAIL ") +
+                       "editor: layers can be reordered within the list\n";
+        // Keyframes: one submenu per layer, folded by default; adding and
+        // removing an entry must keep the headers open - a count-derived
+        // header id re-folded them on every change ("cannot add or remove").
+        bool kfOk = false;
+        bool kfOpen = true;
+        if (app.testEditorItemOpen(10, "keyframes", kfOpen))
+        {
+            kfOk = !kfOpen; // folded by default
+        }
+        if (kfOk && app.testEditorItemRect(10, "keyframes", x, y, w, h))
+        {
+            clickAt(x + w * 0.5f, y + h * 0.5f);
+            app.testEditorItemOpen(10, "keyframes", kfOpen);
+            kfOk = kfOpen;
+        }
+        if (kfOk && app.testEditorItemRect(10, "opacity", x, y, w, h))
+        {
+            clickAt(x + w * 0.5f, y + h * 0.5f);
+            app.testEditorItemOpen(10, "opacity", kfOpen);
+            kfOk = kfOpen;
+        }
+        if (kfOk && app.testEditorItemRect(10, "addopacity", x, y, w, h))
+        {
+            clickAt(x + w * 0.5f, y + h * 0.5f); // the "Add keyframe" button
+            frame(); // let the new keyframe row render (its remove button)
+            kfOk = app.testLayerTrackKeyCount(10, "opacity") == 1;
+            app.testEditorItemOpen(10, "opacity", kfOpen);
+            kfOk = kfOk && kfOpen; // the add must not re-fold the track
+        }
+        if (kfOk && app.testEditorItemRect(10, "rmopacity", x, y, w, h))
+        {
+            clickAt(x + w * 0.5f, y + h * 0.5f); // the first keyframe's "x" button
+            kfOk = app.testLayerTrackKeyCount(10, "opacity") == 0;
+            app.testEditorItemOpen(10, "keyframes", kfOpen);
+            kfOk = kfOk && kfOpen; // the remove must not re-fold the submenu
+        }
+        modalOk = modalOk && kfOk;
+        modalReport += std::string(kfOk ? "PASS " : "FAIL ") +
+                       "editor: keyframes submenu folds by default; add/remove keeps it open\n";
+        // Cue action dropdown: switching the selection converts the action
+        // to the new type with that type's defaults (scene / layer picked
+        // from the show).
+        bool cueOk = app.testCueActionType(0) == "playScene";
+        cueOk = cueOk && app.testSetCueAction(0, 4) &&
+                app.testCueActionType(0) == "setLayerOpacity" && app.testCueActionLayer(0) == 10;
+        cueOk = cueOk && app.testSetCueAction(0, 1) && app.testCueActionType(0) == "stop";
+        cueOk = cueOk && app.testSetCueAction(0, 0) && app.testCueActionType(0) == "playScene";
+        modalOk = modalOk && cueOk;
+        modalReport += std::string(cueOk ? "PASS " : "FAIL ") +
+                       "editor: cue action dropdown switches the action (defaults follow)\n";
+        // Drop-to-add media: the exact production path the window's OS file
+        // drop target runs (dedup by path, first occurrence wins).
+        const int added =
+            app.testAddDroppedFiles({"selftest-drop-a.mp4", "selftest-drop-a.mp4",
+                                     "selftest-drop-b.png"});
+        const auto mediaPaths = app.testShowMediaPaths();
+        auto hasPath = [&mediaPaths](const std::string& p) {
+            return std::find(mediaPaths.begin(), mediaPaths.end(), p) != mediaPaths.end();
+        };
+        bool dropOk = added == 2 && hasPath("selftest-drop-a.mp4") && hasPath("selftest-drop-b.png");
+        if (dropOk && !mediaPaths.empty())
+        {
+            // Re-dropping a path the show already references adds nothing
+            // (live: the seeded BMP; headless: drop-a from above).
+            dropOk = app.testAddDroppedFiles({mediaPaths.front()}) == 0;
+        }
+        modalOk = modalOk && dropOk;
+        modalReport += std::string(dropOk ? "PASS " : "FAIL ") +
+                       "editor: dropped files add media references (dedup by path)\n";
     }
 
     // 4) Auto-push (issue 8): the editor edit from step 1 must have reached
@@ -1087,9 +1317,15 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
 
                 // 8) Dragging the selected layer moves the engine's layer
                 //    position (layer.set, read back from frame.state x/y).
+                //    The press lands inset from the quad corner: Dear ImGui
+                //    floors mouse positions (ImFloor in UpdateMouseInputs),
+                //    so a press projected exactly at (layerX0, layerY0) can
+                //    unproject up to one screen pixel outside the quad and
+                //    hit nothing.
                 app.testShowViewSetMode("layer");
-                app.testShowViewProject(static_cast<float>(layerX0),
-                                        static_cast<float>(layerY0), sx, sy);
+                const float inset = 4.0f / scale;
+                app.testShowViewProject(static_cast<float>(layerX0) + inset,
+                                        static_cast<float>(layerY0) + inset, sx, sy);
                 dragAt(sx, sy, dragDx, dragDy);
                 nlohmann::json fs2;
                 bool dragLayerOk = false;

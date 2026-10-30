@@ -23,8 +23,8 @@ struct Transform2D
     float rotation = 0.f; // radians, clockwise positive
     float scaleX = 1.f;
     float scaleY = 1.f;
-    float anchorX = 0.5f; // in media UV (0..1)
-    float anchorY = 0.5f;
+    float anchorX = 0.f; // in media UV (0..1); default = the media's top-left
+    float anchorY = 0.f;
 
     static Transform2D identity()
     {

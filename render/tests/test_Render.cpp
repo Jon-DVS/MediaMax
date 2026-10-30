@@ -176,6 +176,9 @@ SceneRenderer::LayerDraw colorLayer(Color4 c, int zIndex = 0)
     d.color = c;
     d.opacity = 1.f;
     d.transform = Transform2D{};
+    // Explicit center anchor (the struct default is the media's top-left).
+    d.transform.anchorX = 0.5f;
+    d.transform.anchorY = 0.5f;
     d.transform.x = 128.f; // anchor at the scene center
     d.transform.y = 128.f;
     d.transform.scaleX = 256.f / 256.f;
@@ -193,6 +196,9 @@ SceneRenderer::LayerDraw partialColorLayer(Color4 c, int size)
     d.color = c;
     d.opacity = 1.f;
     d.transform = Transform2D{};
+    // Explicit center anchor (the struct default is the media's top-left).
+    d.transform.anchorX = 0.5f;
+    d.transform.anchorY = 0.5f;
     d.transform.x = 128.f;
     d.transform.y = 128.f;
     d.mediaSize = Size2i{size, size};
@@ -760,11 +766,13 @@ TEST_CASE("Display pass blends the status overlay on top")
 TEST_CASE("Layer transform positions the quad")
 {
     runGpuTest("transform", [](Gpu& g) {
-        // A 128x128 media quad placed with its anchor at (64,64): covers
-        // (0..128, 0..128) of the scene.
+        // A 128x128 media quad placed with its (explicit center) anchor at
+        // (64,64): covers (0..128, 0..128) of the scene.
         SceneRenderer::FrameInput frame;
         auto d = colorLayer(Color4{1.f, 0.f, 0.f, 1.f});
         d.transform = Transform2D{};
+        d.transform.anchorX = 0.5f;
+        d.transform.anchorY = 0.5f;
         d.transform.x = 64.f;
         d.transform.y = 64.f;
         d.mediaSize = Size2i{128, 128};

@@ -10,14 +10,19 @@ using namespace mediamax;
 TEST_SUITE("Math")
 {
 
-TEST_CASE("Transform: identity maps media center to position")
+TEST_CASE("Transform: identity maps media top-left to position (default anchor 0,0)")
 {
     Transform2D t = Transform2D::identity();
     t.x = 100.f;
     t.y = 200.f;
-    const auto [px, py] = t.toOutputSpace(0.5f, 0.5f, Size2i{320, 180});
+    // The default anchor is the media's top-left: it lands on (x, y).
+    const auto [px, py] = t.toOutputSpace(0.f, 0.f, Size2i{320, 180});
     CHECK(px == doctest::Approx(100.f));
     CHECK(py == doctest::Approx(200.f));
+    // The media center is offset by half the media size.
+    const auto [cx, cy] = t.toOutputSpace(0.5f, 0.5f, Size2i{320, 180});
+    CHECK(cx == doctest::Approx(260.f));
+    CHECK(cy == doctest::Approx(290.f));
 }
 
 TEST_CASE("Transform: scaling maps corners correctly")
@@ -27,9 +32,13 @@ TEST_CASE("Transform: scaling maps corners correctly")
     t.y = 0.f;
     t.scaleX = 2.f;
     t.scaleY = 2.f;
+    // Scale about the media center (the test is about scaling, not the
+    // anchor default): set the anchor explicitly.
+    t.anchorX = 0.5f;
+    t.anchorY = 0.5f;
     const Size2i media{100, 50};
 
-    // Media center stays at position (anchor default 0.5).
+    // Media center stays at position (anchor 0.5).
     const auto [cx, cy] = t.toOutputSpace(0.5f, 0.5f, media);
     CHECK(cx == doctest::Approx(0.f));
     CHECK(cy == doctest::Approx(0.f));
@@ -53,6 +62,10 @@ TEST_CASE("Transform: rotation by 90 degrees clockwise (y-down)")
     t.scaleX = 1.f;
     t.scaleY = 1.f;
     t.rotation = 3.14159265358979323846f / 2.f; // 90 deg
+    // Rotate about the media center (the test is about rotation, not the
+    // anchor default): set the anchor explicitly.
+    t.anchorX = 0.5f;
+    t.anchorY = 0.5f;
     const Size2i media{100, 40};
 
     // The point at media UV (1, 0.5) is +50px right of the anchor before
@@ -84,6 +97,10 @@ TEST_CASE("Transform: bounds for unrotated layer")
     t.y = 20.f;
     t.scaleX = 2.f;
     t.scaleY = 2.f;
+    // The expected bounds assume the media center is at the position (the
+    // test is about bounds, not the anchor default): anchor explicitly.
+    t.anchorX = 0.5f;
+    t.anchorY = 0.5f;
     const Rect2f b = t.bounds(Size2i{100, 50});
     CHECK(b.x == doctest::Approx(-90.f));
     CHECK(b.y == doctest::Approx(-30.f));

@@ -80,8 +80,9 @@ webp/gif — still images, or GIF as animation), audio.
 - `id` — unsigned int, unique within the file.
 - `name` — display name.
 - `layers` — the layer stack. Layers are composited **bottom to top by
-  `zIndex`** (higher `zIndex` drawn on top; equal indices keep file order —
-  stable sort).
+  `zIndex`** (higher `zIndex` drawn on top). Layers with an equal `zIndex`
+  keep file order (stable sort): **first in the list renders first =
+  back-most, last renders last = front-most**.
 
 Usually one scene is active at a time; cues (and the operator) switch
 between them. Several scenes may also be active at once (the operator's
@@ -108,10 +109,10 @@ is toggled back on, `scene.clear` releases, or a `playScene` cue fires.
   "loop": false,
   "rate": 1.0,
   "transform": {
-    "x": 960.0, "y": 540.0,
+    "x": 0.0, "y": 0.0,
     "rotation": 0.0,
     "scaleX": 1.0, "scaleY": 1.0,
-    "anchorX": 0.5, "anchorY": 0.5
+    "anchorX": 0.0, "anchorY": 0.0
   },
   "opacity": 1.0,
   "blend": "normal",
@@ -142,7 +143,7 @@ is toggled back on, `scene.clear` releases, or a `playScene` cue fires.
 
 ```json
 "transform": { "x":960, "y":540, "rotation":0.3, "scaleX":2, "scaleY":2,
-               "anchorX":0.5, "anchorY":0.5 }
+               "anchorX":0.0, "anchorY":0.0 }
 ```
 
 All fields optional. Semantics (`mediamax::Transform2D`):
@@ -150,7 +151,8 @@ All fields optional. Semantics (`mediamax::Transform2D`):
 - The media (W x H px) is scaled to `(scaleX*W, scaleY*H)`.
 - It is rotated `rotation` radians **clockwise** (output space has y down)
   around the anchor point.
-- `anchorX/anchorY` are in **media UV** (0..1; default center).
+- `anchorX/anchorY` are in **media UV** (0..1; default `0,0` — the media's
+  top-left corner).
 - The rotated media is placed so the anchor lands at `(x, y)` in output
   space (pixels, origin top-left — the shared wall space, not per-display).
 

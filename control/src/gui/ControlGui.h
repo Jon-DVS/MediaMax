@@ -21,6 +21,7 @@
 #include <memory>
 #include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <imgui.h>
@@ -245,6 +246,48 @@ public:
     // settles).
     bool testWarpPadRect(float& x, float& y, float& w, float& h) const;
 
+    // --- Show editor self-test hooks ----------------------------------------
+    // Adds file paths to the show's media list through the exact production
+    // path the window's OS file drop target uses (dedup included) and marks
+    // the editor edited: the self-test's drag-and-drop check. Returns the
+    // number of references actually added.
+    int testAddDroppedFiles(const std::vector<std::string>& paths);
+    // The show's media reference paths (document order).
+    std::vector<std::string> testShowMediaPaths() const;
+    // Ensures the self-test editor has scene id 1 with two solid-color
+    // layers (id 10 "red", id 11 "blue", red listed first): idempotent, so
+    // the live run (which already seeded the scene via testGiveEditorALayer)
+    // only adds what is missing.
+    void testEnsureEditorSceneLayer();
+    // The show's layers in document order as (scene id, layer id) pairs:
+    // the layer reorder check.
+    std::vector<std::pair<Id, Id>> testShowSceneLayers() const;
+    // Moves a layer one slot up/down in its scene's layer list (the exact
+    // swap the Scenes tab's Up/Down buttons run); false when out of range.
+    bool testMoveLayer(int sceneIdx, int layerIdx, bool up);
+    // Sets the cue's action to the type at `actionIdx` (0..7, see
+    // kCueActionNames in ControlGui.cpp) with that type's defaults - the
+    // exact conversion the Cues tab's action dropdown runs.
+    bool testSetCueAction(int cueIdx, int actionIdx);
+    // The cue's current action type name (the dropdown's display string).
+    std::string testCueActionType(int cueIdx) const;
+    // The layer id the cue's SetLayer* action targets (kInvalidId when the
+    // action has no layer or the cue is out of range).
+    Id testCueActionLayer(int cueIdx) const;
+    // The keyframe count of a layer's track (label: "opacity", "x", "y",
+    // "rotation", "scale"; -1 when the layer/track is not found).
+    int testLayerTrackKeyCount(Id layerId, const char* label) const;
+    // Sets a layer's name (the same model edit the editor's Name input
+    // performs): the tree-node stability check renames a layer through it.
+    bool testSetLayerName(Id layerId, const std::string& name);
+    // The screen rect + open state of a show-editor item recorded by the
+    // last frame that rendered the Scenes tab (layerId, label; labels:
+    // "node", "keyframes", a track name, "add<track>" and "rm<track>" for
+    // the first keyframe row's remove button; kInvalidId layer + "tab-<name>"
+    // for the editor's tab buttons). False when not recorded this frame.
+    bool testEditorItemRect(Id layerId, const char* label, float& x, float& y, float& w, float& h) const;
+    bool testEditorItemOpen(Id layerId, const char* label, bool& open) const;
+
 private:
     // --- systems -----------------------------------------------------------
 
@@ -397,6 +440,10 @@ private:
     // Media Browse button (Show Editor > Media): multi-select file dialog
     // that appends one MediaReference per selected file.
     void addMediaFileDialog();
+    // Appends the given file paths to the show's media list, skipping paths
+    // the show already references; returns the number of references actually
+    // added. Shared by the file dialog and the window's OS file drop target.
+    int addMediaPaths(const std::vector<std::string>& paths);
     void renderFileDialogs();
     // Maps a test-hook name to its ImGuiFileDialog key; null for the
     // popups (use modalPopupName() for those).
@@ -617,6 +664,25 @@ private:
     // The display names renderDisplaysBlock() drew as tree nodes (document
     // order), recorded for the self-test's tree-view check.
     std::vector<std::string> m_TestDisplaysTree;
+    // One show-editor item the self-test can locate: the screen rect of the
+    // item as drawn by the last rendered frame, plus its open state for the
+    // tree nodes / collapsing headers (false for plain buttons).
+    struct TestEditorItem
+    {
+        Id layerId = kInvalidId;
+        std::string label;
+        ImVec4 rect{0.0f, 0.0f, 0.0f, 0.0f};
+        // Tree nodes / collapsing headers: open state. Editor tab buttons:
+        // selected state. Plain buttons: false.
+        bool open = false;
+    };
+    // The show-editor items recorded by the last frame that rendered the
+    // Scenes tab (cleared every frame in renderShowEditorWindow, so an empty
+    // vector means the Scenes tab did not render).
+    std::vector<TestEditorItem> m_TestEditorItems;
+    // Records the rect (+ open state) of the item just drawn in the show
+    // editor as a self-test item (see testEditorItemRect).
+    void recordTestEditorItem(Id layerId, const std::string& label, bool open);
 
     // Show editor selection (scenes tab).
     int m_SelectedSceneIdx = 0;

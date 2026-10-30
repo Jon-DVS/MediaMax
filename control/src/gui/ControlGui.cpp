@@ -179,6 +179,88 @@ const ImGuiWindowFlags kFileDialogFlags = ImGuiWindowFlags_NoDocking |
                                            ImGuiWindowFlags_NoSavedSettings |
                                            ImGuiWindowFlags_NoCollapse;
 
+// The cue action types the editor's dropdown offers, in CueAction's variant
+// order (the combo index is the alternative's index).
+constexpr const char* kCueActionNames[] = {"playScene", "stop", "pause", "seek", "setLayerOpacity",
+                                           "setLayerVisible", "setLayerBlend", "setLayerPosition"};
+
+// The dropdown index of the cue's current action.
+int cueActionIndex(const CueAction& action)
+{
+    int index = 0;
+    std::visit(
+        [&index](const auto& a) {
+            using T = std::decay_t<decltype(a)>;
+            if constexpr (std::is_same_v<T, StopPlayback>)
+            {
+                index = 1;
+            }
+            else if constexpr (std::is_same_v<T, PausePlayback>)
+            {
+                index = 2;
+            }
+            else if constexpr (std::is_same_v<T, SeekTo>)
+            {
+                index = 3;
+            }
+            else if constexpr (std::is_same_v<T, SetLayerOpacity>)
+            {
+                index = 4;
+            }
+            else if constexpr (std::is_same_v<T, SetLayerVisible>)
+            {
+                index = 5;
+            }
+            else if constexpr (std::is_same_v<T, SetLayerBlend>)
+            {
+                index = 6;
+            }
+            else if constexpr (std::is_same_v<T, SetLayerPosition>)
+            {
+                index = 7;
+            }
+        },
+        action);
+    return index;
+}
+
+// The action the dropdown installs when its selection changes: sensible
+// defaults that reference the show's first scene / layer where the action
+// needs one (the per-type parameter fields below the cue row then show the
+// new action's settable variables).
+CueAction defaultCueAction(int index, const Show& show)
+{
+    const Id sceneId = show.scenes.empty() ? 1 : show.scenes.front().id;
+    Id layerId = kInvalidId;
+    for (const auto& scene : show.scenes)
+    {
+        if (!scene.layers.empty())
+        {
+            layerId = scene.layers.front().id;
+            break;
+        }
+    }
+    switch (index)
+    {
+        case 1:
+            return StopPlayback{};
+        case 2:
+            return PausePlayback{};
+        case 3:
+            return SeekTo{Time::zero()};
+        case 4:
+            return SetLayerOpacity{layerId, 1.f};
+        case 5:
+            return SetLayerVisible{layerId, true};
+        case 6:
+            return SetLayerBlend{layerId, BlendMode::Normal};
+        case 7:
+            return SetLayerPosition{layerId, 0.f, 0.f};
+        default:
+            return PlayScene{sceneId};
+    }
+}
+
 ImGuiID modalPopupId(const char* name)
 {
     return ImHashStr(name, 0, ImHashStr(kModalHostName));
@@ -727,6 +809,43 @@ void ControlGuiApp::renderDockspace()
                      ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoDocking |
                      ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus |
                      ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoSavedSettings);
+    // OS file drop target for the whole window: files dropped anywhere (the
+    // docked panes share this dock tree) add media references to the show.
+    // The payload arrives as an external drag source (emitted in GuiMain.cpp's
+    // frame loop, fed by the GLFW drop callback).
+    if (ImGui::BeginDragDropTarget())
+    {
+        if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("MEDIMAX_FILEPATHS"))
+        {
+            const char* data = static_cast<const char*>(payload->Data);
+            std::vector<std::string> paths;
+            std::string current;
+            for (size_t i = 0; i < payload->DataSize; ++i)
+            {
+                if (data[i] == '\0')
+                {
+                    paths.push_back(current);
+                    current.clear();
+                }
+                else
+                {
+                    current += data[i];
+                }
+            }
+            if (!current.empty())
+            {
+                paths.push_back(current);
+            }
+            const int added = addMediaPaths(paths);
+            if (added > 0)
+            {
+                m_Editor.touch();
+                log(added == 1 ? "1 media added (file drop)"
+                               : std::to_string(added) + " media added (file drop)");
+            }
+        }
+        ImGui::EndDragDropTarget();
+    }
     ImGuiID dockspaceId = ImGui::GetID("MainDockspace");
     if (m_FirstFrame)
     {
@@ -2822,6 +2941,10 @@ void ControlGuiApp::renderShowViewWindow()
 
 void ControlGuiApp::renderShowEditorWindow()
 {
+    // The self-test's show-editor item recording is per-frame: clear it here
+    // so items from a frame where the Scenes tab was not rendered (or the
+    // window was not shown) do not survive into this one.
+    m_TestEditorItems.clear();
     // Begin() may return false; End() must still be called (see above).
     if (!ImGui::Begin("Show Editor", nullptr, ImGuiWindowFlags_HorizontalScrollbar))
     {
@@ -2871,7 +2994,11 @@ void ControlGuiApp::renderShowEditorWindow()
     // tab bar stays pinned above the scroll region.
     if (ImGui::BeginTabBar("editortabs"))
     {
-        if (ImGui::BeginTabItem("Show"))
+        // Each tab button is an item: record its rect every frame (also when
+        // not selected - the self-test clicks the tab it needs).
+        const bool showTab = ImGui::BeginTabItem("Show");
+        recordTestEditorItem(kInvalidId, "tab-show", false);
+        if (showTab)
         {
             if (ImGui::BeginChild("##showtab", ImVec2(0.0f, 0.0f), false))
             {
@@ -2880,7 +3007,9 @@ void ControlGuiApp::renderShowEditorWindow()
             ImGui::EndChild();
             ImGui::EndTabItem();
         }
-        if (ImGui::BeginTabItem("Media"))
+        const bool mediaTab = ImGui::BeginTabItem("Media");
+        recordTestEditorItem(kInvalidId, "tab-media", mediaTab);
+        if (mediaTab)
         {
             if (ImGui::BeginChild("##mediatab", ImVec2(0.0f, 0.0f), false))
             {
@@ -2889,7 +3018,9 @@ void ControlGuiApp::renderShowEditorWindow()
             ImGui::EndChild();
             ImGui::EndTabItem();
         }
-        if (ImGui::BeginTabItem("Scenes"))
+        const bool scenesTab = ImGui::BeginTabItem("Scenes");
+        recordTestEditorItem(kInvalidId, "tab-scenes", scenesTab);
+        if (scenesTab)
         {
             if (ImGui::BeginChild("##scenestab", ImVec2(0.0f, 0.0f), false))
             {
@@ -2898,7 +3029,9 @@ void ControlGuiApp::renderShowEditorWindow()
             ImGui::EndChild();
             ImGui::EndTabItem();
         }
-        if (ImGui::BeginTabItem("Cues"))
+        const bool cuesTab = ImGui::BeginTabItem("Cues");
+        recordTestEditorItem(kInvalidId, "tab-cues", cuesTab);
+        if (cuesTab)
         {
             if (ImGui::BeginChild("##cuestab", ImVec2(0.0f, 0.0f), false))
             {
@@ -2997,22 +3130,16 @@ void ControlGuiApp::renderMediaTab()
         }
         ImGui::EndTable();
     }
-    if (ImGui::Button("Add media reference"))
-    {
-        MediaReference ref;
-        ref.id = ShowEditor::nextMediaId(show);
-        ref.path = "media/clip.mp4";
-        show.media.push_back(ref);
-        m_Editor.touch();
-    }
-    ImGui::SameLine();
-    // Pick existing files with the file dialog (multi-select); the selected
-    // paths are stored as-is (they must exist on the systems the show is
+    // Pick existing files with the file dialog (multi-select), or drop files
+    // anywhere on the window (both add references to this show); the stored
+    // paths are kept as-is (they must exist on the systems the show is
     // pushed to).
     if (ImGui::Button("Browse...##mediabrowse"))
     {
         addMediaFileDialog();
     }
+    ImGui::SameLine();
+    ImGui::TextDisabled("(or drop files anywhere on the window)");
     if (!m_MediaProbeResult.empty())
     {
         ImGui::Spacing();
@@ -3024,18 +3151,26 @@ void ControlGuiApp::renderScenesTab()
 {
     Show& show = m_Editor.show();
 
-    ImGui::BeginTable("scenetabs", 2, ImGuiTableFlags_SizingStretchProp);
-    ImGui::TableSetupColumn("list", ImGuiTableColumnFlags_WidthFixed, 240.0f);
-    ImGui::TableSetupColumn("##ops");
-    ImGui::TableNextRow();
-    ImGui::TableNextColumn();
-    if (ImGui::BeginChild("scenelist", ImVec2(0.0f, 140.0f), true))
+    // Scene list on top, full width: the layer tree below needs the whole
+    // pane width - the old side-by-side table gave the list a fixed 240px
+    // column, which starved the tree in the default layout (a ~60px column
+    // where every labeled widget wraps onto two lines and the layer details
+    // run off the bottom of the pane).
+    if (ImGui::BeginChild("scenelist", ImVec2(0.0f, 90.0f), true))
     {
         for (int i = 0; i < static_cast<int>(show.scenes.size()); ++i)
         {
             const Scene& scene = show.scenes[static_cast<size_t>(i)];
             const std::string label = std::to_string(scene.id) + " - " + scene.name;
-            if (ImGui::Selectable(label.c_str(), m_SelectedSceneIdx == i))
+            // Stable id (by list index, embedded in the label): the visible
+            // text carries the scene name, which the editor can change while
+            // this row is visible - an id derived from the text would make
+            // the row's state (and its selection highlight) jump as the name
+            // is typed. The id part follows a "###": this ImGui version
+            // resets the id hash only at a triple hash (two are display-
+            // only), so "##scene" would keep the name in the hash.
+            const std::string rowLabel = label + "###scene" + std::to_string(i);
+            if (ImGui::Selectable(rowLabel.c_str(), m_SelectedSceneIdx == i))
             {
                 m_SelectedSceneIdx = i;
             }
@@ -3046,7 +3181,7 @@ void ControlGuiApp::renderScenesTab()
         }
     }
     ImGui::EndChild();
-    ImGui::TableNextColumn();
+    const bool hasSel = m_SelectedSceneIdx >= 0 && m_SelectedSceneIdx < static_cast<int>(show.scenes.size());
     if (ImGui::Button("Add scene"))
     {
         Scene scene;
@@ -3057,7 +3192,6 @@ void ControlGuiApp::renderScenesTab()
         m_Editor.touch();
     }
     ImGui::SameLine();
-    const bool hasSel = m_SelectedSceneIdx >= 0 && m_SelectedSceneIdx < static_cast<int>(show.scenes.size());
     if (ImGui::Button("Remove scene") && hasSel)
     {
         show.scenes.erase(show.scenes.begin() + m_SelectedSceneIdx);
@@ -3088,7 +3222,6 @@ void ControlGuiApp::renderScenesTab()
         m_Editor.touch();
     }
     ImGui::EndDisabled();
-    ImGui::EndTable();
 
     if (!hasSel)
     {
@@ -3097,6 +3230,10 @@ void ControlGuiApp::renderScenesTab()
     }
     Scene& scene = show.scenes[static_cast<size_t>(m_SelectedSceneIdx)];
 
+    // Sized to the content region: the default width would run the input
+    // (and the "id" text behind it) off the window's right edge in a
+    // narrow pane.
+    ImGui::SetNextItemWidth(ImMax(100.0f, ImGui::GetContentRegionAvail().x - 120.0f));
     ImGui::InputText("Scene name", &scene.name);
     ImGui::SameLine();
     ImGui::Text("id %u", scene.id);
@@ -3107,11 +3244,43 @@ void ControlGuiApp::renderScenesTab()
         Layer& layer = scene.layers[j];
         char label[160];
         std::snprintf(label, sizeof(label), "Layer %u - %s", layer.id, layer.name.c_str());
-        if (ImGui::TreeNodeEx(label, ImGuiTreeNodeFlags_None))
+        // The node's id is stable per layer id: the label carries the layer
+        // name, which can be edited inside the node while it is open - an id
+        // derived from the label makes the node fold the moment the name
+        // changes.
+        const bool nodeOpen =
+            ImGui::TreeNodeEx(("##layer" + std::to_string(layer.id)).c_str(),
+                              ImGuiTreeNodeFlags_None, "%s", label);
+        // Record the row's rect before the (open) node's details are drawn:
+        // afterwards GetItemRect would return the last detail item's rect.
+        recordTestEditorItem(layer.id, "node", nodeOpen);
+        if (nodeOpen)
         {
             renderLayerDetails(layer);
             ImGui::TreePop();
         }
+        // Reorder within the scene's layer list: when several layers share
+        // a zIndex, the list order decides the compositing (bottom of the
+        // list renders first = back-most; the engine stable-sorts by
+        // zIndex). The buttons move this layer one slot in that order.
+        ImGui::SameLine();
+        ImGui::BeginDisabled(j == 0);
+        if (ImGui::SmallButton(("Up##layerup" + std::to_string(j)).c_str()))
+        {
+            std::swap(scene.layers[static_cast<size_t>(j - 1)], scene.layers[j]);
+            --j; // stay on the moved layer's row
+            m_Editor.touch();
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        ImGui::BeginDisabled(j + 1 >= scene.layers.size());
+        if (ImGui::SmallButton(("Down##layerdown" + std::to_string(j)).c_str()))
+        {
+            std::swap(scene.layers[j], scene.layers[j + 1]);
+            ++j; // stay on the moved layer's row
+            m_Editor.touch();
+        }
+        ImGui::EndDisabled();
         ImGui::SameLine();
         if (ImGui::SmallButton(("Remove##layer" + std::to_string(j)).c_str()))
         {
@@ -3128,6 +3297,9 @@ void ControlGuiApp::renderScenesTab()
         scene.layers.push_back(std::move(layer));
         m_Editor.touch();
     }
+    // On its own line (a SameLine hint would clip at the window edge in a
+    // narrow pane).
+    ImGui::TextWrapped("(equal zIndex: list order = compositing order; bottom renders first)");
 }
 
 void ControlGuiApp::renderLayerDetails(Layer& layer)
@@ -3175,16 +3347,24 @@ void ControlGuiApp::renderLayerDetails(Layer& layer)
     }
     else
     {
+        // In / out / loop / rate. The input widths are sized to the content
+        // region (not the default, which assumes a wide window) so the rows
+        // fit a narrow pane instead of running off the window's right edge.
+        const float rowW = ImGui::GetContentRegionAvail().x;
+        const float inOutW = ImMax(60.0f, (rowW - 112.0f) * 0.5f);
         float inPoint = static_cast<float>(layer.inPoint.toSeconds());
-        if (ImGui::InputFloat("In point (s)", &inPoint, 0.1f, 0.5f, "%.2f"))
+        ImGui::SetNextItemWidth(inOutW);
+        if (ImGui::InputFloat("In (s)", &inPoint, 0.1f, 0.5f, "%.2f"))
         {
             layer.inPoint = Time::fromSeconds(std::max(0.0, static_cast<double>(inPoint)));
             changed = true;
         }
         ImGui::SameLine();
+        ImGui::SetNextItemWidth(inOutW);
         float outPoint = static_cast<float>(layer.outPoint.toSeconds());
-        if (ImGui::InputFloat("Out point (s, 0 = end)", &outPoint, 0.1f, 0.5f, "%.2f"))
+        if (ImGui::InputFloat("Out (s)", &outPoint, 0.1f, 0.5f, "%.2f"))
         {
+            // 0 means "to end of media" (the engine's convention).
             layer.outPoint = Time::fromSeconds(std::max(0.0, static_cast<double>(outPoint)));
             changed = true;
         }
@@ -3193,6 +3373,7 @@ void ControlGuiApp::renderLayerDetails(Layer& layer)
             changed = true;
         }
         ImGui::SameLine();
+        ImGui::SetNextItemWidth(ImMax(60.0f, rowW - 120.0f));
         if (ImGui::InputFloat("Rate", &layer.rate, 0.05f, 0.2f, "%.2f"))
         {
             if (layer.rate <= 0.0f)
@@ -3204,41 +3385,54 @@ void ControlGuiApp::renderLayerDetails(Layer& layer)
     }
 
     ImGui::SeparatorText("Transform");
+    // x | y share a line; rotation and each anchor get their own line
+    // (five fields on one row would not fit a narrow pane). The input
+    // widths are sized to the content region so no field runs off the
+    // window's right edge at the default dock layout.
+    const float rowW = ImGui::GetContentRegionAvail().x;
+    const float pairW = ImMax(40.0f, (rowW - 52.0f) * 0.5f);
+    ImGui::SetNextItemWidth(pairW);
     if (ImGui::InputFloat("x", &layer.transform.x, 10.0f, 50.0f))
     {
         changed = true;
     }
     ImGui::SameLine();
+    ImGui::SetNextItemWidth(pairW);
     if (ImGui::InputFloat("y", &layer.transform.y, 10.0f, 50.0f))
     {
         changed = true;
     }
-    ImGui::SameLine();
+    ImGui::SetNextItemWidth(ImMax(60.0f, rowW - 124.0f));
     if (ImGui::InputFloat("rotation (rad)", &layer.transform.rotation, 0.01f, 0.05f, "%.3f"))
     {
         changed = true;
     }
-    ImGui::SameLine();
+    const float scaleW = ImMax(40.0f, (rowW - 128.0f) * 0.5f);
+    ImGui::SetNextItemWidth(scaleW);
     if (ImGui::InputFloat("scaleX", &layer.transform.scaleX, 0.01f, 0.05f, "%.2f"))
     {
         changed = true;
     }
     ImGui::SameLine();
+    ImGui::SetNextItemWidth(scaleW);
     if (ImGui::InputFloat("scaleY", &layer.transform.scaleY, 0.01f, 0.05f, "%.2f"))
     {
         changed = true;
     }
+    const float anchorW = ImMax(60.0f, rowW - 124.0f);
+    ImGui::SetNextItemWidth(anchorW);
     if (ImGui::InputFloat("anchorX (0..1)", &layer.transform.anchorX, 0.01f, 0.05f, "%.2f"))
     {
         changed = true;
     }
-    ImGui::SameLine();
+    ImGui::SetNextItemWidth(anchorW);
     if (ImGui::InputFloat("anchorY (0..1)", &layer.transform.anchorY, 0.01f, 0.05f, "%.2f"))
     {
         changed = true;
     }
 
     ImGui::SeparatorText("Appearance");
+    ImGui::SetNextItemWidth(ImMax(80.0f, rowW - 64.0f));
     if (ImGui::SliderFloat("Opacity", &layer.opacity, 0.0f, 1.0f, "%.2f"))
     {
         changed = true;
@@ -3254,6 +3448,7 @@ void ControlGuiApp::renderLayerDetails(Layer& layer)
         changed = true;
     }
     ImGui::SameLine();
+    ImGui::SetNextItemWidth(ImMax(60.0f, rowW - 140.0f));
     if (ImGui::InputInt("zIndex", &layer.zIndex))
     {
         changed = true;
@@ -3279,75 +3474,126 @@ void ControlGuiApp::renderLayerTracks(Layer& layer)
         {"rotation", &layer.rotationTrack},
         {"scale", &layer.scaleTrack},
     };
+    int totalKeys = 0;
+    for (const auto& entry : tracks)
+    {
+        totalKeys += entry.track->keyCount();
+    }
+    // All of the layer's tracks sit under a single "Keyframes" header,
+    // folded by default. Its id is stable ("###keyframes"): the label text
+    // carries the keyframe count, so an id derived from the label would
+    // change on every add/remove and fold the header back - the very
+    // symptom of "you cannot add or remove keyframe entries". Note: this
+    // ImGui version resets the id hash only at "###" (two hashes are
+    // display-only), so the count must come before a triple hash.
+    char kfHeader[96];
+    std::snprintf(kfHeader, sizeof(kfHeader), "Keyframes (%d keyframe(s))###keyframes", totalKeys);
+    const bool kfOpen = ImGui::CollapsingHeader(kfHeader);
+    recordTestEditorItem(layer.id, "keyframes", kfOpen);
+    if (!kfOpen)
+    {
+        return;
+    }
     for (const auto& entry : tracks)
     {
         KeyframeTrack& track = *entry.track;
-        char header[64];
-        std::snprintf(header, sizeof(header), "%s (%d keyframe(s))", entry.label, track.keyCount());
-        if (!ImGui::CollapsingHeader(header))
-        {
-            continue;
-        }
         ImGui::PushID(entry.label);
-        bool trackChanged = false;
-        const std::vector<Keyframe>& keys = track.keyframes();
-        for (size_t k = 0; k < keys.size(); ++k)
+        // The track header's id is stable per track ("###track" under the
+        // pushed label); the label text carries the count, which changes on
+        // every add/remove (triple hash = id reset in this ImGui version,
+        // see the kf header note above).
+        char header[96];
+        std::snprintf(header, sizeof(header), "%s (%d keyframe(s))###track", entry.label,
+                      track.keyCount());
+        const bool trackOpen = ImGui::CollapsingHeader(header);
+        recordTestEditorItem(layer.id, entry.label, trackOpen);
+        if (trackOpen)
         {
-            const Keyframe& kf = keys[k];
-            float t = static_cast<float>(kf.time.toSeconds());
-            float v = kf.value;
-            int interp = kf.interpolation == Interpolation::Step ? 1 : 0;
-            ImGui::PushID(static_cast<int>(k));
-            if (ImGui::InputFloat("t##t", &t, 0.1f, 0.5f, "%.2f"))
+            bool trackChanged = false;
+            const std::vector<Keyframe>& keys = track.keyframes();
+            // Each keyframe is two compact lines (time | value, then
+            // interpolation | remove): all four fields on one line would
+            // not fit a narrow pane. The widths are sized to the content
+            // region so the rows never run off the window's right edge.
+            const float rowW = ImGui::GetContentRegionAvail().x;
+            const float halfW = ImMax(50.0f, (rowW - 8.0f) * 0.48f);
+            for (size_t k = 0; k < keys.size(); ++k)
             {
-                const double newT = std::max(0.0, static_cast<double>(t));
-                if (std::fabs(newT - kf.time.toSeconds()) > 1e-9)
+                const Keyframe& kf = keys[k];
+                float t = static_cast<float>(kf.time.toSeconds());
+                float v = kf.value;
+                int interp = kf.interpolation == Interpolation::Step ? 1 : 0;
+                ImGui::PushID(static_cast<int>(k));
+                ImGui::SetNextItemWidth(halfW);
+                if (ImGui::InputFloat("t##t", &t, 0.1f, 0.5f, "%.2f"))
+                {
+                    const double newT = std::max(0.0, static_cast<double>(t));
+                    if (std::fabs(newT - kf.time.toSeconds()) > 1e-9)
+                    {
+                        track.removeKey(kf.time);
+                    }
+                    track.setKey(Time::fromSeconds(newT), v, kf.interpolation);
+                    trackChanged = true;
+                }
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(halfW);
+                if (ImGui::InputFloat("v##v", &v, 0.05f, 0.2f, "%.2f"))
+                {
+                    track.setKey(kf.time, v, kf.interpolation);
+                    trackChanged = true;
+                }
+                ImGui::SetNextItemWidth(halfW);
+                if (ImGui::Combo("##i", &interp, kInterpolations, kInterpolationCount))
+                {
+                    track.setKey(kf.time, v, interp == 1 ? Interpolation::Step : Interpolation::Linear);
+                    trackChanged = true;
+                }
+                ImGui::SameLine();
+                if (ImGui::SmallButton("x##rm"))
                 {
                     track.removeKey(kf.time);
+                    trackChanged = true;
                 }
-                track.setKey(Time::fromSeconds(newT), v, kf.interpolation);
-                trackChanged = true;
+                // The first row's remove button (self-test hook position).
+                if (k == 0)
+                {
+                    recordTestEditorItem(layer.id, std::string("rm") + entry.label, false);
+                }
+                ImGui::PopID();
             }
+            // The pending add t/v must survive across frames (fresh locals
+            // would reset the fields to 0 every frame, so a typed value
+            // would never stick): keep them in the window's state storage.
+            const ImGuiID addTId = ImGui::GetID("##addt");
+            const ImGuiID addVId = ImGui::GetID("##addv");
+            ImGuiStorage* storage = ImGui::GetStateStorage();
+            float addT = storage->GetFloat(addTId, 0.0f);
+            float addV = storage->GetFloat(addVId, 0.0f);
+            ImGui::SetNextItemWidth(halfW);
+            ImGui::InputFloat("##addt", &addT, 0.1f, 0.5f, "%.2f");
             ImGui::SameLine();
-            if (ImGui::InputFloat("v##v", &v, 0.05f, 0.2f, "%.2f"))
+            ImGui::SetNextItemWidth(halfW);
+            ImGui::InputFloat("##addv", &addV, 0.05f, 0.2f, "%.2f");
+            storage->SetFloat(addTId, addT);
+            storage->SetFloat(addVId, addV);
+            ImGui::SetNextItemWidth(halfW);
+            if (ImGui::Button("Add keyframe"))
             {
-                track.setKey(kf.time, v, kf.interpolation);
+                track.setKey(Time::fromSeconds(std::max(0.0, static_cast<double>(addT))), addV,
+                             Interpolation::Linear);
                 trackChanged = true;
             }
+            recordTestEditorItem(layer.id, std::string("add") + entry.label, false);
             ImGui::SameLine();
-            if (ImGui::Combo("##i", &interp, kInterpolations, kInterpolationCount))
+            if (track.keyCount() > 0 && ImGui::Button("Clear track"))
             {
-                track.setKey(kf.time, v, interp == 1 ? Interpolation::Step : Interpolation::Linear);
+                track.clear();
                 trackChanged = true;
             }
-            ImGui::SameLine();
-            if (ImGui::SmallButton("x##rm"))
+            if (trackChanged)
             {
-                track.removeKey(kf.time);
-                trackChanged = true;
+                m_Editor.touch();
             }
-            ImGui::PopID();
-        }
-        float addT = 0.0f;
-        float addV = 0.0f;
-        ImGui::InputFloat("##addt", &addT, 0.1f, 0.5f, "%.2f");
-        ImGui::SameLine();
-        ImGui::InputFloat("##addv", &addV, 0.05f, 0.2f, "%.2f");
-        ImGui::SameLine();
-        if (ImGui::Button("Add keyframe"))
-        {
-            track.setKey(Time::fromSeconds(std::max(0.0, static_cast<double>(addT))), addV, Interpolation::Linear);
-            trackChanged = true;
-        }
-        ImGui::SameLine();
-        if (track.keyCount() > 0 && ImGui::Button("Clear track"))
-        {
-            track.clear();
-            trackChanged = true;
-        }
-        if (trackChanged)
-        {
-            m_Editor.touch();
         }
         ImGui::PopID();
     }
@@ -3399,45 +3645,16 @@ void ControlGuiApp::renderCuesTab()
             m_Editor.touch();
         }
         ImGui::SameLine();
-        std::string actionName;
-        std::visit(
-            [&actionName](const auto& a) {
-                using T = std::decay_t<decltype(a)>;
-                if constexpr (std::is_same_v<T, PlayScene>)
-                {
-                    actionName = "playScene";
-                }
-                else if constexpr (std::is_same_v<T, StopPlayback>)
-                {
-                    actionName = "stop";
-                }
-                else if constexpr (std::is_same_v<T, PausePlayback>)
-                {
-                    actionName = "pause";
-                }
-                else if constexpr (std::is_same_v<T, SeekTo>)
-                {
-                    actionName = "seek";
-                }
-                else if constexpr (std::is_same_v<T, SetLayerOpacity>)
-                {
-                    actionName = "setLayerOpacity";
-                }
-                else if constexpr (std::is_same_v<T, SetLayerVisible>)
-                {
-                    actionName = "setLayerVisible";
-                }
-                else if constexpr (std::is_same_v<T, SetLayerBlend>)
-                {
-                    actionName = "setLayerBlend";
-                }
-                else if constexpr (std::is_same_v<T, SetLayerPosition>)
-                {
-                    actionName = "setLayerPosition";
-                }
-            },
-            cue.action);
-        ImGui::Text("%s", actionName.c_str());
+        // The cue's action type: switching it replaces the action with the
+        // defaults for the new type, and the parameter fields below the row
+        // then show the new action's settable variables.
+        int actionIdx = cueActionIndex(cue.action);
+        ImGui::SetNextItemWidth(170.0f);
+        if (ImGui::Combo("##action", &actionIdx, kCueActionNames, IM_ARRAYSIZE(kCueActionNames)))
+        {
+            cue.action = defaultCueAction(actionIdx, show);
+            m_Editor.touch();
+        }
         ImGui::SameLine();
         if (ImGui::SmallButton("x##rm"))
         {
@@ -3787,19 +4004,58 @@ void ControlGuiApp::renderFileDialogs()
     {
         if (dlg->IsOk())
         {
-            Show& show = m_Editor.show();
+            std::vector<std::string> paths;
             for (const auto& [name, path] : dlg->GetSelection())
             {
                 (void)name;
-                MediaReference ref;
-                ref.id = ShowEditor::nextMediaId(show);
-                ref.path = path;
-                show.media.push_back(ref);
+                paths.push_back(path);
             }
-            m_Editor.touch();
+            const int added = addMediaPaths(paths);
+            if (added > 0)
+            {
+                m_Editor.touch();
+                log(added == 1 ? "1 media added (file dialog)"
+                               : std::to_string(added) + " media added (file dialog)");
+            }
         }
         dlg->Close();
     }
+}
+
+// Adds the given file paths to the show's media list, skipping paths the
+// show already references (case-sensitive: the paths are the identity the
+// engine opens). Returns the number of references actually added. Shared by
+// the Media tab's file dialog and the window's OS file drop target.
+int ControlGuiApp::addMediaPaths(const std::vector<std::string>& paths)
+{
+    Show& show = m_Editor.show();
+    int added = 0;
+    for (const auto& path : paths)
+    {
+        if (path.empty())
+        {
+            continue;
+        }
+        bool exists = false;
+        for (const auto& ref : show.media)
+        {
+            if (ref.path == path)
+            {
+                exists = true;
+                break;
+            }
+        }
+        if (exists)
+        {
+            continue;
+        }
+        MediaReference ref;
+        ref.id = ShowEditor::nextMediaId(show);
+        ref.path = path;
+        show.media.push_back(ref);
+        ++added;
+    }
+    return added;
 }
 
 // --- modals ---------------------------------------------------------------------------
@@ -5203,14 +5459,279 @@ void ControlGuiApp::testGiveEditorALayer()
         mediaLayer.id = 12;
         mediaLayer.name = "testbmp";
         mediaLayer.mediaId = 1;
-        mediaLayer.transform.x = 960.f;
-        mediaLayer.transform.y = 540.f;
+        // The default anchor is the media's top-left: at (0,0) scaled 6x the
+        // 320x180 BMP covers the whole 1920x1080 wall.
+        mediaLayer.transform.x = 0.f;
+        mediaLayer.transform.y = 0.f;
         mediaLayer.transform.scaleX = 6.f;
         mediaLayer.transform.scaleY = 6.f;
         scene.layers.push_back(mediaLayer);
     }
     show.scenes.push_back(std::move(scene));
     m_Editor.touch();
+}
+
+void ControlGuiApp::recordTestEditorItem(Id layerId, const std::string& label, bool open)
+{
+    TestEditorItem item;
+    item.layerId = layerId;
+    item.label = label;
+    const ImVec2 min = ImGui::GetItemRectMin();
+    const ImVec2 max = ImGui::GetItemRectMax();
+    item.rect = ImVec4(min.x, min.y, max.x - min.x, max.y - min.y);
+    item.open = open;
+    m_TestEditorItems.push_back(std::move(item));
+}
+
+bool ControlGuiApp::testEditorItemRect(Id layerId, const char* label, float& x, float& y, float& w,
+                                       float& h) const
+{
+    for (const auto& item : m_TestEditorItems)
+    {
+        if (item.layerId == layerId && item.label == label)
+        {
+            x = item.rect.x;
+            y = item.rect.y;
+            w = item.rect.z;
+            h = item.rect.w;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool ControlGuiApp::testEditorItemOpen(Id layerId, const char* label, bool& open) const
+{
+    for (const auto& item : m_TestEditorItems)
+    {
+        if (item.layerId == layerId && item.label == label)
+        {
+            open = item.open;
+            return true;
+        }
+    }
+    // An unrecorded item (its tab/node/header was not rendered this frame)
+    // is not open: default the out-param so callers can't read a stale value
+    // from a previous frame.
+    open = false;
+    return false;
+}
+
+int ControlGuiApp::testAddDroppedFiles(const std::vector<std::string>& paths)
+{
+    const int added = addMediaPaths(paths);
+    if (added > 0)
+    {
+        m_Editor.touch();
+    }
+    return added;
+}
+
+std::vector<std::string> ControlGuiApp::testShowMediaPaths() const
+{
+    std::vector<std::string> paths;
+    for (const auto& ref : m_Editor.show().media)
+    {
+        paths.push_back(ref.path);
+    }
+    return paths;
+}
+
+void ControlGuiApp::testEnsureEditorSceneLayer()
+{
+    Show& show = m_Editor.show();
+    Scene* scene = nullptr;
+    for (auto& s : show.scenes)
+    {
+        if (s.id == 1)
+        {
+            scene = &s;
+            break;
+        }
+    }
+    if (scene == nullptr)
+    {
+        Scene s;
+        s.id = 1;
+        s.name = "A";
+        show.scenes.push_back(std::move(s));
+        scene = &show.scenes.back();
+    }
+    auto hasLayer = [scene](Id id) {
+        for (const auto& layer : scene->layers)
+        {
+            if (layer.id == id)
+            {
+                return true;
+            }
+        }
+        return false;
+    };
+    if (!hasLayer(10))
+    {
+        Layer layer;
+        layer.id = 10;
+        layer.name = "red";
+        layer.color = {1.0f, 0.0f, 0.0f, 1.0f};
+        scene->layers.push_back(layer);
+    }
+    if (!hasLayer(11))
+    {
+        Layer layer;
+        layer.id = 11;
+        layer.name = "blue";
+        layer.color = {0.0f, 0.0f, 1.0f, 1.0f};
+        // Insert before the testbmp media layer (12) when it is present:
+        // the list order is the compositing order (last = front-most), and
+        // the live show-view checks expect the media layer to remain the
+        // front-most one the clicks and drags land on.
+        auto it = std::find_if(scene->layers.begin(), scene->layers.end(),
+                               [](const Layer& l) { return l.id == 12; });
+        scene->layers.insert(it, std::move(layer));
+    }
+    m_Editor.touch();
+}
+
+std::vector<std::pair<Id, Id>> ControlGuiApp::testShowSceneLayers() const
+{
+    std::vector<std::pair<Id, Id>> out;
+    for (const auto& scene : m_Editor.show().scenes)
+    {
+        for (const auto& layer : scene.layers)
+        {
+            out.push_back({scene.id, layer.id});
+        }
+    }
+    return out;
+}
+
+bool ControlGuiApp::testMoveLayer(int sceneIdx, int layerIdx, bool up)
+{
+    Show& show = m_Editor.show();
+    if (sceneIdx < 0 || sceneIdx >= static_cast<int>(show.scenes.size()))
+    {
+        return false;
+    }
+    Scene& scene = show.scenes[static_cast<size_t>(sceneIdx)];
+    if (layerIdx < 0 || layerIdx >= static_cast<int>(scene.layers.size()))
+    {
+        return false;
+    }
+    if (up ? layerIdx == 0 : layerIdx + 1 >= static_cast<int>(scene.layers.size()))
+    {
+        return false;
+    }
+    std::swap(scene.layers[static_cast<size_t>(layerIdx)],
+              scene.layers[static_cast<size_t>(layerIdx + (up ? -1 : +1))]);
+    m_Editor.touch();
+    return true;
+}
+
+bool ControlGuiApp::testSetCueAction(int cueIdx, int actionIdx)
+{
+    Show& show = m_Editor.show();
+    if (cueIdx < 0 || cueIdx >= static_cast<int>(show.cues.size()))
+    {
+        return false;
+    }
+    if (actionIdx < 0 || actionIdx >= static_cast<int>(IM_ARRAYSIZE(kCueActionNames)))
+    {
+        return false;
+    }
+    show.cues[static_cast<size_t>(cueIdx)].action = defaultCueAction(actionIdx, show);
+    m_Editor.touch();
+    return true;
+}
+
+std::string ControlGuiApp::testCueActionType(int cueIdx) const
+{
+    const auto& cues = m_Editor.show().cues;
+    if (cueIdx < 0 || cueIdx >= static_cast<int>(cues.size()))
+    {
+        return "";
+    }
+    return kCueActionNames[static_cast<size_t>(
+        cueActionIndex(cues[static_cast<size_t>(cueIdx)].action))];
+}
+
+bool ControlGuiApp::testSetLayerName(Id layerId, const std::string& name)
+{
+    for (auto& scene : m_Editor.show().scenes)
+    {
+        for (auto& layer : scene.layers)
+        {
+            if (layer.id == layerId)
+            {
+                layer.name = name;
+                m_Editor.touch();
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+Id ControlGuiApp::testCueActionLayer(int cueIdx) const
+{
+    const auto& cues = m_Editor.show().cues;
+    if (cueIdx < 0 || cueIdx >= static_cast<int>(cues.size()))
+    {
+        return kInvalidId;
+    }
+    const CueAction& action = cues[static_cast<size_t>(cueIdx)].action;
+    if (const auto* a = std::get_if<SetLayerOpacity>(&action))
+    {
+        return a->layer;
+    }
+    if (const auto* a = std::get_if<SetLayerVisible>(&action))
+    {
+        return a->layer;
+    }
+    if (const auto* a = std::get_if<SetLayerBlend>(&action))
+    {
+        return a->layer;
+    }
+    if (const auto* a = std::get_if<SetLayerPosition>(&action))
+    {
+        return a->layer;
+    }
+    return kInvalidId;
+}
+
+int ControlGuiApp::testLayerTrackKeyCount(Id layerId, const char* label) const
+{
+    const std::string track = label;
+    for (const auto& scene : m_Editor.show().scenes)
+    {
+        for (const auto& layer : scene.layers)
+        {
+            if (layer.id != layerId)
+            {
+                continue;
+            }
+            if (track == "opacity")
+            {
+                return layer.opacityTrack.keyCount();
+            }
+            if (track == "x")
+            {
+                return layer.xTrack.keyCount();
+            }
+            if (track == "y")
+            {
+                return layer.yTrack.keyCount();
+            }
+            if (track == "rotation")
+            {
+                return layer.rotationTrack.keyCount();
+            }
+            if (track == "scale")
+            {
+                return layer.scaleTrack.keyCount();
+            }
+        }
+    }
+    return -1;
 }
 
 void ControlGuiApp::testRemoveSelfTestBmp()

@@ -1468,9 +1468,9 @@ TEST_CASE("frame.state reports the wall and the current frame's layers")
     // fixture layers have the default transform (x=y=0).
     CHECK(bg.at("x").get<double>() == doctest::Approx(0.0));
     CHECK(bg.at("y").get<double>() == doctest::Approx(0.0));
-    // A color layer fills the output space (identity transform, centered
-    // anchor at the origin of a 3840x1080 wall would be off-center, but the
-    // fixture layer has the default transform: anchor 0.5 at x=y=0).
+    // A color layer fills the output space: the default transform puts the
+    // media's top-left (the default anchor 0,0) at x=y=0, so a 3840x1080
+    // media covers the whole wall.
     CHECK(bg.at("corners") == cornerJson(Transform2D::identity(), Size2i{3840, 1080}));
 
     const nlohmann::json& video = layers[1];
