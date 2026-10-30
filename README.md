@@ -15,6 +15,8 @@ Feature inspiration: [Resolume](https://resolume.com/),
 - **Multi-video playback** — many media layers per scene, each with its own
   in/out points, loop, playback rate, transform (position/rotation/scale),
   opacity and blend mode (`normal`, `add`, `subtract`, `multiply`, `screen`).
+  Any container/codec the bundled FFmpeg decodes, including Vidvox
+  **HAP** and **HAPQ** video (`.mov`, tags Hap1 / HapY).
 - **Timelines** — shows are a frame rate, a set of scenes, and a cue
   timeline. The rendered frame at show time `t` is a *pure function* of
   `(show, t, overrides)`, so seeking forward and backward is always correct.

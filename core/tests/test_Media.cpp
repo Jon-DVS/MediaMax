@@ -753,6 +753,95 @@ TEST_CASE("FFmpeg: setVideoOutputSizeHint decodes at min(native, hint)")
     source.reset(); // Windows: the format context holds the file handle
     std::filesystem::remove(path);
 }
+
+// The Vidvox HAP / HAPQ reference clips from the HAP developer resources
+// (hap.video/developers): a 30 s "DARKPURPLE" animation at 3840x2160@60 -
+// HAP (QuickTime tag Hap1) and HAPQ (tag HapY, with an AAC audio track).
+// FFmpeg exposes both through the single "hap" decoder (the stream profile
+// is selected from the bitstream), which emits rgb0. The clips are several
+// gigabytes and live on a fixed test-media path, so these cases self-skip
+// when the files are not present (the GPU cases self-skip the same way
+// without a Vulkan device).
+void checkHapFile(const char* name, const char* path)
+{
+    std::error_code ec;
+    if (!std::filesystem::exists(path, ec) || ec)
+    {
+        std::fprintf(stderr,
+                     "[skip] %s test file not found at %s; skipping HAP decode test\n",
+                     name, path);
+        return;
+    }
+
+    // Probe through the same path the engine's media.load uses.
+    std::string error;
+    const MediaMetadata meta = ffmpeg::probeFile(path, error);
+    REQUIRE(meta.valid());
+    CHECK(meta.type == MediaType::Video);
+    CHECK(meta.hasVideo);
+    CHECK(meta.videoCodec == "hap");
+    CHECK(meta.width == 3840);
+    CHECK(meta.height == 2160);
+    CHECK(meta.frameRate == FrameRate::fps60());
+    // 1800 frames at 60 fps = exactly 30 s; the container reports up to one
+    // extra frame period (30.003 s), so allow the slack.
+    CHECK(meta.duration >= Time::fromSeconds(29.9));
+    CHECK(meta.duration <= Time::fromSeconds(30.1));
+    CHECK(meta.hasAudio);
+    CHECK(meta.audioCodec == "aac");
+
+    auto source = ffmpeg::createSource(path, error);
+    REQUIRE(source != nullptr);
+
+    // Decode the first few frames: rgb0 must come out as straight, fully
+    // opaque RGBA. (The clip fades in from black, so the opening frames are
+    // legitimately black - the non-black check happens after the seek.)
+    VideoFrame frame;
+    for (int i = 0; i < 3; ++i)
+    {
+        REQUIRE(source->nextVideoFrame(frame, 10000));
+        CHECK(frame.width == 3840);
+        CHECK(frame.height == 2160);
+        CHECK(frame.rgba.size() == static_cast<std::size_t>(3840) * 2160 * 4);
+        bool opaque = true;
+        for (std::size_t p = 3; p < frame.rgba.size(); p += 4)
+        {
+            if (frame.rgba[p] != 255)
+            {
+                opaque = false;
+            }
+        }
+        CHECK(opaque); // rgb0 carries no alpha: every pixel is fully opaque
+    }
+
+    // Seek to mid-clip and decode one more frame. Both clips are
+    // all-keyframe (every frame is an I-frame), so the seek lands exactly
+    // at 10 s and the first frame out is the 10 s frame.
+    REQUIRE(source->seek(Time::fromSeconds(10.0)));
+    REQUIRE(source->nextVideoFrame(frame, 10000));
+    CHECK(frame.width == 3840);
+    CHECK(frame.height == 2160);
+    CHECK(frame.time >= Time::fromSeconds(9.0));
+    CHECK(frame.time < Time::fromSeconds(30.0));
+    std::uint64_t luma = 0;
+    for (std::size_t p = 0; p < frame.rgba.size(); p += 4)
+    {
+        luma += frame.rgba[p] + frame.rgba[p + 1] + frame.rgba[p + 2];
+    }
+    CHECK(luma > 0);
+
+    source.reset(); // Windows: the format context holds the file handle
+}
+
+TEST_CASE("FFmpeg: HAP (Hap1) reference clip probes and decodes")
+{
+    checkHapFile("HAP", "C:\\test-media\\DARKPURPLE_HAP_3840x2160@60.mov");
+}
+
+TEST_CASE("FFmpeg: HAPQ (HapY) reference clip probes and decodes")
+{
+    checkHapFile("HAPQ", "C:\\test-media\\DARKPURPLE_HAPQ_3840x2160@60_1.mov");
+}
 #endif // MEDIAMAX_HAS_FFMPEG
 
 } // TEST_SUITE("Media")
