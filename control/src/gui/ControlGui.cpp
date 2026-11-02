@@ -6579,8 +6579,8 @@ bool ControlGuiApp::selfTestSystem(const std::string& host, std::uint16_t port, 
     step("status", conn.send("status", json::object(), result, error), error);
 
     // A minimal deterministic show: two color scenes, start at scene 1, stop
-    // at 30 s. No scene cue in between, so scene.clear always returns to
-    // scene 1 within the test's time budget.
+    // at 30 s. No scene cue in between, so the manual scene state (including
+    // scene.clear's deactivation) is stable within the test's time budget.
     Show show;
     show.name = "GUI Self-Test";
     show.frameRate = FrameRate::fps30();
@@ -6671,8 +6671,22 @@ bool ControlGuiApp::selfTestSystem(const std::string& host, std::uint16_t port, 
          "activeScenes size=" + std::to_string(activeScenes().size()));
 
     step("scene.clear", conn.send("scene.clear", json::object(), result, error), error);
-    step("scene.clear returns to timeline (scene 1)", result.value("scene", 0u) == 1u,
+    // scene.clear deactivates all scenes: no scene is active (black output)
+    // - it does not return to the timeline.
+    step("scene.clear deactivates all scenes (scene 0, cleared 1)",
+         result.value("scene", 0u) == 0u && activeScenes().empty() &&
+             result.value("cleared", -1) == 1,
+         "scene=" + std::to_string(result.value("scene", 0u)) +
+             " cleared=" + std::to_string(result.value("cleared", -1)) +
+             " activeScenes=" + std::to_string(activeScenes().size()));
+    conn.send("status", json::object(), result, error);
+    step("status with no scene active reports scene 0", result.value("scene", 0u) == 0u,
          "scene=" + std::to_string(result.value("scene", 0u)));
+    // Bring the timeline scene back on for the frame.state check below.
+    step("scene.toggle index 0 (scene 1 back on)",
+         conn.send("scene.toggle", {{"index", 0}}, result, error), error);
+    step("toggle: scene 1 active again", activeScenes() == std::vector<std::uint64_t>{1},
+         "activeScenes size=" + std::to_string(activeScenes().size()));
 
     // frame.state: the show view's live data - the wall plus the resolved
     // layer quads (scene 1 is active: one solid-color layer).

@@ -593,7 +593,7 @@ TEST_CASE("scene.toggle composites multiple scenes in list order")
 
     // Toggling the last manual scene off leaves the manual set in effect
     // but empty: no scene is active (status reports scene 0) and the
-    // timeline does not take back until scene.clear.
+    // timeline does not take back until a playScene cue is crossed.
     const Response off2 = f.run("scene.toggle", {{"index", 1}});
     REQUIRE(off2.ok);
     CHECK_FALSE(off2.result.at("active").get<bool>());
@@ -603,11 +603,15 @@ TEST_CASE("scene.toggle composites multiple scenes in list order")
     CHECK(status2.at("scene").get<std::uint64_t>() == 0);
     CHECK(status2.at("activeScenes").get<std::vector<std::uint64_t>>().empty());
 
-    // scene.clear releases the empty set back to the timeline (0 scenes).
-    const Response released = f.run("scene.clear");
-    REQUIRE(released.ok);
-    CHECK(released.result.at("cleared").get<int>() == 0);
-    CHECK(released.result.at("scene").get<std::uint64_t>() == 1);
+    // scene.clear deactivates all scenes: with nothing active it is a no-op
+    // (cleared 0) and the manual set stays in effect - the timeline does not
+    // take back.
+    const Response cleared = f.run("scene.clear");
+    REQUIRE(cleared.ok);
+    CHECK(cleared.result.at("cleared").get<int>() == 0);
+    CHECK(cleared.result.at("scene").get<std::uint64_t>() == 0);
+    CHECK(cleared.result.at("activeScenes").get<std::vector<std::uint64_t>>().empty());
+    CHECK(f.engine.hasSceneOverride());
 
     // scene.set is still a solo: exactly the given scene, nothing else.
     REQUIRE(f.run("scene.set", {{"index", 1}}).ok);
@@ -1621,24 +1625,35 @@ TEST_CASE("show.loadJson with preserveState drops what the new show lacks")
     }
 }
 
-TEST_CASE("scene.clear releases the operator scene override")
+TEST_CASE("scene.clear deactivates all scenes")
 {
     Fixture f;
-    // No override yet: cleared=0, the timeline's scene (1 at t=0) is active.
-    const Response none = f.run("scene.clear");
-    REQUIRE(none.ok);
-    CHECK(none.result.at("cleared").get<int>() == 0);
-    CHECK(none.result.at("scene").get<std::uint64_t>() == 1);
-
-    const Response set = f.run("scene.set", {{"index", 1}});
-    REQUIRE(set.ok);
-    CHECK(set.result.at("scene").get<std::uint64_t>() == 2);
-
+    // Timeline-driven: the playScene cue selects scene 1 at t=0. Clearing
+    // deactivates it - no scene active (scene 0, black output) - and the
+    // timeline does not take back (the manual set stays in effect, empty).
     const Response cleared = f.run("scene.clear");
     REQUIRE(cleared.ok);
     CHECK(cleared.result.at("cleared").get<int>() == 1);
-    // Back on the timeline: at t=0 the playScene cue selects scene 1.
-    CHECK(cleared.result.at("scene").get<std::uint64_t>() == 1);
+    CHECK(cleared.result.at("scene").get<std::uint64_t>() == 0);
+    CHECK(cleared.result.at("activeScenes").get<std::vector<std::uint64_t>>().empty());
+    CHECK(f.engine.hasSceneOverride());
+
+    // Manually active scenes are deactivated the same way; the count
+    // reports how many were active.
+    const Response set = f.run("scene.set", {{"index", 1}});
+    REQUIRE(set.ok);
+    CHECK(set.result.at("scene").get<std::uint64_t>() == 2);
+    const Response cleared2 = f.run("scene.clear");
+    REQUIRE(cleared2.ok);
+    CHECK(cleared2.result.at("cleared").get<int>() == 1);
+    CHECK(cleared2.result.at("scene").get<std::uint64_t>() == 0);
+    CHECK(cleared2.result.at("activeScenes").get<std::vector<std::uint64_t>>().empty());
+
+    // Idempotent: nothing active -> cleared 0, still no scene.
+    const Response again = f.run("scene.clear");
+    REQUIRE(again.ok);
+    CHECK(again.result.at("cleared").get<int>() == 0);
+    CHECK(again.result.at("scene").get<std::uint64_t>() == 0);
 }
 
 TEST_CASE("show.info summarizes the loaded show")

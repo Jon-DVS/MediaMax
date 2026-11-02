@@ -1071,9 +1071,12 @@ nlohmann::json CommandServer::handleSceneList() const
 
 nlohmann::json CommandServer::handleSceneClear() const
 {
-    // Releases the operator's manual scene set (scene.set/scene.toggle);
-    // scene selection returns to the timeline. The response reports the
-    // now-active scenes so the caller does not need a follow-up status call.
+    // Deactivates all scenes: whatever is active now (a manual set, or the
+    // timeline's scene) is replaced by the deliberate empty manual set - no
+    // scene is active (black output). It stays in effect until a scene is
+    // set/toggled or a playScene cue is crossed. The response reports how
+    // many scenes were deactivated and the now-empty active set, so the
+    // caller does not need a follow-up status call.
     const int cleared = m_Engine.clearSceneNow();
     const std::vector<Id> active = m_Engine.activeScenesAt(m_Engine.time());
     return {

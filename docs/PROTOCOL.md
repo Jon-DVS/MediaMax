@@ -367,18 +367,19 @@ Stop and return to time 0.
 
 Several scenes may be active at once (composited, in show-list order — the
 first active scene is bottom-most). `scene.set` activates exactly one scene
-(solo), `scene.toggle` adds/removes a scene, and `scene.clear` releases the
-whole manual set back to the timeline. The operator may also have **no
-scene active at any time**: when the manual set is empty (deliberately,
-via `scene.toggle`), nothing is composited (black output) and `status`
-reports `scene: 0` with an empty `activeScenes` array, until a scene is
-toggled back on, `scene.clear` releases, or a `playScene` cue is crossed.
+(solo), `scene.toggle` adds/removes a scene, and `scene.clear` deactivates
+all of them. The operator may also have **no scene active at any time**:
+when the manual set is empty (deliberately, via `scene.toggle` or
+`scene.clear`), nothing is composited (black output) and `status` reports
+`scene: 0` with an empty `activeScenes` array, until a scene is
+set/toggled back on, or a `playScene` cue is crossed.
 
 #### `scene.set`
 
 Force exactly one scene immediately (operator solo; takes effect over the
 timeline until the timeline's next `playScene` cue, another `scene.set`, or
-`scene.clear`). Any other manually active scenes are released.
+`scene.clear` deactivates it). Any other manually active scenes are
+released; a subsequent `scene.toggle` adds/removes scenes in the manual set.
 
 - Params: `index` (int, required) — 0-based scene index in the show.
 - Result: `{"scene":<id>,"name":"<name>","activeScenes":[<id>,...]}`
@@ -393,7 +394,8 @@ with an empty set — **no scene is active** (black output). Toggling the
 last manually active scene off likewise leaves the manual set in effect
 but empty. Each manually activated scene starts its media from its
 activation time. The timeline's next `playScene` cue (crossed while
-playing) releases the whole manual set, like `scene.clear`.
+playing) releases the whole manual set, returning selection to the
+timeline.
 
 - Params: `index` (int, required) — 0-based scene index in the show.
 - Result: `{"scene":<id>,"name":"<name>","active":<bool>,"activeScenes":[<id>,...]}`
@@ -402,13 +404,17 @@ playing) releases the whole manual set, like `scene.clear`.
 
 #### `scene.clear`
 
-Release the operator's manual scene set (from `scene.set`/`scene.toggle`):
-scene selection returns to the timeline — including a deliberate empty set
-(no scene active), which this releases. Idempotent — clearing when there is
-no manual set succeeds and reports `cleared: 0`.
+Deactivate all scenes: whatever is active now — a manual set from
+`scene.set`/`scene.toggle`, or a scene the timeline shows — is replaced by
+the deliberate empty manual set. **No scene is active** (black output) and
+that stays in effect until a scene is set/toggled, or a `playScene` cue is
+crossed (which returns selection to the timeline). Idempotent — clearing
+when nothing is active succeeds and reports `cleared: 0`.
 
 - Params: none.
-- Result: `{"cleared":<count>,"scene":<primary scene id after the clear>,"activeScenes":[<id>,...]}`
+- Result: `{"cleared":<number of scenes deactivated>,"scene":0,"activeScenes":[]}`
+  — after a clear no scene is active, so `scene` is 0 and `activeScenes` is
+  empty.
 
 #### `scene.list`
 

@@ -528,9 +528,15 @@ bool PlaybackEngine::toggleSceneNow(Id sceneId)
 
 int PlaybackEngine::clearSceneNow()
 {
-    const int count = m_ForceScenes.has_value() ? static_cast<int>(m_ForceScenes->size()) : 0;
-    m_ForceScenes.reset();
-    return count;
+    // Deactivate every scene: whatever is active now (the manual set, or the
+    // timeline's scene) is replaced by the deliberate empty manual set - no
+    // scene is active (black output). Like any manual state it stays in
+    // effect: a scene can be set/toggled back on, or a crossed PlayScene cue
+    // returns selection to the timeline. Returns how many scenes the call
+    // deactivated.
+    const std::vector<Id> active = activeScenesAt(m_Time);
+    m_ForceScenes = std::map<Id, Time>{};
+    return static_cast<int>(active.size());
 }
 
 bool PlaybackEngine::setLayerOpacity(Id layerId, float value)

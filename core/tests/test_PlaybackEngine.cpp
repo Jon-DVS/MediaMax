@@ -384,8 +384,10 @@ TEST_CASE("Scene override (live scene switch)")
         }
     }
 
+    // Clearing deactivates all scenes: no fallback to the timeline.
     engine.clearSceneNow();
-    CHECK(engine.activeSceneAt(engine.time()) == 1); // cues win again
+    CHECK(engine.activeSceneAt(engine.time()) == kInvalidId);
+    CHECK(engine.hasSceneOverride());
     CHECK_FALSE(engine.setSceneNow(99)); // invalid scene rejected
 }
 
@@ -467,10 +469,11 @@ TEST_CASE("Multiple scenes can be active at once (composited in list order)")
     CHECK(black.activeSceneIds.empty());
     CHECK(black.layers.empty());
 
-    // scene.clear releases the (empty) manual set back to the timeline.
+    // scene.clear deactivates all scenes: the (already empty) manual set
+    // stays in effect - there is no fallback to the timeline.
     CHECK(engine.clearSceneNow() == 0);
-    CHECK_FALSE(engine.hasSceneOverride());
-    CHECK(engine.activeScenesAt(engine.time()) == std::vector<Id>{1}); // by cue
+    CHECK(engine.hasSceneOverride());
+    CHECK(engine.activeScenesAt(engine.time()).empty());
 
     // Toggling a scene that is not in the show is rejected.
     CHECK_FALSE(engine.toggleSceneNow(99));
@@ -503,6 +506,44 @@ TEST_CASE("Toggling the timeline scene off leaves no scene active")
     CHECK(engine.activeScenesAt(engine.time()) == std::vector<Id>{1});
 
     // A crossed PlayScene cue also releases the override.
+    engine.tick(Time::fromSeconds(1.1)); // t=1 -> t=2.1, crossing PlayScene(2) @2
+    CHECK_FALSE(engine.hasSceneOverride());
+    CHECK(engine.activeSceneAt(engine.time()) == 2);
+}
+
+TEST_CASE("clearSceneNow deactivates all scenes (no timeline fallback)")
+{
+    auto media = makeLoadedMediaLibrary();
+    auto engine = makeTestEngine(media);
+
+    // Timeline-driven state: scene 1 active by the t=0 cue. Clearing
+    // deactivates it - the manual set becomes the deliberate empty set
+    // (black output), not a return to the timeline.
+    engine.play();
+    engine.seek(Time::fromSeconds(1.0));
+    CHECK(engine.activeSceneAt(engine.time()) == 1);
+    CHECK(engine.clearSceneNow() == 1);
+    CHECK(engine.hasSceneOverride());
+    CHECK(engine.activeScenesAt(engine.time()).empty());
+    CHECK(engine.activeSceneAt(engine.time()) == kInvalidId);
+    const FrameState black = engine.frameState();
+    CHECK(black.activeSceneId == kInvalidId);
+    CHECK(black.activeSceneIds.empty());
+    CHECK(black.layers.empty());
+
+    // Manually active scenes are deactivated the same way; the count
+    // reports how many were active.
+    CHECK(engine.setSceneNow(2));
+    CHECK(engine.toggleSceneNow(1));
+    CHECK(engine.activeScenesAt(engine.time()) == std::vector<Id>{1, 2});
+    CHECK(engine.clearSceneNow() == 2);
+    CHECK(engine.activeScenesAt(engine.time()).empty());
+
+    // Idempotent: nothing active -> cleared 0, the empty set stays in effect.
+    CHECK(engine.clearSceneNow() == 0);
+    CHECK(engine.hasSceneOverride());
+
+    // A crossed PlayScene cue returns selection to the timeline.
     engine.tick(Time::fromSeconds(1.1)); // t=1 -> t=2.1, crossing PlayScene(2) @2
     CHECK_FALSE(engine.hasSceneOverride());
     CHECK(engine.activeSceneAt(engine.time()) == 2);

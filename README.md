@@ -239,7 +239,7 @@ back in. A poll thread keeps each entry's status/scene snapshot fresh.
   file; written in by File > Save).
 - **Playback** (center) — for the selected system: transport
   (play/pause/stop), a seek slider that follows the live time, scene
-  selection and *scene.clear* (return to the timeline), live layer
+  selection and *scene.clear* (deactivate all scenes), live layer
   overrides (opacity/visible/blend/position via `layer.set`/`layer.clear`),
   display geometry + brightness (`display.set`) with a 2x2–4x4 warp-grid
   editor (`display.warp.set`), and media load/unload against the engine's

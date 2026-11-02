@@ -157,13 +157,14 @@ public:
     // first takes the timeline scene with it, so a toggle adds to (or, for
     // the timeline scene itself, removes) what the timeline shows. Toggling
     // the last manual scene off leaves the manual set in effect but empty:
-    // no scene is active (black output) until a scene is toggled back on,
-    // scene.clear releases, or a PlayScene cue is crossed. The media in a
-    // manually activated scene start from its activation time.
-    // clearSceneNow() returns to cue-driven scene selection (a PlayScene cue
-    // crossed while playing does the same) and returns how many manual
-    // scenes were released (0 for a deliberate empty set, which is
-    // released as well).
+    // no scene is active (black output) until a scene is toggled back on or
+    // a PlayScene cue is crossed. clearSceneNow() deactivates all scenes:
+    // whatever is active (a manual set or the timeline's scene) is replaced
+    // by the deliberate empty manual set (no scene active, black output),
+    // which stays in effect until a scene is set/toggled or a PlayScene cue
+    // (crossed while playing) returns selection to the timeline; it returns
+    // how many scenes were deactivated (0 when nothing was active). The
+    // media in a manually activated scene start from its activation time.
     bool setSceneNow(Id sceneId);
     bool toggleSceneNow(Id sceneId);
     int clearSceneNow();
@@ -221,9 +222,10 @@ private:
     // The operator's manual scene set (scene.set/scene.toggle), mapping each
     // scene to the show time at which it was activated (its media start from
     // there). While present, this set is the active set - even when empty,
-    // which means no scene is active (black output). scene.clear or a
-    // crossed PlayScene cue releases it (nullopt), returning scene
-    // selection to the timeline.
+    // which means no scene is active (black output). A crossed PlayScene cue
+    // releases it (nullopt), returning scene selection to the timeline;
+    // scene.clear does not release it but empties it (all scenes
+    // deactivated).
     std::optional<std::map<Id, Time>> m_ForceScenes;
 
     struct LayerOverride
