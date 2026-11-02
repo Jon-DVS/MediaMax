@@ -223,7 +223,8 @@ times until another cue of the same kind targets the same layer.
 
 ```json
 "systems": [
-  { "name": "Main Wall", "host": "192.168.1.50", "port": 47600 },
+  { "name": "Main Wall", "host": "192.168.1.50", "port": 47600,
+    "renderDevice": "NVIDIA RTX 6000 Ada Generation" },
   { "name": "Lobby",     "host": "192.168.1.51", "port": 47600 }
 ]
 ```
@@ -233,13 +234,16 @@ times until another cue of the same kind targets the same layer.
 | `name` | string | yes | Label for the system |
 | `host` | string | yes | IP address (or hostname) of the machine running the playback engine |
 | `port` | int 1..65535 | no | Control-protocol port (default 47600) |
+| `renderDevice` | string | no | The Vulkan device this system should render on (name from the engine's `status.renderDevice.available`); empty/absent = the engine's default selection |
 
 The show file is where the system list lives: the control GUI loads its
 system list when a show is opened (File > Open) and writes it back in when
 the show is saved or pushed, and the CLI resolves `--system <name|idx>`
 from it (`--show <file>`). This is **client-side targeting info** — the
-playback engine parses and stores the field but does not use it for
-rendering.
+playback engine parses and stores the fields but does not use them for
+rendering; `renderDevice` is applied by the control via
+`system.setRenderDevice` (and re-applied whenever the system reconnects,
+so the selection survives engine restarts on multi-GPU machines).
 
 ## Displays (the wall)
 

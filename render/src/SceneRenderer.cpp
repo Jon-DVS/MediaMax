@@ -289,11 +289,52 @@ void SceneRenderer::setSceneSize(Size2i size)
     }
 }
 
+void SceneRenderer::reset()
+{
+    // The device handle goes first: a pool call racing this (the contract
+    // allows them from other threads) then sees no device and no-ops
+    // instead of allocating on the dying one.
+    m_Device = nullptr;
+    // Release the pool + pending uploads under the pool lock, then the
+    // render-thread-only state. create() re-fills everything afterwards.
+    {
+        std::lock_guard lock(m_UploadMutex);
+        m_MediaTextures.clear();
+        m_WarpTextures.clear();
+        m_OverlayTextures.clear();
+        m_PendingUploads.clear();
+    }
+    m_SceneRT[0] = nullptr;
+    m_SceneRT[1] = nullptr;
+    m_SceneFB[0] = nullptr;
+    m_SceneFB[1] = nullptr;
+    m_FinalSceneIndex = 0;
+    m_InputLayout = nullptr;
+    m_LinearSampler = nullptr;
+    m_LayerLayout = nullptr;
+    m_DisplayLayout = nullptr;
+    m_LayerPipeline = nullptr;
+    m_DisplayPipelines.clear();
+    m_DisplayVS = nullptr;
+    m_DisplayFS = nullptr;
+    m_WhiteTexture = nullptr;
+    m_TransparentTexture = nullptr;
+    m_VertexBuffer = nullptr;
+    m_VertexData.clear();
+    m_DisplayFBs.clear();
+    m_SceneSize = {0, 0};
+}
+
 // --- Texture pool ---------------------------------------------------------------
 
 void SceneRenderer::ensureMediaTexture(Id layerId, std::uint32_t width, std::uint32_t height)
 {
     std::lock_guard lock(m_UploadMutex);
+    if (!m_Device)
+    {
+        return; // uncreated (or mid device-switch): the texture is created
+                // on the first ensure after create() runs again
+    }
     auto it = m_MediaTextures.find(layerId);
     if (it != m_MediaTextures.end() && it->second.texture && it->second.width == width &&
         it->second.height == height)
@@ -345,6 +386,10 @@ nvrhi::TextureHandle SceneRenderer::mediaTexture(Id layerId) const
 void SceneRenderer::ensureWarpTexture(Id displayId, std::uint32_t size)
 {
     std::lock_guard lock(m_UploadMutex);
+    if (!m_Device)
+    {
+        return; // uncreated (or mid device-switch)
+    }
     auto it = m_WarpTextures.find(displayId);
     if (it != m_WarpTextures.end() && it->second.texture && it->second.width == size)
     {
@@ -396,6 +441,10 @@ nvrhi::TextureHandle SceneRenderer::warpTexture(Id displayId) const
 void SceneRenderer::ensureOverlayTexture(Id displayId, std::uint32_t width, std::uint32_t height)
 {
     std::lock_guard lock(m_UploadMutex);
+    if (!m_Device)
+    {
+        return; // uncreated (or mid device-switch)
+    }
     auto it = m_OverlayTextures.find(displayId);
     if (it != m_OverlayTextures.end() && it->second.texture && it->second.width == width &&
         it->second.height == height)

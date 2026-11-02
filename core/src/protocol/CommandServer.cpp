@@ -102,6 +102,25 @@ nlohmann::json idArray(const std::vector<Id>& ids)
     return arr;
 }
 
+// Case-insensitive name comparison (device names are vendor-cased; the
+// UI passes them back verbatim, and operators may retype them).
+bool sameNameInsensitive(const std::string& a, const std::string& b)
+{
+    if (a.size() != b.size())
+    {
+        return false;
+    }
+    for (std::size_t i = 0; i < a.size(); ++i)
+    {
+        if (std::tolower(static_cast<unsigned char>(a[i])) !=
+            std::tolower(static_cast<unsigned char>(b[i])))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 // The engine display that carries this name (the show file's display
 // entries key on the name; see applyShowDisplays).
 std::optional<Id> findDisplayIdByName(DisplayManager& displays, const std::string& name)
@@ -141,6 +160,7 @@ std::vector<std::string> CommandServer::supportedMethods()
             "status",
             "frame.state",
             "system.set",
+            "system.setRenderDevice",
             "show.load",
             "show.loadJson",
             "show.save",
@@ -186,6 +206,10 @@ Response CommandServer::handle(const Command& cmd) const
         else if (cmd.method == "system.set")
         {
             result = handleSystemSet(cmd.params);
+        }
+        else if (cmd.method == "system.setRenderDevice")
+        {
+            result = handleSystemSetRenderDevice(cmd.params);
         }
         else if (cmd.method == "show.load")
         {
@@ -333,7 +357,29 @@ nlohmann::json CommandServer::handleStatus() const
                             {"layers", scene.layers.size()}});
     }
 
-    return {
+    // The render device the engine runs on + what it could run on (the
+    // control's system settings dialog selects from it). Omitted when the
+    // app never reported device info (the core tests run without a GPU).
+    nlohmann::json renderDevice;
+    {
+        std::lock_guard lock(m_RenderDeviceMutex);
+        if (!m_RenderDeviceCurrent.empty() || !m_RenderDeviceAvailable.empty())
+        {
+            nlohmann::json available = nlohmann::json::array();
+            for (const auto& d : m_RenderDeviceAvailable)
+            {
+                available.push_back({{"index", d.index}, {"name", d.name}, {"type", d.type}});
+            }
+            renderDevice = {
+                {"current", m_RenderDeviceCurrent},
+                {"type", m_RenderDeviceType},
+                {"switching", m_RenderDeviceSwitching},
+                {"available", available},
+            };
+        }
+    }
+
+    nlohmann::json result = {
         {"system", m_SystemName},
         {"version", MEDIAMAX_VERSION},
         {"hostname", m_HostName},
@@ -352,6 +398,11 @@ nlohmann::json CommandServer::handleStatus() const
         {"displays", displayArr},
         {"scenes", sceneArr},
     };
+    if (!renderDevice.is_null())
+    {
+        result["renderDevice"] = std::move(renderDevice);
+    }
+    return result;
 }
 
 nlohmann::json CommandServer::handleFrameState() const
@@ -475,6 +526,37 @@ nlohmann::json CommandServer::handleSystemSet(const nlohmann::json& params) cons
     // command); the engine mirrors it for status reporting.
     m_SystemName = name;
     return {{"system", m_SystemName}};
+}
+
+nlohmann::json CommandServer::handleSystemSetRenderDevice(const nlohmann::json& params) const
+{
+    // "device" is optional: absent or empty means the engine's default
+    // selection (the first eligible device, as at startup).
+    const std::string device = optionalString(params, "device").value_or("");
+
+    std::lock_guard lock(m_RenderDeviceMutex);
+    if (!m_RenderDeviceSwitchFn)
+    {
+        throw ParameterError("this engine does not support render device selection");
+    }
+    if (m_RenderDeviceSwitching)
+    {
+        throw ParameterError("a render device switch is already in progress");
+    }
+    // Selecting the device the engine already runs on is a no-op.
+    if (!device.empty() && sameNameInsensitive(device, m_RenderDeviceCurrent))
+    {
+        return {{"device", m_RenderDeviceCurrent}, {"switching", false}};
+    }
+    std::string error;
+    if (!m_RenderDeviceSwitchFn(device, error))
+    {
+        throw ParameterError(error.empty() ? "the engine rejected the render device switch" : error);
+    }
+    // The switch runs on the app's frame loop (a GPU rebuild); the status
+    // result's "renderDevice.switching" tracks it until the app clears it.
+    m_RenderDeviceSwitching = true;
+    return {{"device", device.empty() ? "(default)" : device}, {"switching", true}};
 }
 
 nlohmann::json CommandServer::handleShowLoad(const nlohmann::json& params) const

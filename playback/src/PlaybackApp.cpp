@@ -201,6 +201,9 @@ int PlaybackApp::run()
         {
             break;
         }
+        // The device switch runs before surface ops: a display added while
+        // the switch is in flight must get its window on the NEW device.
+        processPendingDeviceSwitch();
         processPendingSurfaceOps();
 
         const auto now = std::chrono::steady_clock::now();
@@ -331,10 +334,11 @@ bool PlaybackApp::initVulkan()
         }
     }
 
-    // Phase 3: physical device (one supporting the primary surface) + the
-    // logical device with the swapchain extension + the NVRHI wrapper.
+    // Phase 3: physical device (--device name, or the first eligible one
+    // supporting the primary surface) + the logical device with the
+    // swapchain extension + the NVRHI wrapper.
     const VkSurfaceKHR primary = m_Surfaces.empty() ? VK_NULL_HANDLE : m_Surfaces[0]->surface;
-    if (!m_Vulkan->initPhysicalDevice(primary, error))
+    if (!m_Vulkan->initPhysicalDevice(primary, m_Args.deviceName, error))
     {
         log.error("Vulkan physical device selection failed: {}", error);
         return false;
@@ -513,6 +517,199 @@ void PlaybackApp::handleWindowResizes()
     m_Scene.invalidateDisplayFramebufferCache();
 }
 
+// --- Runtime render device switch (system.setRenderDevice) ---------------------
+
+bool PlaybackApp::requestDeviceSwitch(const std::string& device, std::string& error)
+{
+    // Called with m_StateMutex held (the command handler holds it).
+    if (m_PendingDeviceSwitch)
+    {
+        error = "a render device switch is already in progress";
+        return false;
+    }
+    // Validate the request now (instance-level queries are safe off the
+    // render thread) so the command fails cleanly instead of the rebuild
+    // dying mid-way in the frame loop.
+    if (!device.empty())
+    {
+        const auto target = m_Vulkan->findDevice(device);
+        if (!target)
+        {
+            std::string names;
+            for (const auto& d : m_Vulkan->enumerateDevices())
+            {
+                if (!names.empty())
+                {
+                    names += ", ";
+                }
+                names += d.name;
+            }
+            error = "unknown render device '" + device + "' (available: " + names + ")";
+            return false;
+        }
+        // With displays up, the device must be able to present to the
+        // windows (the rebuild constrains the selection to the first
+        // display's surface the same way).
+        if (!m_Surfaces.empty() &&
+            !m_Vulkan->canRenderOn(target->handle, m_Surfaces[0]->surface))
+        {
+            error = "render device '" + device + "' cannot present to the display windows";
+            return false;
+        }
+    }
+    m_PendingDeviceSwitch = device;
+    return true;
+}
+
+void PlaybackApp::processPendingDeviceSwitch()
+{
+    auto& log = Logger::instance();
+    std::optional<std::string> requested;
+    {
+        std::lock_guard lock(m_StateMutex);
+        requested = m_PendingDeviceSwitch;
+        m_PendingDeviceSwitch.reset();
+    }
+    if (!requested)
+    {
+        return;
+    }
+
+    // Resolve the target before touching anything: an empty request means
+    // "default" (the first render-eligible device - the same rule as
+    // initPhysicalDevice's no-name path), and a request that resolves to
+    // the current device is a no-op.
+    const VkSurfaceKHR preferred = m_Surfaces.empty() ? VK_NULL_HANDLE : m_Surfaces[0]->surface;
+    std::string target = *requested;
+    if (target.empty())
+    {
+        for (const auto& d : m_Vulkan->enumerateDevices())
+        {
+            if (m_Vulkan->canRenderOn(d.handle, preferred))
+            {
+                target = d.name;
+                break;
+            }
+        }
+    }
+    if (target.empty())
+    {
+        log.error("render device switch: no eligible device found; the engine is stopping");
+        m_CommandServer->setRenderDeviceSwitchState(false);
+        m_ShutdownRequested.store(true);
+        return;
+    }
+    const auto current = m_Vulkan->findDevice(m_Vulkan->deviceName());
+    const auto resolved = m_Vulkan->findDevice(target);
+    if (current && resolved && current->index == resolved->index)
+    {
+        log.info("render device switch to '{}' is a no-op (already current)", target);
+        m_CommandServer->setRenderDeviceSwitchState(false);
+        return;
+    }
+
+    // 1. Quiesce: no in-flight GPU work, no pending presents.
+    m_Vulkan->nvrhiDevice()->waitForIdle();
+    for (auto& sp : m_Surfaces)
+    {
+        if (sp->fencePending && sp->fence != VK_NULL_HANDLE)
+        {
+            vkWaitForFences(m_Vulkan->device(), 1, &sp->fence, VK_TRUE, UINT64_MAX);
+            sp->fencePending = false;
+        }
+    }
+    m_Vulkan->nvrhiDevice()->runGarbageCollection();
+
+    // 2. Tear down the old device's world: the per-display swapchains and
+    //    present fences (raw Vulkan), the scene renderer's NVRHI resources,
+    //    then the NVRHI device + VkDevice itself. The instance survives.
+    for (auto& sp : m_Surfaces)
+    {
+        DisplaySurface& ds = *sp;
+        if (ds.swapchain.valid())
+        {
+            ds.swapchain.destroy();
+        }
+        if (ds.fence != VK_NULL_HANDLE)
+        {
+            vkDestroyFence(m_Vulkan->device(), ds.fence, nullptr);
+            ds.fence = VK_NULL_HANDLE;
+        }
+        ds.fencePending = false;
+        ds.sizeDirty = false;
+    }
+    const Size2i sceneSize = m_Scene.sceneSize();
+    m_Scene.reset();
+    m_FrameQuery = nullptr;
+    m_Vulkan->resetDevice();
+
+    // 3. The new device. With displays up the first window's surface
+    //    constrains the choice (it must be able to present there).
+    std::string error;
+    if (!m_Vulkan->initPhysicalDevice(preferred, target, error))
+    {
+        log.error("render device switch to '{}' failed: {}; the engine is stopping", target, error);
+        m_CommandServer->setRenderDeviceSwitchState(false);
+        m_ShutdownRequested.store(true);
+        return;
+    }
+    if (!m_Vulkan->initDevice(error))
+    {
+        log.error("render device switch to '{}' failed: {}; the engine is stopping", target, error);
+        m_CommandServer->setRenderDeviceSwitchState(false);
+        m_ShutdownRequested.store(true);
+        return;
+    }
+
+    // 4. The GPU pipeline on the new device. Same SceneRenderer object -
+    //    the media pump references it in place; its texture pools are
+    //    rebuilt on demand as frames are delivered again.
+    render::SceneRenderer::Desc sceneDesc;
+    sceneDesc.device = m_Vulkan->nvrhiDevice();
+    sceneDesc.sceneSize = sceneSize;
+    if (!render::SceneRenderer::create(sceneDesc, m_Scene, error))
+    {
+        log.error("scene renderer re-creation after device switch failed: {}; the engine "
+                  "is stopping",
+                  error);
+        m_CommandServer->setRenderDeviceSwitchState(false);
+        m_ShutdownRequested.store(true);
+        return;
+    }
+    m_FrameQuery = m_Vulkan->nvrhiDevice()->createTimerQuery();
+    if (!m_FrameQuery)
+    {
+        log.warning("timer query unavailable after device switch: the status overlay "
+                    "will report 0 ms GPU time");
+    }
+
+    // 5. Swapchains (and present fences) for the existing windows. A
+    //    failure here leaves that display windowed but dark - the per-frame
+    //    resize path retries whenever the swapchain is invalid.
+    for (auto& sp : m_Surfaces)
+    {
+        std::string swError;
+        if (!createSwapchainFor(*sp, swError))
+        {
+            log.error("display {}: swapchain creation after device switch failed: {}",
+                      sp->displayId, swError);
+        }
+    }
+    m_Scene.invalidateDisplayFramebufferCache();
+
+    {
+        std::vector<protocol::RenderDeviceInfo> available;
+        for (const auto& d : m_Vulkan->enumerateDevices())
+        {
+            available.push_back({d.index, d.name, d.type});
+        }
+        m_CommandServer->setRenderDeviceInfo(m_Vulkan->deviceName(), m_Vulkan->deviceType(),
+                                             available);
+    }
+    m_CommandServer->setRenderDeviceSwitchState(false);
+    log.info("render device switched to {}", m_Vulkan->deviceName());
+}
+
 // --- Runtime display add/remove (display.add / display.remove) ------------------
 
 void PlaybackApp::processPendingSurfaceOps()
@@ -608,7 +805,12 @@ void PlaybackApp::addSurfaceForDisplay(const SurfaceOp& op)
         m_Displays.setDisplayMonitor(op.displayId, monitorName(sp->lastMonitor));
     }
 
-    m_Surfaces.push_back(std::move(sp));
+    // The container is read by the command thread (requestDeviceSwitch's
+    // presentability check, under m_StateMutex) - serialize the mutation.
+    {
+        std::lock_guard lock(m_StateMutex);
+        m_Surfaces.push_back(std::move(sp));
+    }
     log.info("display.add: display {} online", op.displayId);
 }
 
@@ -649,7 +851,13 @@ void PlaybackApp::removeSurfaceForDisplay(Id displayId)
         vkDestroySurfaceKHR(m_Vulkan->instance(), ds.surface, nullptr);
         ds.surface = VK_NULL_HANDLE;
     }
-    m_Surfaces.erase(it);
+    // Serialize the container mutation against the command thread's read
+    // (requestDeviceSwitch, under m_StateMutex). The iterator is stable:
+    // only this render thread mutates the container.
+    {
+        std::lock_guard lock(m_StateMutex);
+        m_Surfaces.erase(it);
+    }
 
     // The destroyed swapchain's images may still be cached as display
     // framebuffers (keyed by texture pointer); drop the cache so a new
@@ -1378,6 +1586,24 @@ bool PlaybackApp::initEngine()
             }
             return media::makeThumbnail(factory, path, metadata, maxW, maxH, rgba, w, h, error);
         });
+
+    // system.setRenderDevice: the handler pre-validates and queues; the
+    // frame loop performs the GPU rebuild (processPendingDeviceSwitch).
+    // The callback runs with m_StateMutex held (the command handler holds
+    // it), so it must not lock again.
+    m_CommandServer->setRenderDeviceSwitchFunction(
+        [this](const std::string& device, std::string& error) {
+            return requestDeviceSwitch(device, error);
+        });
+    {
+        std::vector<protocol::RenderDeviceInfo> available;
+        for (const auto& d : m_Vulkan->enumerateDevices())
+        {
+            available.push_back({d.index, d.name, d.type});
+        }
+        m_CommandServer->setRenderDeviceInfo(m_Vulkan->deviceName(), m_Vulkan->deviceType(),
+                                             available);
+    }
 
     // Startup show: go through the same command handler as the network
     // protocol (media loading + id remapping + loadShow).

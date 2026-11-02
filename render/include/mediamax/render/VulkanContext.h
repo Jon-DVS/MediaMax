@@ -24,11 +24,23 @@
 #include <vulkan/vulkan.h>
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
 namespace mediamax::render
 {
+
+// One physical device visible to the instance (the status result's
+// "renderDevice.available" entries and the system.setRenderDevice target
+// selection).
+struct VulkanDeviceInfo
+{
+    std::uint32_t index = 0; // position in the instance enumeration
+    std::string name;
+    std::string type; // "Discrete GPU" / "Integrated GPU" / "Virtual GPU" / "CPU" / "Other"
+    VkPhysicalDevice handle = VK_NULL_HANDLE;
+};
 
 struct VulkanContextDesc
 {
@@ -55,9 +67,29 @@ public:
     // Creates the instance only (with the requested extensions).
     static bool createInstance(const VulkanContextDesc& desc, VulkanContext& out, std::string& error);
 
-    // Selects the physical device (preferring one that supports
-    // `preferredSurface`, when given). Must follow createInstance().
+    // Selects the physical device. When `preferredDevice` is non-empty, the
+    // device with exactly that name (case-insensitive); otherwise the first
+    // render-eligible device in enumeration order. A device that does not
+    // support `preferredSurface` (when given) is never selected. Must
+    // follow createInstance().
+    bool initPhysicalDevice(VkSurfaceKHR preferredSurface, const std::string& preferredDevice,
+                            std::string& error);
+
+    // Default (first eligible) device selection.
     bool initPhysicalDevice(VkSurfaceKHR preferredSurface, std::string& error);
+
+    // All physical devices the instance sees. Requires createInstance();
+    // empty before that.
+    std::vector<VulkanDeviceInfo> enumerateDevices() const;
+
+    // Exact-name lookup (case-insensitive) into enumerateDevices();
+    // std::nullopt when no device has that name.
+    std::optional<VulkanDeviceInfo> findDevice(const std::string& name) const;
+
+    // True when the device would pass initPhysicalDevice's filters: a
+    // graphics queue family plus surface-present support when `surface`
+    // is not VK_NULL_HANDLE. Instance-level queries (safe from any thread).
+    bool canRenderOn(VkPhysicalDevice device, VkSurfaceKHR surface) const;
 
     // Creates the logical device (with the swapchain extension when
     // hasSurface()) and the NVRHI wrapper. Must follow initPhysicalDevice().
@@ -85,6 +117,16 @@ public:
     // True when the device was created with the swapchain extension.
     bool hasSurface() const { return m_HasSurface; }
     const std::string& deviceName() const { return m_DeviceName; }
+    // The selected device's type string (see VulkanDeviceInfo::type).
+    const std::string& deviceType() const { return m_DeviceType; }
+
+    // Destroys the logical device and the NVRHI wrapper, keeping the
+    // instance: the teardown half of a render device switch (system.
+    // setRenderDevice). The caller must first release everything NVRHI
+    // (scene renderer, swapchains) and raw-Vulkan (fences) it owns and
+    // quiesce the device (waitForIdle); afterwards initPhysicalDevice() /
+    // initDevice() run again on the same instance.
+    void resetDevice();
 
 private:
     // Shared by create() and createInstance().
@@ -102,6 +144,7 @@ private:
     std::vector<std::string> m_DeviceExtensions;
     nvrhi::vulkan::DeviceHandle m_NvrhiDevice;
     std::string m_DeviceName;
+    std::string m_DeviceType;
 };
 
 } // namespace mediamax::render

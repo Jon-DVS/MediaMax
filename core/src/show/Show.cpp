@@ -266,7 +266,14 @@ nlohmann::json Show::toJson() const
     nlohmann::json systemsArr = nlohmann::json::array();
     for (const auto& sys : systems)
     {
-        systemsArr.push_back({{"name", sys.name}, {"host", sys.host}, {"port", sys.port}});
+        nlohmann::json sysJson = {{"name", sys.name}, {"host", sys.host}, {"port", sys.port}};
+        // Optional: a system without a render device selection omits it
+        // (older files parse as-is - the field is additive).
+        if (!sys.renderDevice.empty())
+        {
+            sysJson["renderDevice"] = sys.renderDevice;
+        }
+        systemsArr.push_back(std::move(sysJson));
     }
     j["systems"] = systemsArr;
 
@@ -505,6 +512,15 @@ std::optional<Show> Show::fromJson(const nlohmann::json& in, std::string& error)
                     return std::nullopt;
                 }
                 sys.port = static_cast<std::uint16_t>(sj["port"].get<int>());
+            }
+            if (sj.contains("renderDevice"))
+            {
+                if (!sj["renderDevice"].is_string())
+                {
+                    error = "show file: invalid systems entry";
+                    return std::nullopt;
+                }
+                sys.renderDevice = sj["renderDevice"].get<std::string>();
             }
             show.systems.push_back(std::move(sys));
         }

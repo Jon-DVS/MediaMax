@@ -1822,6 +1822,54 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
             liveOk = liveOk && renamedOk;
         }
 
+        // Render device selection (system.setRenderDevice): the engine
+        // reports its Vulkan devices in the status; picking the device it
+        // already runs on + Apply is a no-op switch that persists the
+        // selection in the show file's systems entry (the poll loop
+        // re-applies it whenever the engine reconnects).
+        bool deviceOk = false;
+        if (renamedOk)
+        {
+            std::string current;
+            const auto deviceDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(6);
+            while (current.empty() && std::chrono::steady_clock::now() < deviceDeadline)
+            {
+                current = app.testSystemRenderDeviceCurrent(1);
+                if (current.empty())
+                {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                }
+            }
+            if (!current.empty())
+            {
+                app.testOpenModal("syssettings");
+                bool opened = false;
+                for (int i = 0; i < 3 && !opened; ++i)
+                {
+                    glfwPollEvents();
+                    if (runtime.renderFrame())
+                    {
+                        opened = app.testModalOpen("syssettings");
+                    }
+                }
+                if (opened)
+                {
+                    app.testSetSystemSettingsRenderDevice(current);
+                    const bool applied = app.testApplySystemSettings();
+                    deviceOk = applied && app.testSystemRenderDeviceAt(1) == current;
+                }
+            }
+            app.testCloseModal("syssettings");
+            for (int i = 0; i < 3; ++i)
+            {
+                glfwPollEvents();
+                runtime.renderFrame();
+            }
+        }
+        liveReport += std::string(deviceOk ? "PASS " : "FAIL ") +
+                      "system settings persist the render device selection (no-op switch)\n";
+        liveOk = liveOk && deviceOk;
+
         // Re-target the entry's port: a closed port goes offline (the poll
         // thread can no longer reach the engine), switching back comes
         // online again with a fresh status - the dialog's address path.
@@ -1829,6 +1877,17 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
         const int badPort = (livePort < 65535) ? livePort + 1 : livePort - 1;
         if (renamedOk)
         {
+            // Diagnostics: the first stage that did not pass, so a failure
+            // says where it broke instead of only that the check failed.
+            std::string failStage;
+            auto fail = [&failStage](bool ok, const char* stage)
+            {
+                if (!ok && failStage.empty())
+                {
+                    failStage = stage;
+                }
+            };
+
             app.testOpenModal("syssettings");
             bool opened = false;
             for (int i = 0; i < 3 && !opened; ++i)
@@ -1839,12 +1898,15 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
                     opened = app.testModalOpen("syssettings");
                 }
             }
+            fail(opened, "open settings");
+            bool appliedOffline = false;
             bool wentOffline = false;
             if (opened)
             {
                 app.testSetSystemSettingsPort(badPort);
-                const bool applied = app.testApplySystemSettings();
-                if (applied)
+                appliedOffline = app.testApplySystemSettings();
+                fail(appliedOffline, "apply re-target to the closed port");
+                if (appliedOffline)
                 {
                     const auto deadline =
                         std::chrono::steady_clock::now() + std::chrono::seconds(6);
@@ -1858,12 +1920,14 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
                     }
                 }
             }
+            fail(wentOffline, "detect the closed port as offline");
             app.testCloseModal("syssettings");
             for (int i = 0; i < 3; ++i)
             {
                 glfwPollEvents();
                 runtime.renderFrame();
             }
+            bool appliedBack = false;
             bool backOnline = false;
             if (wentOffline)
             {
@@ -1877,11 +1941,13 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
                         opened2 = app.testModalOpen("syssettings");
                     }
                 }
+                fail(opened2, "reopen settings");
                 if (opened2)
                 {
                     app.testSetSystemSettingsPort(static_cast<int>(livePort));
-                    const bool applied = app.testApplySystemSettings();
-                    if (applied)
+                    appliedBack = app.testApplySystemSettings();
+                    fail(appliedBack, "apply the re-target back");
+                    if (appliedBack)
                     {
                         const auto deadline =
                             std::chrono::steady_clock::now() + std::chrono::seconds(6);
@@ -1899,18 +1965,30 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
                         }
                     }
                 }
-                retargetOk = backOnline && app.testSystemNameAt(1) == "self-test-2-r";
             }
+            fail(backOnline, "detect the re-targeted port as online");
+            retargetOk = backOnline && app.testSystemNameAt(1) == "self-test-2-r";
             app.testCloseModal("syssettings");
             for (int i = 0; i < 3; ++i)
             {
                 glfwPollEvents();
                 runtime.renderFrame();
             }
+            std::string detail;
+            if (!retargetOk)
+            {
+                detail = " (failed at: " + failStage;
+                const std::string err = app.testSystemSettingsError();
+                if (!err.empty())
+                {
+                    detail += "; apply error: " + err;
+                }
+                detail += ")";
+            }
             liveReport += std::string(retargetOk ? "PASS " : "FAIL ") +
                           "system settings re-targeted the address (" +
                           std::to_string(livePort) + " -> " + std::to_string(badPort) +
-                          " offline -> " + std::to_string(livePort) + " back online)\n";
+                          " offline -> " + std::to_string(livePort) + " back online)" + detail + "\n";
             liveOk = liveOk && retargetOk;
         }
     }

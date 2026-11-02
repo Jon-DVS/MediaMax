@@ -466,7 +466,8 @@ void ControlGuiApp::syncSystemsToShow()
     show.systems.clear();
     for (const auto& system : m_Systems)
     {
-        show.systems.push_back({system->name(), system->host(), system->port()});
+        show.systems.push_back(
+            {system->name(), system->host(), system->port(), system->renderDevice()});
     }
 }
 
@@ -493,7 +494,8 @@ void ControlGuiApp::applyShowSystems()
         }
         if (!conn)
         {
-            conn = std::make_unique<SystemConnection>(ref.name, ref.host, ref.port);
+            conn = std::make_unique<SystemConnection>(ref.name, ref.host, ref.port,
+                                                      ref.renderDevice);
             conn->connect();
         }
         next.push_back(std::move(conn));
@@ -1841,6 +1843,7 @@ void ControlGuiApp::openSystemSettings(int index)
     m_SysSettings.name = conn.name();
     m_SysSettings.host = conn.host();
     m_SysSettings.port = static_cast<int>(conn.port());
+    m_SysSettings.renderDevice = conn.renderDevice();
     m_SysSettings.error.clear();
     m_SysSettingsIndex = index;
     m_SysSettingsModal = true;
@@ -1860,9 +1863,49 @@ bool ControlGuiApp::applySystemSettings()
         return false;
     }
     auto& conn = *m_Systems[static_cast<size_t>(m_SysSettingsIndex)];
+
+    // The render device selection: a non-default pick on a connected
+    // engine is sent now (the engine validates against its device list and
+    // rebuilds its GPU in the frame loop; "switching" appears in the
+    // status until it is done). Sent first so a refusal keeps the dialog
+    // open with nothing applied. A selection the engine already runs on
+    // is reported as a no-op by the engine itself. Only when the latest
+    // status actually reports the current device: right after a
+    // (re)connect the snapshot is empty, and this Apply may be retargeting
+    // away from a dead engine - sending against conn's old address would
+    // fail. The poll loop's re-apply pushes the selection as soon as a
+    // fresh status arrives (and it is the one that survives restarts).
+    if (conn.active() && !m_SysSettings.renderDevice.empty())
+    {
+        const auto snap = conn.snapshot();
+        const nlohmann::json renderDevice =
+            snap.haveStatus ? snap.status.value("renderDevice", nlohmann::json())
+                            : nlohmann::json();
+        const bool reportsDevice =
+            renderDevice.is_object() && renderDevice.contains("current");
+        if (reportsDevice)
+        {
+            const std::string current = renderDevice.value("current", std::string());
+            if (current != m_SysSettings.renderDevice)
+            {
+                nlohmann::json deviceResult;
+                std::string deviceError;
+                if (!conn.send("system.setRenderDevice", {{"device", m_SysSettings.renderDevice}},
+                               deviceResult, deviceError, 10000))
+                {
+                    m_SysSettings.error = "render device: " + deviceError;
+                    return false;
+                }
+                log("render device: " + conn.name() + " switching to " +
+                    m_SysSettings.renderDevice);
+            }
+        }
+    }
+
     const bool wasActive = conn.active();
     conn.retarget(m_SysSettings.name, m_SysSettings.host,
                   static_cast<std::uint16_t>(m_SysSettings.port));
+    conn.setRenderDevice(m_SysSettings.renderDevice); // persists in the show file
     log("system settings applied: " + m_SysSettings.name + " (" + m_SysSettings.host + ":" +
         std::to_string(m_SysSettings.port) + ")" + (wasActive ? "; reconnecting" : ""));
     m_SysSettingsModal = false;
@@ -4188,6 +4231,65 @@ void ControlGuiApp::renderModals()
                 ImGui::SameLine();
                 ImGui::SetNextItemWidth(90.0f);
                 ImGui::InputInt("Port##sysport", &m_SysSettings.port);
+                // Render device (system.setRenderDevice): the engine
+                // reports its Vulkan devices in the status ("renderDevice").
+                // The selection persists in the show file's systems entry
+                // and is re-applied whenever the engine (re)connects - this
+                // is how multi-GPU systems pin the render target GPU.
+                if (snap.haveStatus)
+                {
+                    const nlohmann::json rd = snap.status.value("renderDevice", nlohmann::json());
+                    if (rd.is_object() && rd.contains("available") && rd["available"].is_array())
+                    {
+                        std::vector<std::string> items;
+                        std::vector<std::string> values; // stored name per item ("" = auto)
+                        items.push_back("auto (engine default)");
+                        values.push_back("");
+                        const std::string current = rd.value("current", std::string());
+                        for (const auto& d : rd["available"])
+                        {
+                            const std::string name = d.value("name", std::string());
+                            std::string label = name;
+                            const std::string type = d.value("type", std::string());
+                            if (!type.empty())
+                            {
+                                label += "  [" + type + "]";
+                            }
+                            if (name == current)
+                            {
+                                label += "  (current)";
+                            }
+                            items.push_back(label);
+                            values.push_back(name);
+                        }
+                        int sel = 0;
+                        for (size_t i = 0; i < values.size(); ++i)
+                        {
+                            if (values[i] == m_SysSettings.renderDevice)
+                            {
+                                sel = static_cast<int>(i);
+                                break;
+                            }
+                        }
+                        std::vector<const char*> itemPtrs;
+                        itemPtrs.reserve(items.size());
+                        for (const auto& s : items)
+                        {
+                            itemPtrs.push_back(s.c_str());
+                        }
+                        ImGui::SetNextItemWidth(-FLT_MIN);
+                        if (ImGui::Combo("Render device##sysdevice", &sel, itemPtrs.data(),
+                                         static_cast<int>(itemPtrs.size())))
+                        {
+                            m_SysSettings.renderDevice = values[static_cast<size_t>(sel)];
+                        }
+                        if (rd.value("switching", false))
+                        {
+                            ImGui::TextDisabled(
+                                "(switching - a frame or two drops while the GPU re-initializes)");
+                        }
+                    }
+                }
                 if (!m_SysSettings.error.empty())
                 {
                     ImGui::TextColored(kBadColor, "%s", m_SysSettings.error.c_str());
@@ -6008,10 +6110,21 @@ void ControlGuiApp::testSetSystemSettingsPort(int port)
     m_SysSettings.port = port;
 }
 
+void ControlGuiApp::testSetSystemSettingsRenderDevice(const std::string& device)
+{
+    // The dialog's Render device combo edits this field.
+    m_SysSettings.renderDevice = device;
+}
+
 bool ControlGuiApp::testApplySystemSettings()
 {
     // The exact action of the dialog's Apply button (no ImGui involved).
     return applySystemSettings();
+}
+
+std::string ControlGuiApp::testSystemSettingsError() const
+{
+    return m_SysSettings.error;
 }
 
 std::string ControlGuiApp::testSystemNameAt(int index) const
@@ -6021,6 +6134,30 @@ std::string ControlGuiApp::testSystemNameAt(int index) const
         return std::string();
     }
     return m_Systems[static_cast<size_t>(index)]->name();
+}
+
+std::string ControlGuiApp::testSystemRenderDeviceAt(int index) const
+{
+    if (index < 0 || index >= static_cast<int>(m_Systems.size()))
+    {
+        return std::string();
+    }
+    return m_Systems[static_cast<size_t>(index)]->renderDevice();
+}
+
+std::string ControlGuiApp::testSystemRenderDeviceCurrent(int index) const
+{
+    if (index < 0 || index >= static_cast<int>(m_Systems.size()))
+    {
+        return std::string();
+    }
+    const auto snap = m_Systems[static_cast<size_t>(index)]->snapshot();
+    if (!snap.haveStatus || !snap.status.contains("renderDevice") ||
+        !snap.status["renderDevice"].is_object())
+    {
+        return std::string();
+    }
+    return snap.status["renderDevice"].value("current", std::string());
 }
 
 std::string ControlGuiApp::testSystemHostname(int index) const

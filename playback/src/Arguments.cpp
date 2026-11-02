@@ -102,6 +102,10 @@ bool parseArguments(int argc, char** argv, AppArgs& out, std::string& error)
             {
                 out.systemName = next("--system-name");
             }
+            else if (a == "--device")
+            {
+                out.deviceName = next("--device");
+            }
             else if (a == "--width")
             {
                 out.width = std::stoi(next("--width"));
@@ -166,6 +170,9 @@ std::string applicationUsage()
        << "  --port <n>             Control server port (default 47600)\n"
        << "  --show <file.json>     Show file to load at startup\n"
        << "  --system-name <name>   Name reported to the control interface\n"
+       << "  --device <name>        Vulkan render device to run on (default:\n"
+       << "                         the first eligible device; the device\n"
+       << "                         list is reported in the status result)\n"
        << "  --width <n>            Startup display width (default 1920)\n"
        << "  --height <n>           Startup display height (default 1080)\n"
        << "  --display WxH@X+Y      One physical output; repeat for a wall\n"

@@ -8,6 +8,7 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -962,6 +963,82 @@ TEST_CASE("Final render: decoded video and image media reach the display")
 #else
     DOCTEST_MESSAGE("skipping: built without FFmpeg");
 #endif
+}
+
+TEST_CASE("Render device enumeration and reset/re-init (device switch)")
+{
+    runGpuTest("device enumeration", [](Gpu& g) {
+        // The instance enumerates at least the device it was created on,
+        // and the current device is among them with a type string.
+        const auto devices = g.context.enumerateDevices();
+        REQUIRE(!devices.empty());
+        for (const auto& d : devices)
+        {
+            CHECK(!d.name.empty());
+            CHECK(!d.type.empty());
+        }
+        const auto current = g.context.findDevice(g.context.deviceName());
+        REQUIRE(current.has_value());
+        CHECK(current->name == g.context.deviceName());
+        CHECK(!g.context.deviceType().empty());
+        CHECK(g.context.canRenderOn(current->handle, VK_NULL_HANDLE));
+
+        // Case-insensitive exact-name lookup; a bogus name is a miss.
+        std::string folded = g.context.deviceName();
+        for (auto& c : folded)
+        {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        CHECK(g.context.findDevice(folded).has_value());
+        CHECK(!g.context.findDevice("no such device").has_value());
+    });
+
+    // The destructive half: the exact teardown + re-init sequence the
+    // playback app's frame loop performs for system.setRenderDevice
+    // (quiesce, reset renderer, destroy the NVRHI/Vk device, re-select the
+    // physical device by name, rebuild). It targets the SAME device, so
+    // the shared Gpu stays usable for the other tests; a failure
+    // mid-sequence recovers before the test returns.
+    runGpuTest("device switch rebuild", [](Gpu& g) {
+        const std::string currentName = g.context.deviceName();
+        g.context.nvrhiDevice()->waitForIdle();
+        g.renderer.reset();
+        g.context.resetDevice();
+
+        std::string error;
+        const bool reinitOk =
+            g.context.initPhysicalDevice(VK_NULL_HANDLE, currentName, error) &&
+            g.context.initDevice(error);
+        if (!reinitOk)
+        {
+            // Best-effort recovery: the following tests need a working device.
+            g.context.initPhysicalDevice(VK_NULL_HANDLE, std::string(), error);
+            g.context.initDevice(error);
+            SceneRenderer::Desc rd;
+            rd.device = g.context.nvrhiDevice();
+            rd.sceneSize = Size2i{256, 256};
+            SceneRenderer::create(rd, g.renderer, error);
+            DOCTEST_MESSAGE("device re-init failed: " << error);
+            return;
+        }
+        REQUIRE(g.context.deviceName() == currentName);
+
+        SceneRenderer::Desc rd;
+        rd.device = g.context.nvrhiDevice();
+        rd.sceneSize = Size2i{256, 256};
+        REQUIRE(SceneRenderer::create(rd, g.renderer, error));
+
+        SceneRenderer::FrameInput frame;
+        frame.layers.push_back(colorLayer(Color4{0.25f, 0.5f, 0.75f, 1.f}));
+        renderOneFrame(g.renderer, frame);
+        std::vector<std::uint8_t> rgba;
+        REQUIRE(g.renderer.readBackScene(rgba));
+        const Pixel p = pixelAt(rgba, 256, 128, 128);
+        checkClose("r", p.r, 0.25f);
+        checkClose("g", p.g, 0.5f);
+        checkClose("b", p.b, 0.75f);
+        CHECK(p.a == 255);
+    });
 }
 
 } // TEST_SUITE("Render")

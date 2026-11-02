@@ -3,8 +3,8 @@
 // Command-line arguments for the playback engine.
 //
 //   mediamax_playback [--host <ip>] [--port <n>] [--show <file.json>]
-//                     [--system-name <name>] [--width <n>] [--height <n>]
-//                     [--display WxH@X+Y ...]
+//                     [--system-name <name>] [--device <name>]
+//                     [--width <n>] [--height <n>] [--display WxH@X+Y ...]
 //                     [--self-test] [--self-test-out <file.ppm>]
 //                     [--self-test-seconds <n>]
 //
@@ -43,6 +43,10 @@ struct AppArgs
     // windowless and waits for display information (a show's "displays"
     // section or display.add).
     bool explicitWindow = false;
+    // Vulkan render device name (--device); empty = the first eligible
+    // device. A device that exists but cannot present to a window's
+    // surface fails startup with a clean error.
+    std::string deviceName;
 
     bool selfTest = false;
     std::string selfTestOut = "selftest.ppm";

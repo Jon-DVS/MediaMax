@@ -1,5 +1,6 @@
 #include "gui/SystemConnection.h"
 
+#include <cctype>
 #include <chrono>
 #include <set>
 
@@ -25,10 +26,31 @@ constexpr int kThumbnailHeight = 180;
 constexpr std::uint32_t kThumbnailTimeoutMs = 15000;
 constexpr auto kThumbnailRetryDelay = std::chrono::seconds(10);
 
+// Case-insensitive name comparison (the engine matches render device
+// names case-insensitively; keep the re-apply decision consistent).
+bool sameName(const std::string& a, const std::string& b)
+{
+    if (a.size() != b.size())
+    {
+        return false;
+    }
+    for (std::size_t i = 0; i < a.size(); ++i)
+    {
+        if (std::tolower(static_cast<unsigned char>(a[i])) !=
+            std::tolower(static_cast<unsigned char>(b[i])))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 } // namespace
 
-SystemConnection::SystemConnection(std::string name, std::string host, std::uint16_t port)
-    : m_Name(std::move(name)), m_Host(std::move(host)), m_Port(port)
+SystemConnection::SystemConnection(std::string name, std::string host, std::uint16_t port,
+                                   std::string renderDevice)
+    : m_Name(std::move(name)), m_Host(std::move(host)), m_Port(port),
+      m_RenderDevice(std::move(renderDevice))
 {
 }
 
@@ -50,6 +72,9 @@ void SystemConnection::connect()
         m_Thumbnails.clear();
         m_PendingThumbnails.clear();
         m_ThumbnailRetry = std::chrono::steady_clock::now();
+        // A fresh connection cycle: the engine (possibly restarted) must
+        // be re-checked against the persisted render device selection.
+        m_DeviceReapplied = false;
     }
     m_Running = true;
     m_PollThread = std::thread([this] { pollLoop(); });
@@ -145,6 +170,54 @@ void SystemConnection::pollLoop()
                 m_PollClient.disconnect();
                 setPollConnected(false);
                 setLastError("poll failed: " + error);
+            }
+
+            // Re-apply the persisted render device selection (system.
+            // setRenderDevice): the selection must survive engine restarts.
+            // The engine reports its current device in the status; a
+            // mismatch is pushed to it here on the poll connection (the UI
+            // never blocks on it). Skipped while the engine is mid-switch
+            // and against engines that do not report render device
+            // information (older builds).
+            if (!m_DeviceReapplied)
+            {
+                std::string wanted;
+                std::string current;
+                bool hasInfo = false;
+                bool switching = false;
+                {
+                    std::lock_guard lock(m_SnapMutex);
+                    wanted = m_RenderDevice;
+                    if (m_Snap.haveStatus && m_Snap.status.contains("renderDevice") &&
+                        m_Snap.status["renderDevice"].is_object())
+                    {
+                        const auto& rd = m_Snap.status["renderDevice"];
+                        hasInfo = true;
+                        switching = rd.value("switching", false);
+                        current = rd.value("current", std::string());
+                    }
+                }
+                if (wanted.empty())
+                {
+                    m_DeviceReapplied = true; // no selection to apply
+                }
+                else if (hasInfo && !switching && sameName(wanted, current))
+                {
+                    m_DeviceReapplied = true; // the engine already runs it
+                }
+                else if (hasInfo && !switching)
+                {
+                    nlohmann::json deviceResult;
+                    std::string deviceError;
+                    if (m_PollClient.request("system.setRenderDevice", {{"device", wanted}},
+                                             deviceResult, deviceError, kPollTimeoutMs))
+                    {
+                        m_DeviceReapplied = true; // the engine switches (async)
+                    }
+                    // Failure (engine busy, mid-reconnect): retry next cycle.
+                }
+                // !hasInfo or switching: wait for the engine to report its
+                // devices / finish the in-flight switch.
             }
 
             nlohmann::json scenes;

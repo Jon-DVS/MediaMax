@@ -68,6 +68,10 @@ struct SystemReference
     std::string name;
     std::string host;
     std::uint16_t port = 47600;
+    // The render (Vulkan) device this system should run on (system.
+    // setRenderDevice); empty = the engine's default selection. The engine
+    // stores but does not act on it - the control interface applies it.
+    std::string renderDevice;
 };
 
 class Show

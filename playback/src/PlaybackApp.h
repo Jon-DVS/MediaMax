@@ -35,6 +35,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -173,6 +174,17 @@ private:
     void removeSurfaceForDisplay(Id displayId);
     // Undoes a display.add whose record was created but whose surface failed.
     void removeDisplayRecord(Id displayId);
+    // system.setRenderDevice: pre-validates the request and queues it
+    // (called with m_StateMutex held by the command handler; the rebuild
+    // itself is frame-loop work - see processPendingDeviceSwitch). An
+    // empty `device` means the engine's default selection.
+    bool requestDeviceSwitch(const std::string& device, std::string& error);
+    // Executes a queued render device switch on the render thread: quiesce
+    // the GPU, destroy the swapchains / scene renderer / NVRHI device,
+    // recreate everything on the requested physical device (the scene
+    // renderer keeps its object identity - the media pump references it
+    // in place).
+    void processPendingDeviceSwitch();
 
     // --- State (guarded by m_StateMutex) -----------------------------------------
 
@@ -184,6 +196,10 @@ private:
     // display.add / display.remove work queued by the command handlers
     // (client thread, under m_StateMutex) and executed by the frame loop.
     std::vector<SurfaceOp> m_PendingSurfaceOps;
+    // system.setRenderDevice work: the requested device name (std::nullopt
+    // = nothing pending; empty string = "switch to the default selection").
+    // Queued under m_StateMutex, executed by the frame loop.
+    std::optional<std::string> m_PendingDeviceSwitch;
     std::unique_ptr<protocol::CommandServer> m_CommandServer;
     std::unique_ptr<ControlServer> m_ControlServer;
 

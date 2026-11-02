@@ -142,6 +142,9 @@ mediamax_playback [options]
   --port <n>             Control server port (default 47600)
   --show <file.json>     Show file to load at startup
   --system-name <name>   Name reported to the control interface
+  --device <name>        Vulkan render device to run on (default:
+                         the first eligible device; the device
+                         list is reported in the status result)
   --width <n>            Startup display width (default 1920)
   --height <n>           Startup display height (default 1080)
   --display WxH@X+Y      One physical output; repeat for a wall

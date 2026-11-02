@@ -84,6 +84,7 @@ Full snapshot of the system.
 | `media` | array of media objects (below) |
 | `displays` | array of display objects (below) |
 | `scenes` | `[{"id","name","layers":<count>}]` |
+| `renderDevice` | the engine's Vulkan render device (below). **Optional**: present only when the app owns a Vulkan context (the playback app); headless engine instances omit the field |
 
 `time` and `timecode` are sampled when the poll is answered. A client that
 renders a continuous clock between polls (the control GUI's Playback tab)
@@ -94,6 +95,26 @@ and format back - `timecodeToFrames` / `framesToTimecode` /
 string space, so the client never needs the show's exact rational frame
 rate. Freeze the extrapolation when no good poll has arrived for a couple
 of poll periods, so a dead connection does not keep the clock running.
+
+`renderDevice`, when present, has the shape
+
+```json
+"renderDevice": {
+  "current": "NVIDIA RTX 6000 Ada Generation",
+  "type": "Discrete GPU",
+  "switching": false,
+  "available": [
+    {"index": 0, "name": "NVIDIA RTX 6000 Ada Generation", "type": "Discrete GPU"},
+    {"index": 1, "name": "Intel(R) UHD Graphics 770", "type": "Integrated GPU"}
+  ]
+}
+```
+
+`current`/`type` describe the device the engine is rendering on;
+`available` lists every physical device the Vulkan instance sees (in
+enumeration order); `switching` is true while a
+[`system.setRenderDevice`](#systemsetrenderdevice) request is executing on
+the engine's frame loop.
 
 ### `system.set`
 
@@ -107,6 +128,36 @@ shows the computer name the engine reports (`hostname`) under the custom
 name, and a settings dialog (the `settings...` button on a row) edits the
 entry's name, IP address and port — the same fields the show file's
 `systems` list stores — reconnecting the entry when the address changes.
+The dialog also offers a **Render device** combo (from
+`status.renderDevice.available`) that selects the Vulkan device the engine
+renders on and stores the choice in the show file's `systems` entry
+(`renderDevice`); the control re-applies the stored choice whenever the
+system (re)connects, so the selection survives engine restarts.
+
+### `system.setRenderDevice`
+
+Switch the engine's Vulkan render device. The engine quiesces the GPU,
+destroys its device and swapchains, and rebuilds everything on the
+requested physical device — all on the frame loop, so the command returns
+as soon as the switch is accepted and the switch itself completes within a
+frame or two (a brief drop of output while the GPU re-initializes).
+
+- Params: `device` (string, optional). The device name from
+  `status.renderDevice.available`, matched case-insensitively. Absent or
+  empty means the engine's default selection (the first eligible device,
+  as at startup).
+- Result: `{"device":"<name-or-(default)>","switching":true}`. When the
+  requested name is the device already in use, the result is
+  `{"device":"<current>","switching":false}` and nothing happens.
+- Fails when no switch is possible (this engine build has no device
+  selection, a switch is already in progress) or when the app rejects the
+  request (unknown device name, or the device cannot present to the
+  display windows).
+
+Engines that do not support device selection reject the command with a
+clean error; clients should check `status.renderDevice` first. The
+playback app also accepts `--device <name>` at startup (see the
+executable's `--help`).
 
 ### Shows
 

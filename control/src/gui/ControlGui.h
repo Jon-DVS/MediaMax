@@ -157,9 +157,21 @@ public:
     // press its Apply button.
     void testSetSystemSettingsName(const std::string& name);
     void testSetSystemSettingsPort(int port);
+    // The dialog's Render device field (same state the combo edits);
+    // empty = the engine's default selection.
+    void testSetSystemSettingsRenderDevice(const std::string& device);
     bool testApplySystemSettings();
+    // The dialog's last Apply error (empty when the last Apply succeeded or
+    // none ran); the self-tests report it with a failed Apply.
+    std::string testSystemSettingsError() const;
     // The system entry's name at `index` (empty when out of range).
     std::string testSystemNameAt(int index) const;
+    // The system entry's persisted render device selection at `index`
+    // (empty when none / out of range).
+    std::string testSystemRenderDeviceAt(int index) const;
+    // The render device the engine at `index` currently runs on (status
+    // "renderDevice.current"; empty when it has not reported it yet).
+    std::string testSystemRenderDeviceCurrent(int index) const;
     // The machine name the engine at `index` reports (status "hostname";
     // empty when the snapshot has no status yet).
     std::string testSystemHostname(int index) const;
@@ -555,6 +567,10 @@ private:
         std::string name;
         std::string host;
         int port = 47600;
+        // Render device selection (the status "renderDevice" block); empty
+        // = the engine's default selection. Applied via system.
+        // setRenderDevice and persisted in the show file's systems entry.
+        std::string renderDevice;
         std::string error;
     };
     SystemSettingsEdit m_SysSettings;

@@ -30,7 +30,10 @@ namespace mediamax::gui
 class SystemConnection
 {
 public:
-    SystemConnection(std::string name, std::string host, std::uint16_t port);
+    // `renderDevice`: the persisted render device selection (the show
+    // file's systems entry); empty = the engine's default selection.
+    SystemConnection(std::string name, std::string host, std::uint16_t port,
+                     std::string renderDevice = "");
     ~SystemConnection();
 
     SystemConnection(const SystemConnection&) = delete;
@@ -39,6 +42,21 @@ public:
     const std::string& name() const { return m_Name; }
     const std::string& host() const { return m_Host; }
     std::uint16_t port() const { return m_Port; }
+    // The persisted render device selection (the show file's systems
+    // entry "renderDevice"; empty = the engine's default selection). The
+    // poll loop re-applies it to a (re)started engine - see pollLoop().
+    // Under m_SnapMutex: the UI thread sets it (the settings dialog), the
+    // poll thread reads it.
+    std::string renderDevice() const
+    {
+        std::lock_guard lock(m_SnapMutex);
+        return m_RenderDevice;
+    }
+    void setRenderDevice(const std::string& device)
+    {
+        std::lock_guard lock(m_SnapMutex);
+        m_RenderDevice = device;
+    }
 
     // Starts the poll thread (which dials the poll connection). Idempotent.
     void connect();
@@ -112,6 +130,15 @@ private:
     std::string m_Name;
     std::string m_Host;
     std::uint16_t m_Port;
+    std::string m_RenderDevice; // persisted system.setRenderDevice selection
+    // True once the persisted render device selection is known to match the
+    // live engine (or does not apply). Reset on every (re)connect and
+    // retarget: the engine reports the mismatch on the next status poll and
+    // the poll loop re-sends system.setRenderDevice, so the selection
+    // survives engine restarts. Written by connect() (UI thread) only while
+    // the poll thread is stopped (a fresh start or right after the
+    // retarget's join) and by the poll loop otherwise - no lock needed.
+    bool m_DeviceReapplied = false;
 
     mediamax::ControlClient m_PollClient; // poll thread only
     mediamax::ControlClient m_CmdClient;  // UI thread only

@@ -114,6 +114,38 @@ bool findGraphicsQueueFamily(VkPhysicalDevice phys, std::uint32_t& outFamily, st
     return false;
 }
 
+// The status-protocol type string for a physical device.
+std::string gpuTypeString(VkPhysicalDeviceType t)
+{
+    switch (t)
+    {
+        case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU: return "Discrete GPU";
+        case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU: return "Integrated GPU";
+        case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU: return "Virtual GPU";
+        case VK_PHYSICAL_DEVICE_TYPE_CPU: return "CPU";
+        default: return "Other";
+    }
+}
+
+// Case-insensitive device-name comparison (drivers report vendor-specific
+// casing; the control UI passes names from the enumeration as-is).
+bool sameDeviceName(const char* a, const std::string& b)
+{
+    if (std::strlen(a) != b.size())
+    {
+        return false;
+    }
+    for (std::size_t i = 0; i < b.size(); ++i)
+    {
+        if (std::tolower(static_cast<unsigned char>(a[i])) !=
+            std::tolower(static_cast<unsigned char>(b[i])))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 } // namespace
 
 bool VulkanContext::createInstanceInternal(const VulkanContextDesc& desc, VulkanContext& out,
@@ -184,6 +216,12 @@ bool VulkanContext::createInstance(const VulkanContextDesc& desc, VulkanContext&
 
 bool VulkanContext::initPhysicalDevice(VkSurfaceKHR preferredSurface, std::string& error)
 {
+    return initPhysicalDevice(preferredSurface, std::string(), error);
+}
+
+bool VulkanContext::initPhysicalDevice(VkSurfaceKHR preferredSurface,
+                                       const std::string& preferredDevice, std::string& error)
+{
     if (m_Instance == VK_NULL_HANDLE)
     {
         error = "instance not created";
@@ -191,53 +229,173 @@ bool VulkanContext::initPhysicalDevice(VkSurfaceKHR preferredSurface, std::strin
     }
     m_HasSurface = preferredSurface != VK_NULL_HANDLE;
 
-    std::uint32_t deviceCount = 0;
-    VkResult res = vkEnumeratePhysicalDevices(m_Instance, &deviceCount, nullptr);
-    if (res != VK_SUCCESS || deviceCount == 0)
+    const std::vector<VulkanDeviceInfo> devices = enumerateDevices();
+    if (devices.empty())
     {
         error = "no Vulkan physical devices found";
         return false;
     }
-    std::vector<VkPhysicalDevice> devices(deviceCount);
-    vkEnumeratePhysicalDevices(m_Instance, &deviceCount, devices.data());
 
     bool found = false;
-    for (VkPhysicalDevice phys : devices)
+    for (const VulkanDeviceInfo& device : devices)
     {
-        std::uint32_t family = 0, queueCount = 0;
-        if (!findGraphicsQueueFamily(phys, family, queueCount))
+        if (!canRenderOn(device.handle, preferredSurface))
         {
             continue;
         }
-        if (m_HasSurface)
+        if (!preferredDevice.empty() && !sameDeviceName(device.name.c_str(), preferredDevice))
         {
-            VkBool32 supported = VK_FALSE;
-            vkGetPhysicalDeviceSurfaceSupportKHR(phys, family, preferredSurface, &supported);
-            if (!supported)
-            {
-                continue;
-            }
+            continue;
         }
-        m_PhysicalDevice = phys;
+        std::uint32_t family = 0, queueCount = 0;
+        if (!findGraphicsQueueFamily(device.handle, family, queueCount))
+        {
+            continue; // unreachable: canRenderOn already checked it
+        }
+        m_PhysicalDevice = device.handle;
         m_GraphicsQueueFamily = family;
         found = true;
         break;
     }
     if (!found)
     {
-        error = m_HasSurface ? "no physical device supports the window surface"
-                             : "no physical device with a graphics queue found";
+        if (!preferredDevice.empty())
+        {
+            // Distinguish a miss (no device has that name) from a device that
+            // exists but cannot render here (no graphics queue, or cannot
+            // present to the window surface), and list what is available.
+            std::string available;
+            bool nameSeen = false;
+            for (const auto& d : devices)
+            {
+                if (sameDeviceName(d.name.c_str(), preferredDevice))
+                {
+                    nameSeen = true;
+                }
+                if (!available.empty())
+                {
+                    available += ", ";
+                }
+                available += d.name;
+            }
+            error = "no render-eligible device named '" + preferredDevice + "'";
+            if (!nameSeen)
+            {
+                error += " (no device has that name)";
+            }
+            else if (m_HasSurface)
+            {
+                error += " (it cannot present to the window surface)";
+            }
+            else
+            {
+                error += " (it has no graphics queue)";
+            }
+            error += "; available: " + available;
+        }
+        else
+        {
+            error = m_HasSurface ? "no physical device supports the window surface"
+                                 : "no physical device with a graphics queue found";
+        }
         return false;
     }
 
     VkPhysicalDeviceProperties props{};
     vkGetPhysicalDeviceProperties(m_PhysicalDevice, &props);
     m_DeviceName = props.deviceName;
+    m_DeviceType = gpuTypeString(props.deviceType);
     Logger::instance().info("Vulkan device: {} (driver {}.{}.{})", m_DeviceName,
                             VK_VERSION_MAJOR(props.driverVersion),
                             VK_VERSION_MINOR(props.driverVersion),
                             VK_VERSION_PATCH(props.driverVersion));
     return true;
+}
+
+std::vector<VulkanDeviceInfo> VulkanContext::enumerateDevices() const
+{
+    std::vector<VulkanDeviceInfo> out;
+    if (m_Instance == VK_NULL_HANDLE)
+    {
+        return out;
+    }
+    std::uint32_t deviceCount = 0;
+    if (vkEnumeratePhysicalDevices(m_Instance, &deviceCount, nullptr) != VK_SUCCESS ||
+        deviceCount == 0)
+    {
+        return out;
+    }
+    std::vector<VkPhysicalDevice> devices(deviceCount);
+    vkEnumeratePhysicalDevices(m_Instance, &deviceCount, devices.data());
+
+    out.reserve(deviceCount);
+    for (VkPhysicalDevice phys : devices)
+    {
+        VulkanDeviceInfo info;
+        info.index = static_cast<std::uint32_t>(out.size());
+        info.handle = phys;
+        VkPhysicalDeviceProperties props{};
+        vkGetPhysicalDeviceProperties(phys, &props);
+        info.name = props.deviceName;
+        info.type = gpuTypeString(props.deviceType);
+        out.push_back(std::move(info));
+    }
+    return out;
+}
+
+std::optional<VulkanDeviceInfo> VulkanContext::findDevice(const std::string& name) const
+{
+    for (const auto& device : enumerateDevices())
+    {
+        if (sameDeviceName(device.name.c_str(), name))
+        {
+            return device;
+        }
+    }
+    return std::nullopt;
+}
+
+bool VulkanContext::canRenderOn(VkPhysicalDevice device, VkSurfaceKHR surface) const
+{
+    if (device == VK_NULL_HANDLE)
+    {
+        return false;
+    }
+    std::uint32_t family = 0, queueCount = 0;
+    if (!findGraphicsQueueFamily(device, family, queueCount))
+    {
+        return false;
+    }
+    if (surface != VK_NULL_HANDLE)
+    {
+        VkBool32 supported = VK_FALSE;
+        vkGetPhysicalDeviceSurfaceSupportKHR(device, family, surface, &supported);
+        if (!supported)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+void VulkanContext::resetDevice()
+{
+    // See the header: everything NVRHI and the device's fences must already
+    // be released and the queue idle (the caller waits). The NVRHI wrapper
+    // releases its handle on the VkDevice before the destroy.
+    m_NvrhiDevice = nullptr;
+    if (m_Device != VK_NULL_HANDLE)
+    {
+        vkDestroyDevice(m_Device, nullptr);
+        m_Device = VK_NULL_HANDLE;
+    }
+    m_GraphicsQueue = VK_NULL_HANDLE;
+    m_GraphicsQueueFamily = 0;
+    m_HasSurface = false;
+    m_PhysicalDevice = VK_NULL_HANDLE;
+    m_DeviceName.clear();
+    m_DeviceType.clear();
+    m_DeviceExtensions.clear();
 }
 
 bool VulkanContext::initDevice(std::string& error)
@@ -413,6 +571,7 @@ VulkanContext& VulkanContext::operator=(VulkanContext&& other) noexcept
         m_DeviceExtensions = std::move(other.m_DeviceExtensions);
         m_NvrhiDevice = std::move(other.m_NvrhiDevice);
         m_DeviceName = std::move(other.m_DeviceName);
+        m_DeviceType = std::move(other.m_DeviceType);
         other.m_Instance = VK_NULL_HANDLE;
         other.m_PhysicalDevice = VK_NULL_HANDLE;
         other.m_Device = VK_NULL_HANDLE;

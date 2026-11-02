@@ -26,7 +26,10 @@ TEST_CASE("Round trip: full show serializes and parses back")
     layer.color = {0.5f, 0.25f, 0.125f, 0.75f};
 
     // Target systems (issue 18): the show file carries the system list.
+    // "Main Wall" pins its render device; "Lobby" keeps the engine default
+    // (the field must be omitted from the JSON, not written as empty).
     original.systems.push_back({"Main Wall", "192.168.1.50", 47600});
+    original.systems.back().renderDevice = "AMD Radeon Pro W7800";
     original.systems.push_back({"Lobby", "192.168.1.51", 47601});
 
     const nlohmann::json json = original.toJson();
@@ -69,9 +72,14 @@ TEST_CASE("Round trip: full show serializes and parses back")
     CHECK(s.systems[0].name == "Main Wall");
     CHECK(s.systems[0].host == "192.168.1.50");
     CHECK(s.systems[0].port == 47600);
+    CHECK(s.systems[0].renderDevice == "AMD Radeon Pro W7800");
     CHECK(s.systems[1].name == "Lobby");
     CHECK(s.systems[1].host == "192.168.1.51");
     CHECK(s.systems[1].port == 47601);
+    CHECK(s.systems[1].renderDevice.empty());
+    // The unselected entry omits the field from the serialized JSON.
+    CHECK(json.at("systems")[0].contains("renderDevice"));
+    CHECK_FALSE(json.at("systems")[1].contains("renderDevice"));
 }
 
 TEST_CASE("Cue round trip: every action type")
@@ -172,6 +180,15 @@ TEST_CASE("fromJson rejects malformed input")
                                   nlohmann::json::array(
                                       {{{"name", "a"}, {"host", "b"}, {"port", 99999}}})}};
     CHECK_FALSE(Show::fromJson(badSysPort, error).has_value());
+
+    nlohmann::json badSysDevice = {
+        {"app", "mediamax-show"},
+        {"version", 1},
+        {"systems",
+         nlohmann::json::array(
+             {{{"name", "a"}, {"host", "b"}, {"renderDevice", 42}}})},
+    };
+    CHECK_FALSE(Show::fromJson(badSysDevice, error).has_value());
 
     // A display entry must carry a non-empty name (the name is the wall's
     // identity).

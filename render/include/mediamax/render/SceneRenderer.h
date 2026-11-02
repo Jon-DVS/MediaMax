@@ -64,6 +64,15 @@ public:
     // Pending uploads are dropped.
     void setSceneSize(Size2i size);
 
+    // Releases every NVRHI resource this renderer owns (pipelines,
+    // samplers, scene targets, texture pools, pending uploads) and returns
+    // to the default-constructed state: the teardown half of a render
+    // device switch, called on the render thread right before the NVRHI
+    // device is destroyed (VulkanContext::resetDevice). create() then
+    // re-initializes the same object on the new device (the media pump
+    // references it in place, so the object must not be replaced).
+    void reset();
+
     // --- Texture pool (thread-safe) ----------------------------------------
 
     // Creates (or re-creates, when the size changed) the texture used for a

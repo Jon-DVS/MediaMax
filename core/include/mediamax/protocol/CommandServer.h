@@ -13,6 +13,7 @@
 #include <exception>
 #include <filesystem>
 #include <functional>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -47,6 +48,25 @@ using ThumbnailFunction = std::function<bool(Id mediaId, int maxWidth, int maxHe
                                              std::vector<std::uint8_t>& outRgba, int& outWidth,
                                              int& outHeight, std::string& error)>;
 
+// One render (Vulkan) device the engine can run on - a "renderDevice.
+// available" entry in the status result.
+struct RenderDeviceInfo
+{
+    std::uint32_t index = 0; // position in the instance enumeration
+    std::string name;
+    std::string type; // "Discrete GPU" / "Integrated GPU" / "Virtual GPU" / ...
+};
+
+// Host callback for system.setRenderDevice: the app owns the Vulkan
+// context, so validating the request and queueing the GPU rebuild is
+// app work. It runs while handle() executes (under the caller's lock) and
+// must not block; true means the switch was accepted - the app executes it
+// on its frame loop and clears the "switching" flag through
+// setRenderDeviceSwitchState() when it finishes (the status result reports
+// the progress). `device` is the requested device name; empty means the
+// engine's default selection (first eligible device).
+using RenderDeviceSwitchFunction = std::function<bool(const std::string& device, std::string& error)>;
+
 class CommandServer
 {
 public:
@@ -69,6 +89,37 @@ public:
     // Sets the media-thumbnail callback (see ThumbnailFunction). media.
     // thumbnail fails with a clean error until one is installed.
     void setThumbnailFunction(ThumbnailFunction fn) { m_Thumbnail = std::move(fn); }
+
+    // Sets the render-device callback (see RenderDeviceSwitchFunction).
+    // system.setRenderDevice fails with a clean error until one is
+    // installed (the core tests run without a GPU).
+    void setRenderDeviceSwitchFunction(RenderDeviceSwitchFunction fn)
+    {
+        m_RenderDeviceSwitchFn = std::move(fn);
+    }
+
+    // The render devices reported in "status" (the "renderDevice" block):
+    // the current device + type and the full available list. The playback
+    // app fills this in after Vulkan initialization (the core has no GPU
+    // access); the status result omits the "renderDevice" field until
+    // setRenderDeviceInfo has been called with a non-empty name or list.
+    void setRenderDeviceInfo(const std::string& current, const std::string& type,
+                             const std::vector<RenderDeviceInfo>& available)
+    {
+        std::lock_guard lock(m_RenderDeviceMutex);
+        m_RenderDeviceCurrent = current;
+        m_RenderDeviceType = type;
+        m_RenderDeviceAvailable = available;
+    }
+
+    // True while a requested device switch is executing on the app's frame
+    // loop (set true by system.setRenderDevice when accepted; the app
+    // clears it when the switch finishes - success or no-op).
+    void setRenderDeviceSwitchState(bool switching)
+    {
+        std::lock_guard lock(m_RenderDeviceMutex);
+        m_RenderDeviceSwitching = switching;
+    }
 
     // The machine identity reported in "status": the computer name
     // (`hostname`) and primary IPv4 address (`ip`) of the machine running
@@ -102,6 +153,7 @@ private:
     nlohmann::json handleStatus() const;
     nlohmann::json handleFrameState() const;
     nlohmann::json handleSystemSet(const nlohmann::json& params) const;
+    nlohmann::json handleSystemSetRenderDevice(const nlohmann::json& params) const;
     nlohmann::json handleShowLoad(const nlohmann::json& params) const;
     nlohmann::json handleShowLoadJson(const nlohmann::json& params) const;
     nlohmann::json handleShowSave(const nlohmann::json& params) const;
@@ -171,6 +223,17 @@ private:
     DisplayAddedFunction m_DisplayAdded;
     DisplayRemovedFunction m_DisplayRemoved;
     ThumbnailFunction m_Thumbnail;
+    // Render device state (see setRenderDeviceInfo / system.setRender
+    // Device). Guarded by its own mutex: the app writes it from the frame
+    // loop (switch progress), the command threads read it for status.
+    mutable std::mutex m_RenderDeviceMutex;
+    std::string m_RenderDeviceCurrent;
+    std::string m_RenderDeviceType;
+    std::vector<RenderDeviceInfo> m_RenderDeviceAvailable;
+    // mutable: system.setRenderDevice (a const handler) flips it under the
+    // lock, like m_SystemName under system.set.
+    mutable bool m_RenderDeviceSwitching = false;
+    RenderDeviceSwitchFunction m_RenderDeviceSwitchFn;
 };
 
 // Thrown by parameter helpers; caught by handle() and turned into a failure

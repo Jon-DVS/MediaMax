@@ -218,6 +218,123 @@ TEST_CASE("system.set renames the system")
     CHECK(f.run("ping").result.at("system").get<std::string>() == "lobby");
 }
 
+TEST_CASE("status omits the render device block until the app reports it")
+{
+    // The core fixture has no GPU: the app (which owns the Vulkan context)
+    // never calls setRenderDeviceInfo, and the status keeps its pre-device
+    // shape for such engines (additive field, not "renderDevice": null).
+    Fixture f;
+    const Response resp = f.run("status");
+    REQUIRE(resp.ok);
+    CHECK_FALSE(resp.result.contains("renderDevice"));
+}
+
+TEST_CASE("system.setRenderDevice fails cleanly until a callback is installed")
+{
+    Fixture f;
+    const Response resp = f.run("system.setRenderDevice", {{"device", "GPU"}});
+    CHECK_FALSE(resp.ok);
+    CHECK(resp.error.find("unknown method") == std::string::npos);
+    CHECK(resp.error.find("render device") != std::string::npos);
+}
+
+TEST_CASE("system.setRenderDevice no-ops when the current device is requested")
+{
+    Fixture f;
+    f.server.setRenderDeviceInfo("GPU-A", "Discrete GPU",
+                                 {{0, "GPU-A", "Discrete GPU"}, {1, "GPU-B", "Integrated GPU"}});
+    int callbackCalls = 0;
+    f.server.setRenderDeviceSwitchFunction(
+        [&callbackCalls](const std::string&, std::string&) {
+            ++callbackCalls;
+            return true;
+        });
+
+    // Exact name, and case-insensitively (device names are vendor-cased).
+    const Response exact = f.run("system.setRenderDevice", {{"device", "GPU-A"}});
+    REQUIRE(exact.ok);
+    CHECK(exact.result.at("device").get<std::string>() == "GPU-A");
+    CHECK(exact.result.at("switching").get<bool>() == false);
+    const Response folded = f.run("system.setRenderDevice", {{"device", "gpu-a"}});
+    REQUIRE(folded.ok);
+    CHECK(folded.result.at("switching").get<bool>() == false);
+    CHECK(callbackCalls == 0);
+}
+
+TEST_CASE("system.setRenderDevice queues the switch and reports progress")
+{
+    Fixture f;
+    f.server.setRenderDeviceInfo("GPU-A", "Discrete GPU",
+                                 {{0, "GPU-A", "Discrete GPU"}, {1, "GPU-B", "Integrated GPU"}});
+    std::string requested;
+    f.server.setRenderDeviceSwitchFunction(
+        [&requested](const std::string& device, std::string&) {
+            requested = device;
+            return true;
+        });
+
+    const Response resp = f.run("system.setRenderDevice", {{"device", "GPU-B"}});
+    REQUIRE(resp.ok);
+    CHECK(resp.result.at("device").get<std::string>() == "GPU-B");
+    CHECK(resp.result.at("switching").get<bool>() == true);
+    CHECK(requested == "GPU-B");
+
+    // The switch is in flight: the status carries the progress flag, and a
+    // second switch is refused until the app clears it.
+    const nlohmann::json during = f.run("status").result;
+    CHECK(during.at("renderDevice").at("current").get<std::string>() == "GPU-A");
+    CHECK(during.at("renderDevice").at("type").get<std::string>() == "Discrete GPU");
+    CHECK(during.at("renderDevice").at("switching").get<bool>() == true);
+    CHECK(during.at("renderDevice").at("available").size() == 2);
+    CHECK(during.at("renderDevice").at("available")[1].at("name").get<std::string>() == "GPU-B");
+    CHECK_FALSE(f.run("system.setRenderDevice", {{"device", "GPU-A"}}).ok);
+
+    // The app finishes the rebuild (or the request was a no-op) and clears
+    // the flag; the next switch goes through.
+    f.server.setRenderDeviceSwitchState(false);
+    CHECK(f.run("status").result.at("renderDevice").at("switching").get<bool>() == false);
+    CHECK(f.run("system.setRenderDevice", {{"device", "GPU-A"}}).ok);
+}
+
+TEST_CASE("system.setRenderDevice sends the default selection for an empty device")
+{
+    Fixture f;
+    f.server.setRenderDeviceInfo("GPU-B", "Integrated GPU",
+                                 {{0, "GPU-A", "Discrete GPU"}, {1, "GPU-B", "Integrated GPU"}});
+    std::string requested;
+    f.server.setRenderDeviceSwitchFunction(
+        [&requested](const std::string& device, std::string&) {
+            requested = device;
+            return true;
+        });
+
+    const Response resp = f.run("system.setRenderDevice");
+    REQUIRE(resp.ok);
+    CHECK(requested.empty());
+    CHECK(resp.result.at("device").get<std::string>() == "(default)");
+    CHECK(resp.result.at("switching").get<bool>() == true);
+    f.server.setRenderDeviceSwitchState(false);
+}
+
+TEST_CASE("system.setRenderDevice surfaces the app's rejection")
+{
+    Fixture f;
+    f.server.setRenderDeviceInfo("GPU-A", "Discrete GPU",
+                                 {{0, "GPU-A", "Discrete GPU"}, {1, "GPU-B", "Integrated GPU"}});
+    f.server.setRenderDeviceSwitchFunction(
+        [](const std::string& device, std::string& error) {
+            error = "render device '" + device + "' cannot present to the display windows";
+            return false;
+        });
+
+    const Response resp = f.run("system.setRenderDevice", {{"device", "GPU-B"}});
+    // The app's own validation error is the failure (the core does not
+    // re-validate names - the app owns the device list).
+    CHECK_FALSE(resp.ok);
+    CHECK(resp.error.find("cannot present") != std::string::npos);
+    CHECK(f.run("status").result.at("renderDevice").at("switching").get<bool>() == false);
+}
+
 TEST_CASE("playback transport commands")
 {
     Fixture f;
