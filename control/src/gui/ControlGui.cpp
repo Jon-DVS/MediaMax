@@ -2513,9 +2513,15 @@ std::string ControlGuiApp::showViewDisplaySystem(const ShowViewDisplay& d) const
 void ControlGuiApp::renderShowViewWindow()
 {
     m_ShowViewEditPopupOpen = false;
+    m_TestShowViewStripItems.clear();
+    m_TestShowViewSceneWindow.clear();
     // The scene fills the window content edge to edge (NoBackground); the
     // mode radios, the "Reset view" button and the selection readout are
-    // the only widgets over it.
+    // the only widgets over it. They are submitted inside the scene child,
+    // after the scene's draw commands, so they render on top of the
+    // visualisation - a window renders after its parent, so the same
+    // widgets on the parent sat behind the scene's opaque background (and
+    // the child's hit-test stole their clicks).
     const bool visible =
         ImGui::Begin("Show view", nullptr, ImGuiWindowFlags_NoBackground);
     m_ShowViewVisible = false;
@@ -2525,31 +2531,6 @@ void ControlGuiApp::renderShowViewWindow()
         return;
     }
     m_ShowViewVisible = true;
-
-    // The top-right control strip: [Display][Layer][Show]  [Reset view],
-    // right-aligned. It sits one row below the content top - at y=8 the old
-    // Reset button sat under the docked window's title bar (issue: the
-    // centralise button was clipped). Computed now so the scene input
-    // below can ignore the strip's rect.
-    const ImVec2 winSize = ImGui::GetWindowSize();
-    const ImVec2 contentOrigin = ImGui::GetCursorScreenPos();
-    const float frameH = ImGui::GetFrameHeight();
-    const float itemSpacing = ImGui::GetStyle().ItemSpacing.x;
-    const auto widgetWidth = [](const char* text) {
-        return ImGui::CalcTextSize(text).x + ImGui::GetStyle().FramePadding.x * 2.f;
-    };
-    const float wReset = widgetWidth("Reset view");
-    const float wShow = widgetWidth("Show");
-    const float wLayer = widgetWidth("Layer");
-    const float wDisplay = widgetWidth("Display");
-    const float stripRight = winSize.x - 8.f;
-    const float stripY = frameH - 8.f;
-    const float xReset = stripRight - wReset;
-    const float xShow = xReset - itemSpacing - wShow;
-    const float xLayer = xShow - itemSpacing - wLayer;
-    const float xDisplay = xLayer - itemSpacing - wDisplay;
-    const ImVec2 stripMin(contentOrigin.x + xDisplay, contentOrigin.y + stripY);
-    const ImVec2 stripMax(contentOrigin.x + stripRight, contentOrigin.y + stripY + frameH);
 
     SystemConnection* active = activeConnection();
     const SystemConnection::Snapshot snap =
@@ -2581,10 +2562,37 @@ void ControlGuiApp::renderShowViewWindow()
         ImGui::End();
         return;
     }
+    // The self-test's z-order check: the strip's items must be drawn in
+    // this window (the scene's child), not the parent.
+    m_TestShowViewSceneWindow = ImGui::GetCurrentWindow()->Name;
     const ImVec2 childMin = ImGui::GetCursorScreenPos();
     const ImVec2 childSize = ImGui::GetContentRegionAvail();
     m_ShowViewRectMin = childMin;
     m_ShowViewRectMax = ImVec2(childMin.x + childSize.x, childMin.y + childSize.y);
+
+    // The top-right control strip: [Display][Layer][Show]  [Reset view],
+    // right-aligned. It sits one row below the content top - at y=8 the old
+    // Reset button sat under the docked window's title bar (issue: the
+    // centralise button was clipped). The positions are child-relative (the
+    // widgets are submitted in this child, below the scene's draw
+    // commands); the scene input ignores the strip's rect.
+    const float frameH = ImGui::GetFrameHeight();
+    const float itemSpacing = ImGui::GetStyle().ItemSpacing.x;
+    const auto widgetWidth = [](const char* text) {
+        return ImGui::CalcTextSize(text).x + ImGui::GetStyle().FramePadding.x * 2.f;
+    };
+    const float wReset = widgetWidth("Reset view");
+    const float wShow = widgetWidth("Show");
+    const float wLayer = widgetWidth("Layer");
+    const float wDisplay = widgetWidth("Display");
+    const float stripRight = childSize.x - 8.f;
+    const float stripY = frameH - 8.f;
+    const float xReset = stripRight - wReset;
+    const float xShow = xReset - itemSpacing - wShow;
+    const float xLayer = xShow - itemSpacing - wLayer;
+    const float xDisplay = xLayer - itemSpacing - wDisplay;
+    const ImVec2 stripMin(childMin.x + xDisplay, childMin.y + stripY);
+    const ImVec2 stripMax(childMin.x + stripRight, childMin.y + stripY + frameH);
 
     // Request the thumbnails of the media layers (the poll thread fetches
     // them; the request is idempotent with backoff inside the connection)
@@ -2802,31 +2810,96 @@ void ControlGuiApp::renderShowViewWindow()
             dl->AddText(ImVec2(c[0].x + 3.f, c[0].y + 2.f), selCol, layer.name.c_str());
         }
     }
-    ImGui::EndChild();
-
     // The top-right control strip: the view-mode radios + Reset view.
-    // Rendered before the scene input below so a press on them is already
-    // in ImGui's active-id state when the input block runs.
+    // Submitted in the scene child after the scene's draw commands, so the
+    // strip renders on top of the visualisation (a window renders after its
+    // parent: on the parent the strip sat behind the scene's opaque
+    // background and the child's hit-test stole its clicks). Still before
+    // the scene input below, so a press on them is already in ImGui's
+    // active-id state when the input block runs.
+    auto recordStripItem = [this](const char* label) {
+        TestShowViewStripItem item;
+        item.label = label;
+        const ImVec2 min = ImGui::GetItemRectMin();
+        const ImVec2 max = ImGui::GetItemRectMax();
+        item.rect = ImVec4(min.x, min.y, max.x - min.x, max.y - min.y);
+        const ImGuiWindow* w = ImGui::GetCurrentWindow();
+        item.window = w != nullptr ? w->Name : std::string();
+        m_TestShowViewStripItems.push_back(std::move(item));
+    };
     ImGui::SetCursorPos(ImVec2(xDisplay, stripY));
     if (ImGui::RadioButton("Display##showmode", m_ShowViewMode == ShowViewMode::Display))
     {
         m_ShowViewMode = ShowViewMode::Display;
     }
+    recordStripItem("display");
     ImGui::SetCursorPos(ImVec2(xLayer, stripY));
     if (ImGui::RadioButton("Layer##showmode", m_ShowViewMode == ShowViewMode::Layer))
     {
         m_ShowViewMode = ShowViewMode::Layer;
     }
+    recordStripItem("layer");
     ImGui::SetCursorPos(ImVec2(xShow, stripY));
     if (ImGui::RadioButton("Show##showmode", m_ShowViewMode == ShowViewMode::Show))
     {
         m_ShowViewMode = ShowViewMode::Show;
     }
+    recordStripItem("show");
     ImGui::SetCursorPos(ImVec2(xReset, stripY));
     if (ImGui::Button("Reset view##showreset"))
     {
         fitShowViewCamera(childSize, signature);
     }
+    recordStripItem("reset");
+
+    // The top-left readout: what is selected (the display's name,
+    // resolution and system - or the layer's name), on a dark chip so it
+    // stays readable over the scene. Drawn on the scene child's draw list
+    // after the scene's commands, so it sits on top of the visualisation
+    // (on the parent's draw list it would be hidden behind the scene's
+    // background: the child window renders after the parent).
+    {
+        std::string text;
+        const ShowViewDisplay* selDisplay =
+            m_ShowViewSelDisplay != kInvalidId
+                ? findShowViewDisplay(m_ShowScene, m_ShowViewSelDisplay)
+                : nullptr;
+        if (selDisplay != nullptr)
+        {
+            text = selDisplay->name + "  \u00b7  " +
+                   std::to_string(static_cast<int>(selDisplay->w)) + "x" +
+                   std::to_string(static_cast<int>(selDisplay->h));
+            const std::string systemName = showViewDisplaySystem(*selDisplay);
+            if (!systemName.empty())
+            {
+                text += "  \u00b7  " + systemName;
+            }
+        }
+        else
+        {
+            const ShowViewLayer* selLayer =
+                m_ShowViewSelLayer != kInvalidId
+                    ? findShowViewLayer(m_ShowScene, m_ShowViewSelLayer)
+                    : nullptr;
+            if (selLayer != nullptr)
+            {
+                text = "'" + selLayer->name + "'";
+            }
+        }
+        if (text.empty())
+        {
+            text = "No selection";
+        }
+        const float tsx = childMin.x + 8.f;
+        const float tsy = childMin.y + 8.f;
+        const ImVec2 tsize = ImGui::CalcTextSize(text.c_str());
+        const float pad = 4.f;
+        dl->AddRectFilled(ImVec2(tsx - pad, tsy - pad),
+                          ImVec2(tsx + tsize.x + pad, tsy + tsize.y + pad),
+                          ImGui::ColorConvertFloat4ToU32(ImVec4(0.f, 0.f, 0.f, 0.55f)));
+        dl->AddText(ImVec2(tsx, tsy), ImGui::GetColorU32(ImGuiCol_Text), text.c_str());
+    }
+    ImGui::EndChild();
 
     // Scene input: wheel-zoom around the cursor, middle-drag pan, and the
     // left button for selection/drag (the mode decides what a click
@@ -3089,52 +3162,6 @@ void ControlGuiApp::renderShowViewWindow()
         ImGui::EndPopup();
     }
 
-    // The top-left readout: what is selected (the display's name,
-    // resolution and system - or the layer's name), on a dark chip so it
-    // stays readable over the scene. Drawn on the window's draw list after
-    // the child, so it sits on top of the scene.
-    {
-        ImDrawList* wdl = ImGui::GetWindowDrawList();
-        std::string text;
-        const ShowViewDisplay* selDisplay =
-            m_ShowViewSelDisplay != kInvalidId
-                ? findShowViewDisplay(m_ShowScene, m_ShowViewSelDisplay)
-                : nullptr;
-        if (selDisplay != nullptr)
-        {
-            text = selDisplay->name + "  \u00b7  " +
-                   std::to_string(static_cast<int>(selDisplay->w)) + "x" +
-                   std::to_string(static_cast<int>(selDisplay->h));
-            const std::string systemName = showViewDisplaySystem(*selDisplay);
-            if (!systemName.empty())
-            {
-                text += "  \u00b7  " + systemName;
-            }
-        }
-        else
-        {
-            const ShowViewLayer* selLayer =
-                m_ShowViewSelLayer != kInvalidId
-                    ? findShowViewLayer(m_ShowScene, m_ShowViewSelLayer)
-                    : nullptr;
-            if (selLayer != nullptr)
-            {
-                text = "'" + selLayer->name + "'";
-            }
-        }
-        if (text.empty())
-        {
-            text = "No selection";
-        }
-        const float tsx = contentOrigin.x + 8.f;
-        const float tsy = contentOrigin.y + 8.f;
-        const ImVec2 tsize = ImGui::CalcTextSize(text.c_str());
-        const float pad = 4.f;
-        wdl->AddRectFilled(ImVec2(tsx - pad, tsy - pad),
-                           ImVec2(tsx + tsize.x + pad, tsy + tsize.y + pad),
-                           ImGui::ColorConvertFloat4ToU32(ImVec4(0.f, 0.f, 0.f, 0.55f)));
-        wdl->AddText(ImVec2(tsx, tsy), ImGui::GetColorU32(ImGuiCol_Text), text.c_str());
-    }
     ImGui::End();
 }
 
@@ -6264,6 +6291,42 @@ void ControlGuiApp::testShowViewSetMode(const std::string& mode)
     {
         m_ShowViewMode = ShowViewMode::Show;
     }
+}
+
+std::string ControlGuiApp::testShowViewMode() const
+{
+    switch (m_ShowViewMode)
+    {
+        case ShowViewMode::Layer:
+            return "layer";
+        case ShowViewMode::Show:
+            return "show";
+        default:
+            return "display";
+    }
+}
+
+bool ControlGuiApp::testShowViewStripRect(const std::string& which, float& x, float& y, float& w,
+                                          float& h, std::string& window) const
+{
+    for (const auto& item : m_TestShowViewStripItems)
+    {
+        if (item.label == which)
+        {
+            x = item.rect.x;
+            y = item.rect.y;
+            w = item.rect.z;
+            h = item.rect.w;
+            window = item.window;
+            return true;
+        }
+    }
+    return false;
+}
+
+std::string ControlGuiApp::testShowViewSceneWindow() const
+{
+    return m_TestShowViewSceneWindow;
 }
 
 bool ControlGuiApp::testShowViewCamera(float& scale, float& childMinX, float& childMinY,

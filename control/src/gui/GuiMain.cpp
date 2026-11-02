@@ -722,6 +722,59 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
                        "show view mode/selection state\n";
     }
 
+    // 3d2) Show view strip over the scene (issue: the show view's UI
+    //      rendered behind the visualisation): the mode strip and the
+    //      selection readout are submitted in the scene's child window,
+    //      after the scene's draw commands - so they render on top of the
+    //      visualisation, and the child's hit-test no longer steals their
+    //      clicks. The strip's "Layer" radio must be drawn in the scene's
+    //      child window (the one the scene is drawn in), and a synthetic
+    //      click on it must switch the mode (before the fix the press hit
+    //      the scene's empty space and nothing happened).
+    {
+        float sx = 0.f, sy = 0.f, sw = 0.f, sh = 0.f;
+        std::string stripWindow;
+        const std::string sceneWindow = app.testShowViewSceneWindow();
+        const bool haveStrip = app.testShowViewStripRect("layer", sx, sy, sw, sh, stripWindow);
+        const bool stripInScene =
+            haveStrip && !sceneWindow.empty() && stripWindow == sceneWindow && sw > 0.f && sh > 0.f;
+        app.testShowViewSetMode("display");
+        if (stripInScene)
+        {
+            const float cx = sx + sw * 0.5f;
+            const float cy = sy + sh * 0.5f;
+            // One synthetic click: press + release at the radio's center,
+            // the mouse move on its own frame first (the press frame must
+            // see the item already hovered).
+            runtime.preNewFrameHook = [cx, cy] {
+                ImGui::GetIO().AddMousePosEvent(cx, cy);
+            };
+            glfwPollEvents();
+            runtime.renderFrame();
+            runtime.preNewFrameHook = [cx, cy] {
+                ImGui::GetIO().AddMousePosEvent(cx, cy);
+                ImGui::GetIO().AddMouseButtonEvent(0, true);
+            };
+            glfwPollEvents();
+            runtime.renderFrame();
+            runtime.preNewFrameHook = [cx, cy] {
+                ImGui::GetIO().AddMousePosEvent(cx, cy);
+                ImGui::GetIO().AddMouseButtonEvent(0, false);
+            };
+            glfwPollEvents();
+            runtime.renderFrame();
+            runtime.preNewFrameHook = nullptr;
+        }
+        const std::string modeAfterClick = app.testShowViewMode();
+        const bool stripOk = stripInScene && modeAfterClick == "layer";
+        app.testShowViewSetMode("display");
+        modalOk = modalOk && stripOk;
+        modalReport +=
+            std::string(stripOk ? "PASS " : "FAIL ") +
+            "show view strip renders over and clicks through the scene (window: " +
+            stripWindow + ", mode after click: " + modeAfterClick + ")\n";
+    }
+
     // 3e) Show editor rework: stable tree ids (renaming a layer must not
     //     fold its node), the layer reorder (list order = compositing order
     //     for equal zIndex), the keyframes submenu (folded by default; add /

@@ -213,6 +213,20 @@ public:
     // The show view's mode: "display" | "layer" | "show" (an unknown value
     // leaves it unchanged).
     void testShowViewSetMode(const std::string& mode);
+    // The show view's current mode ("display" | "layer" | "show") - the
+    // self-test's strip-click check reads back what the click selected.
+    std::string testShowViewMode() const;
+    // The screen rect of the show view strip's widget (`which`: "display" |
+    // "layer" | "show" | "reset") as drawn by the last rendered frame, plus
+    // the name of the window that owns the item: the self-test checks the
+    // strip is drawn in the scene's child (on top of the visualisation) and
+    // clicks a radio to check its input is not stolen by the scene.
+    bool testShowViewStripRect(const std::string& which, float& x, float& y, float& w, float& h,
+                               std::string& window) const;
+    // The scene child window's name as drawn by the last rendered frame (""
+    // when the show view did not render): compared with a strip item's
+    // window for the z-order check.
+    std::string testShowViewSceneWindow() const;
     // The show view's camera + the scene child's rect (screen px): what the
     // self-test projects world points into clicks with. False when the
     // window has not drawn a scene yet.
@@ -399,8 +413,11 @@ private:
     Id liveDisplayIdFor(const SystemConnection* system, const std::string& displayName) const;
     // The 2D show view (center, top): the active system's current frame as
     // a free-camera 2D picture - the display wall, the visible layers (color
-    // quads, media with thumbnails, video badges) and the "Reset view"
-    // overlay. Draws on the scene child's draw list (see ShowView.h).
+    // quads, media with thumbnails, video badges) and the overlay (mode
+    // strip, "Reset view", selection readout). Everything is submitted in
+    // the scene child: the scene on its draw list, the widgets after the
+    // scene's draw commands, so the UI renders on top of the visualisation
+    // (see ShowView.h).
     void renderShowViewWindow();
     // Fits the show view camera to the whole display wall (union of all
     // displays, ~10% margin; an unknown wall shows a 1920x1080 box),
@@ -760,6 +777,22 @@ private:
     // Records the rect (+ open state) of the item just drawn in the show
     // editor as a self-test item (see testEditorItemRect).
     void recordTestEditorItem(Id layerId, const std::string& label, bool open);
+    // One show-view strip item the self-test can locate: the screen rect of
+    // the item as drawn by the last rendered frame plus the name of the
+    // window it was drawn in (the z-order check: the scene's child).
+    struct TestShowViewStripItem
+    {
+        std::string label;
+        ImVec4 rect{0.0f, 0.0f, 0.0f, 0.0f};
+        std::string window;
+    };
+    // The show-view strip items recorded by the last frame that rendered
+    // the show view (cleared every frame in renderShowViewWindow).
+    std::vector<TestShowViewStripItem> m_TestShowViewStripItems;
+    // The scene child window's name as drawn by the last rendered frame
+    // ("" when the show view did not render): the z-order check compares it
+    // with a strip item's window.
+    std::string m_TestShowViewSceneWindow;
 
     // Show editor selection (scenes tab).
     int m_SelectedSceneIdx = 0;
