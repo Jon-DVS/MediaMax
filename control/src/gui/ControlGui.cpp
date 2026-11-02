@@ -876,8 +876,13 @@ void ControlGuiApp::renderDockspace()
     // OS file drop target for the whole window: files dropped anywhere (the
     // docked panes share this dock tree) add media references to the show.
     // The payload arrives as an external drag source (emitted in GuiMain.cpp's
-    // frame loop, fed by the GLFW drop callback).
-    if (ImGui::BeginDragDropTarget())
+    // frame loop, fed by the GLFW drop callback). The explicit-rect variant:
+    // BeginDragDropTarget() keys off the last item's hover state - right
+    // after Begin() that is a stale item from the previous frame, so a
+    // whole-window target must name its rect (and id) itself.
+    const ImVec2 dropMin = ImGui::GetWindowPos();
+    const ImVec2 dropMax = dropMin + ImGui::GetWindowSize();
+    if (ImGui::BeginDragDropTargetCustom(ImRect(dropMin, dropMax), ImGui::GetID("##filedrop")))
     {
         if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("MEDIMAX_FILEPATHS"))
         {

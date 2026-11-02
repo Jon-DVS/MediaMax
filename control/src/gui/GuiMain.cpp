@@ -952,6 +952,42 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
                        "editor: dropped files add media references (dedup by path)\n";
     }
 
+    // 3e2) OS file drop pipeline (issue: media drag-and-drop import did not
+    //      work): the end-to-end path the window runs - the paths the GLFW
+    //      drop callback queues (g_PendingDropPaths, the same queue
+    //      fileDropCallback fills) are published once as an external drag
+    //      payload by renderFrame, and the dockspace's whole-window target
+    //      must deliver them to the editor. The mouse is parked over the
+    //      viewport for the two frames the payload spans: the target must be
+    //      hovered on the emission frame to accept it and on the next frame
+    //      to deliver it. Before the fix the target was registered with
+    //      BeginDragDropTarget() right after Begin(), which keys off the
+    //      last item's hover state - a stale item from the previous frame -
+    //      so the payload never delivered.
+    {
+        g_PendingDropPaths = {"selftest-osdrop-a.mp4", "selftest-osdrop-b.png"};
+        const ImGuiViewport* vp = ImGui::GetMainViewport();
+        const float cx = vp->Pos.x + vp->Size.x * 0.5f;
+        const float cy = vp->Pos.y + vp->Size.y * 0.5f;
+        runtime.preNewFrameHook = [cx, cy] {
+            ImGui::GetIO().AddMousePosEvent(cx, cy);
+        };
+        glfwPollEvents();
+        runtime.renderFrame(); // emits the payload; the target accepts it
+        glfwPollEvents();
+        runtime.renderFrame(); // delivers it to the dockspace target
+        runtime.preNewFrameHook = nullptr;
+        const auto mediaPaths = app.testShowMediaPaths();
+        auto hasPath = [&mediaPaths](const std::string& p) {
+            return std::find(mediaPaths.begin(), mediaPaths.end(), p) != mediaPaths.end();
+        };
+        const bool osDropOk =
+            hasPath("selftest-osdrop-a.mp4") && hasPath("selftest-osdrop-b.png");
+        modalOk = modalOk && osDropOk;
+        modalReport += std::string(osDropOk ? "PASS " : "FAIL ") +
+                       "editor: OS file drop pipeline adds media to the show\n";
+    }
+
     // 4) Auto-push (issue 8): the editor edit from step 1 must have reached
     //    the system via the debounced auto-push during the frame phases.
     //    Keep rendering frames (the push happens in frame()) while polling
