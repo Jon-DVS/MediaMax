@@ -89,6 +89,17 @@ public:
     // show view's thumbnail readback copies into).
     VkDevice device() const { return m_Vulkan.device(); }
     VkPhysicalDevice physicalDevice() const { return m_Vulkan.physicalDevice(); }
+    // Frame capture for the self-test's rendered-thumbnail check: the
+    // frame's size and swapchain image, plus the post-render-pass command
+    // hook through which a copy of the frame's pixels is recorded into a
+    // host buffer (set, render one frame, clear).
+    std::uint32_t width() const { return m_Vulkan.width(); }
+    std::uint32_t height() const { return m_Vulkan.height(); }
+    VkImage currentImage() const { return m_Vulkan.currentImage(); }
+    void setPostRenderPassHook(std::function<void(VkCommandBuffer)> hook)
+    {
+        m_Vulkan.postRenderPassHook = std::move(hook);
+    }
     // Blocks until the last rendered frame's command buffer completes (the
     // self-test's readback maps the copied pixels after this returns).
     void waitForFrame() { m_Vulkan.waitForFrame(); }
@@ -1340,26 +1351,30 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
                             else
                             {
                                 const auto* px = static_cast<const std::uint8_t*>(mapped);
-                                // The test BMP: top half red, bottom half blue.
-                                // Sample well inside each half (the thumbnail
-                                // is aspect-fit into 160x90 for the 320x180
-                                // source).
-                                const int cx = tw / 2;
-                                const std::uint8_t* pTop =
-                                    px + (static_cast<std::size_t>(th / 4) * tw + cx) * 4;
-                                const std::uint8_t* pBot =
-                                    px + (static_cast<std::size_t>(th * 3 / 4) * tw + cx) * 4;
-                                const bool topRed =
-                                    pTop[0] > 128 && pTop[1] < 64 && pTop[2] < 64;
-                                const bool botBlue =
-                                    pBot[0] < 64 && pBot[1] < 64 && pBot[2] > 128;
-                                thumbDetail = "top=" + std::to_string(pTop[0]) + "," +
-                                              std::to_string(pTop[1]) + "," +
-                                              std::to_string(pTop[2]) + " bottom=" +
-                                              std::to_string(pBot[0]) + "," +
-                                              std::to_string(pBot[1]) + "," +
-                                              std::to_string(pBot[2]);
-                                thumbOk = topRed && botBlue;
+                                // The test BMP: left half red, right half blue.
+                                // Sample well inside each half on the middle
+                                // row: a per-row pixel misalignment (a stride
+                                // error, which shears the split) or a UV flip
+                                // (which swaps the halves) must fail one of
+                                // the two samples.
+                                const int cy = th / 2;
+                                const std::uint8_t* pLeft =
+                                    px + (static_cast<std::size_t>(cy) * tw + tw / 4) * 4;
+                                const std::uint8_t* pRight =
+                                    px + (static_cast<std::size_t>(cy) * tw + tw * 3 / 4) * 4;
+                                // The pool texture is R8G8B8A8: channel 0 is
+                                // R, channel 2 is B (the BMP on disk is BGR).
+                                const bool leftRed =
+                                    pLeft[0] > 128 && pLeft[1] < 64 && pLeft[2] < 64;
+                                const bool rightBlue =
+                                    pRight[0] < 64 && pRight[1] < 64 && pRight[2] > 128;
+                                thumbDetail = "left=" + std::to_string(pLeft[0]) + "," +
+                                              std::to_string(pLeft[1]) + "," +
+                                              std::to_string(pLeft[2]) + " right=" +
+                                              std::to_string(pRight[0]) + "," +
+                                              std::to_string(pRight[1]) + "," +
+                                              std::to_string(pRight[2]);
+                                thumbOk = leftRed && rightBlue;
                                 vkUnmapMemory(runtime.device(), stagingMem);
                             }
                         }
@@ -1377,6 +1392,191 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
             liveReport += std::string(thumbOk ? "PASS " : "FAIL ") +
                           "show view thumbnail readback (" + thumbDetail + ")\n";
             liveOk = liveOk && thumbOk;
+
+            // 4e2) Rendered thumbnail quad: the readback above proves the
+            // pixels reached the GPU image, but the quad itself is only
+            // proven by what a frame actually rasterized. Capture one
+            // rendered frame (a swapchain-image copy recorded into a host
+            // buffer right after the render pass) and sample two points of
+            // the testbmp quad (1920x1080 world, the thumbnail's left half
+            // is red 200,0,0): one beyond the 640x360 wall, where only the
+            // textured quad can contribute (the scene background is
+            // ~26,26,31), and one where the quad must cover the red color
+            // layer (255,0,0). Regression for the unreserved PrimQuadUV
+            // call: the quad's draw command carried no elements, the quad
+            // never rendered, and the out-of-range vertex/index writes left
+            // stray "streaks" behind.
+            bool quadOk = false;
+            std::string quadDetail = "frame capture unavailable";
+            {
+                const std::uint32_t w = runtime.width();
+                const std::uint32_t h = runtime.height();
+                if (w == 0 || h == 0)
+                {
+                    quadDetail = "frame size unknown";
+                }
+                else
+                {
+                    const VkDeviceSize capSize = static_cast<VkDeviceSize>(w) * h * 4;
+                    VkBufferCreateInfo bci{};
+                    bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+                    bci.size = capSize;
+                    bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+                    bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+                    VkBuffer capBuf = VK_NULL_HANDLE;
+                    VkDeviceMemory capMem = VK_NULL_HANDLE;
+                    if (vkCreateBuffer(runtime.device(), &bci, nullptr, &capBuf) == VK_SUCCESS)
+                    {
+                        VkMemoryRequirements reqs;
+                        vkGetBufferMemoryRequirements(runtime.device(), capBuf, &reqs);
+                        VkPhysicalDeviceMemoryProperties props;
+                        vkGetPhysicalDeviceMemoryProperties(runtime.physicalDevice(), &props);
+                        for (std::uint32_t i = 0; i < props.memoryTypeCount; ++i)
+                        {
+                            const VkMemoryPropertyFlags wanted =
+                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+                            if ((reqs.memoryTypeBits & (1u << i)) != 0 &&
+                                (props.memoryTypes[i].propertyFlags & wanted) == wanted)
+                            {
+                                VkMemoryAllocateInfo ai{};
+                                ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+                                ai.allocationSize = reqs.size;
+                                ai.memoryTypeIndex = i;
+                                if (vkAllocateMemory(runtime.device(), &ai, nullptr, &capMem) ==
+                                    VK_SUCCESS)
+                                {
+                                    vkBindBufferMemory(runtime.device(), capBuf, capMem, 0);
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    if (capMem != VK_NULL_HANDLE)
+                    {
+                        runtime.setPostRenderPassHook(
+                            [&runtime, w, h, capBuf](VkCommandBuffer cmd) {
+                                VkImage img = runtime.currentImage();
+                                if (img == VK_NULL_HANDLE)
+                                {
+                                    return;
+                                }
+                                VkImageSubresourceRange range{};
+                                range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                                range.levelCount = 1;
+                                range.layerCount = 1;
+                                VkImageMemoryBarrier toCopy{};
+                                toCopy.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                                toCopy.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+                                toCopy.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                                toCopy.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+                                toCopy.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+                                toCopy.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                                toCopy.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                                toCopy.image = img;
+                                toCopy.subresourceRange = range;
+                                vkCmdPipelineBarrier(
+                                    cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                    VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr,
+                                    1, &toCopy);
+                                VkBufferImageCopy bic{};
+                                bic.bufferOffset = 0;
+                                bic.bufferRowLength = 0;
+                                bic.bufferImageHeight = 0;
+                                bic.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                                bic.imageSubresource.layerCount = 1;
+                                bic.imageOffset = {0, 0, 0};
+                                bic.imageExtent = {w, h, 1};
+                                vkCmdCopyImageToBuffer(cmd, img,
+                                                       VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                                       capBuf, 1, &bic);
+                                VkImageMemoryBarrier back{};
+                                back.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                                back.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                                back.dstAccessMask = 0;
+                                back.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+                                back.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+                                back.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                                back.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                                back.image = img;
+                                back.subresourceRange = range;
+                                vkCmdPipelineBarrier(
+                                    cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0,
+                                    nullptr, 0, nullptr, 1, &back);
+                            });
+                        glfwPollEvents();
+                        runtime.renderFrame();
+                        runtime.waitForFrame();
+                        runtime.setPostRenderPassHook(nullptr);
+                        void* mapped = nullptr;
+                        if (vkMapMemory(runtime.device(), capMem, 0, capSize, 0, &mapped) !=
+                            VK_SUCCESS)
+                        {
+                            quadDetail = "vkMapMemory (frame readback) failed";
+                        }
+                        else
+                        {
+                            // B8G8R8A8, row 0 = screen top. The sample points
+                            // are world positions of the testbmp quad,
+                            // projected through the live show view camera.
+                            // Both must read the thumbnail's red half
+                            // (200,0,0): the outside-wall point over the
+                            // scene background (~26,26,31 without the quad)
+                            // and the over-layer point over the color layer
+                            // (255,0,0 without the quad).
+                            float sxOut = 0.f, syOut = 0.f;
+                            float sxIn = 0.f, syIn = 0.f;
+                            if (!app.testShowViewProject(670.f, 440.f, sxOut, syOut) ||
+                                !app.testShowViewProject(320.f, 180.f, sxIn, syIn))
+                            {
+                                quadDetail = "camera not fitted (sample points unprojectable)";
+                            }
+                            else
+                            {
+                                const auto* px = static_cast<const std::uint8_t*>(mapped);
+                                auto sampleAt = [&](int x, int y, int& r, int& g, int& b) {
+                                    x = std::clamp(x, 0, static_cast<int>(w) - 1);
+                                    y = std::clamp(y, 0, static_cast<int>(h) - 1);
+                                    const std::uint8_t* p =
+                                        px + (static_cast<std::size_t>(y) * w +
+                                              static_cast<std::size_t>(x)) * 4;
+                                    // The frame is B8G8R8A8 (the pool texture
+                                    // is R8G8B8A8 - do not mix the two up).
+                                    r = p[2]; // R
+                                    g = p[1]; // G
+                                    b = p[0]; // B
+                                };
+                                int rOut = 0, gOut = 0, bOut = 0, rIn = 0, gIn = 0, bIn = 0;
+                                sampleAt(static_cast<int>(sxOut), static_cast<int>(syOut), rOut,
+                                         gOut, bOut);
+                                sampleAt(static_cast<int>(sxIn), static_cast<int>(syIn), rIn, gIn,
+                                         bIn);
+                                const auto thumbRed = [](int r, int g, int b) {
+                                    return r > 150 && r < 245 && g < 70 && b < 70;
+                                };
+                                quadOk = thumbRed(rOut, gOut, bOut) && thumbRed(rIn, gIn, bIn);
+                                quadDetail = "outside-wall=" + std::to_string(rOut) + "," +
+                                             std::to_string(gOut) + "," + std::to_string(bOut) +
+                                             " over-layer=" + std::to_string(rIn) + "," +
+                                             std::to_string(gIn) + "," + std::to_string(bIn);
+                            }
+                            vkUnmapMemory(runtime.device(), capMem);
+                        }
+                    }
+                    if (capBuf != VK_NULL_HANDLE)
+                    {
+                        vkDestroyBuffer(runtime.device(), capBuf, nullptr);
+                    }
+                    if (capMem != VK_NULL_HANDLE)
+                    {
+                        vkFreeMemory(runtime.device(), capMem, nullptr);
+                    }
+                }
+            }
+            liveReport += std::string(quadOk ? "PASS " : "FAIL ") +
+                          "show view rendered thumbnail quad (" + quadDetail + ")\n";
+            liveOk = liveOk && quadOk;
 
             // 2) The camera is fitted (frames rendered all along): grab it
             //    to project world points into clicks.

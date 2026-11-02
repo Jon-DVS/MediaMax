@@ -39,10 +39,12 @@ namespace
 constexpr const char* kBlendModes[] = {"normal", "add", "subtract", "multiply", "screen"};
 constexpr int kBlendModeCount = 5;
 
-// A minimal 24-bit BMP (top half red, bottom half blue) for the live
+// A minimal 24-bit BMP (left half red, right half blue) for the live
 // self-test's media.thumbnail check: it exercises the engine's real image
 // decode path (the "mediamax:testpattern:" sources exist only in the
-// engine's own --self-test mode).
+// engine's own --self-test mode). The split runs left-right, so a per-row
+// pixel misalignment (stride) or a UV/vertex mix-up shows up as a slanted
+// or flipped boundary in the show view instead of staying a clean line.
 bool writeThumbnailTestBmp(const std::string& path)
 {
     constexpr int width = 320;
@@ -71,15 +73,15 @@ bool writeThumbnailTestBmp(const std::string& path)
     for (int y = 0; y < height; ++y)
     {
         // Bottom-up storage: the first stored row is the bottom of the
-        // image, so the red half ends up on top when displayed (stored
-        // row y shows at display row height - 1 - y).
-        const bool redHalf = (height - 1 - y) * 2 < height;
+        // image; the split is left-right within each row, so the row order
+        // does not affect it.
         auto* row = pixels + static_cast<std::size_t>(y) * rowPadded;
         for (int x = 0; x < width; ++x)
         {
-            row[static_cast<std::size_t>(x) * 3 + 0] = redHalf ? 0 : 200;  // B
-            row[static_cast<std::size_t>(x) * 3 + 1] = redHalf ? 0 : 0;    // G
-            row[static_cast<std::size_t>(x) * 3 + 2] = redHalf ? 200 : 0;  // R
+            const bool leftHalf = x * 2 < width;
+            row[static_cast<std::size_t>(x) * 3 + 0] = leftHalf ? 0 : 200;  // B
+            row[static_cast<std::size_t>(x) * 3 + 1] = leftHalf ? 0 : 0;    // G
+            row[static_cast<std::size_t>(x) * 3 + 2] = leftHalf ? 200 : 0;  // R
         }
     }
     return writeBinaryFile(path, file.data(), file.size());
@@ -2786,10 +2788,17 @@ void ControlGuiApp::renderShowViewWindow()
             }
             const ImU32 tint =
                 ImGui::ColorConvertFloat4ToU32(ImVec4(1.f, 1.f, 1.f, layer.opacity));
-            dl->PushTextureID(tex);
-            dl->PrimQuadUV(c[0], c[1], c[2], c[3], ImVec2(0.f, 0.f), ImVec2(1.f, 0.f),
-                           ImVec2(1.f, 1.f), ImVec2(0.f, 1.f), tint);
-            dl->PopTextureID();
+            // Textured quad with the per-corner UVs. Use the high-level
+            // AddImageQuad, not a raw PrimQuadUV: in this ImGui version the
+            // low-level Prim* helpers assume the caller reserved vertices
+            // and indices (PrimReserve) first. An unreserved call leaves the
+            // draw command's element count at zero (the quad never renders)
+            // and writes past the committed vertex/index buffers, leaving
+            // stray geometry behind - the "streaks and lines" in the
+            // thumbnails. AddImageQuad does the reservation plus the texture
+            // push/pop itself.
+            dl->AddImageQuad(tex, c[0], c[1], c[2], c[3], ImVec2(0.f, 0.f), ImVec2(1.f, 0.f),
+                             ImVec2(1.f, 1.f), ImVec2(0.f, 1.f), tint);
             dl->AddQuad(c[0], c[1], c[2], c[3], outline, selected ? 2.5f : 1.0f);
             if (layer.content == "video")
             {

@@ -10,6 +10,7 @@
 // render/src/VulkanContext.cpp for the same pattern in the render side).
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -91,6 +92,18 @@ public:
     // The command buffer the frame is recorded into (valid between
     // beginFrame() and endFrame()).
     VkCommandBuffer commandBuffer() const { return m_CommandBuffer; }
+
+    // The swapchain image the current frame renders into (valid between
+    // beginFrame() and endFrame()). Used by the self-test's frame capture.
+    VkImage currentImage() const
+    {
+        return m_Images.empty() ? VK_NULL_HANDLE : m_Images[m_ImageIndex];
+    }
+    // Called with the command buffer after the render pass closes, before
+    // the command buffer ends and is submitted. The GUI self-test uses it
+    // to record a copy of the frame's pixels into a host buffer (null in
+    // normal operation).
+    std::function<void(VkCommandBuffer)> postRenderPassHook;
 
     // Blocks until the last submitted frame's command buffer completes (its
     // submit fence signals): the GUI self-test's thumbnail readback maps

@@ -626,6 +626,10 @@ void GuiVulkan::beginRenderPass()
 void GuiVulkan::endFrame(VkResult& presentResult)
 {
     vkCmdEndRenderPass(m_CommandBuffer);
+    if (postRenderPassHook)
+    {
+        postRenderPassHook(m_CommandBuffer); // self-test frame capture
+    }
     vkEndCommandBuffer(m_CommandBuffer);
 
     VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
