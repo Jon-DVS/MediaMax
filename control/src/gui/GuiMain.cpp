@@ -932,6 +932,30 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
                   << (arrived ? autoPushName : "<not received>") << std::endl;
         liveOk = liveOk && arrived;
 
+        // The Playback tab's scene list (the active system's snapshot) must
+        // reflect the pushed show straight away: the push refreshes the
+        // scene list without waiting for the 500 ms poll cycle. The pushed
+        // show has exactly one scene, "A".
+        if (arrived)
+        {
+            const auto sceneNames = app.testActiveSceneNames();
+            std::string sceneList;
+            for (const auto& n : sceneNames)
+            {
+                if (!sceneList.empty())
+                {
+                    sceneList += ", ";
+                }
+                sceneList += n;
+            }
+            const bool sceneListOk =
+                sceneNames.size() == 1 && sceneNames.front() == "A";
+            std::cout << (sceneListOk ? "PASS" : "FAIL")
+                      << " scene list updated straight away after push (scenes: "
+                      << (sceneList.empty() ? "<none>" : sceneList) << ")" << std::endl;
+            liveOk = liveOk && sceneListOk;
+        }
+
         // The pushed show's media layer must be live in the engine's frame:
         // it is what the show view renders (thumbnail + texture) during the
         // frame phases, so its absence would mean the view never drew media.
@@ -1560,6 +1584,31 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
                         .dump(2);
         }
         const bool loadOk = app.testLoadShowFile(loadDocPath);
+        // The Playback tab's scene list (the active system's snapshot) must
+        // reflect the loaded show straight away: the load's push refreshes
+        // it synchronously. Read it before any further frame is rendered -
+        // otherwise the 500 ms poll (10 Hz with the show view visible)
+        // would refresh it too. The loaded show has no scenes, so the list
+        // must now be empty (before the load it still carried the
+        // auto-pushed show's scene "A").
+        if (loadOk)
+        {
+            const auto sceneNames = app.testActiveSceneNames();
+            std::string sceneList;
+            for (const auto& n : sceneNames)
+            {
+                if (!sceneList.empty())
+                {
+                    sceneList += ", ";
+                }
+                sceneList += n;
+            }
+            const bool sceneListOk = sceneNames.empty();
+            std::cout << (sceneListOk ? "PASS" : "FAIL")
+                      << " scene list updated straight away on show load (scenes: "
+                      << (sceneList.empty() ? "<none>" : sceneList) << ")" << std::endl;
+            liveOk = liveOk && sceneListOk;
+        }
         bool arrived = false;
         if (loadOk)
         {

@@ -679,6 +679,10 @@ void ControlGuiApp::pushToActiveSystem()
     if (sendActive("show.loadJson", showPushParams(), error))
     {
         m_EditorError.clear();
+        // The Playback tab's scene list (the snapshot's scene.list) must
+        // reflect the new show straight away - do not wait for the 500 ms
+        // poll cycle.
+        active->refreshSceneList();
     }
     else
     {
@@ -702,6 +706,9 @@ bool ControlGuiApp::pushShowToSystems(std::span<SystemConnection*> targets, cons
         {
             log("pushed show '" + m_Editor.show().name + "' to " + target->name() + " (" +
                 reason + ")");
+            // The Playback tab's scene list must reflect the new show
+            // straight away - do not wait for the 500 ms poll cycle.
+            target->refreshSceneList();
         }
         else
         {
@@ -5727,6 +5734,25 @@ std::string ControlGuiApp::testDisplayMappedSystem(const std::string& displayNam
 {
     SystemConnection* mapped = mappedSystemFor(displayName);
     return mapped != nullptr ? mapped->name() : std::string();
+}
+
+std::vector<std::string> ControlGuiApp::testActiveSceneNames() const
+{
+    std::vector<std::string> names;
+    const SystemConnection* active = activeConnection();
+    if (active == nullptr)
+    {
+        return names;
+    }
+    const SystemConnection::Snapshot snap = active->snapshot();
+    if (snap.scenes.contains("scenes") && snap.scenes["scenes"].is_array())
+    {
+        for (const auto& s : snap.scenes["scenes"])
+        {
+            names.push_back(s.value("name", std::string()));
+        }
+    }
+    return names;
 }
 
 std::vector<std::string> ControlGuiApp::testShowViewDisplays() const

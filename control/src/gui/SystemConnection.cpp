@@ -471,4 +471,19 @@ bool SystemConnection::send(const std::string& method, const nlohmann::json& par
     return true;
 }
 
+void SystemConnection::refreshSceneList()
+{
+    // Goes through send() so a dead command connection is dropped and
+    // retried exactly like any other command. The scene list is poll-owned,
+    // but the snapshot mutex covers the UI write: a poll in flight simply
+    // overwrites it with the same data.
+    nlohmann::json scenes;
+    std::string error;
+    if (send("scene.list", nlohmann::json::object(), scenes, error))
+    {
+        std::lock_guard lock(m_SnapMutex);
+        m_Snap.scenes = std::move(scenes);
+    }
+}
+
 } // namespace mediamax::gui

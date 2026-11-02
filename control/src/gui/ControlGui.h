@@ -113,6 +113,12 @@ public:
     // with the given name ("" when none - the entry is "unmapped"): the
     // same mapping the Displays tab's System column shows.
     std::string testDisplayMappedSystem(const std::string& displayName) const;
+    // The scene names in the active system's last snapshot (the Playback
+    // tab's scene list); empty when there is no active system or its
+    // snapshot has no scene list yet. The self-test checks a pushed show
+    // is reflected in the list straight away (the push refreshes it
+    // without waiting for the poll cycle).
+    std::vector<std::string> testActiveSceneNames() const;
     // True when the live dock layout has Playback, Console and Log in one
     // tab block, in that order (the default layout's invariant; the
     // self-test runs it after the frame phases have built the dockspace).

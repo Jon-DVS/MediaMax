@@ -83,6 +83,13 @@ public:
     bool send(const std::string& method, const nlohmann::json& params,
               nlohmann::json& outResult, std::string& error, std::uint32_t timeoutMs = 5000);
 
+    // Refreshes the snapshot's scene list right now on the command
+    // connection: after a show push, the Playback tab's scene list must
+    // reflect the new show immediately, without waiting for the 500 ms
+    // poll cycle. Called on the UI thread right after a successful show
+    // load; a failure is ignored (the next poll refreshes the list anyway).
+    void refreshSceneList();
+
     // A cached media thumbnail (RGBA8). Fetched by the poll thread through
     // the media.thumbnail command for the show view's layer previews.
     struct Thumbnail
