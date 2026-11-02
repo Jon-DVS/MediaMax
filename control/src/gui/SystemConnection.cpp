@@ -25,6 +25,9 @@ constexpr int kThumbnailWidth = 320;
 constexpr int kThumbnailHeight = 180;
 constexpr std::uint32_t kThumbnailTimeoutMs = 15000;
 constexpr auto kThumbnailRetryDelay = std::chrono::seconds(10);
+// Engine log lines may accumulate between UI pulls (the Log tab is hidden);
+// the queue is capped to the newest of these.
+constexpr std::size_t kLogPendingCap = 1000;
 
 // Case-insensitive name comparison (the engine matches render device
 // names case-insensitively; keep the re-apply decision consistent).
@@ -76,6 +79,16 @@ void SystemConnection::connect()
         // be re-checked against the persisted render device selection.
         m_DeviceReapplied = false;
     }
+    // A fresh connection cycle also starts the engine log from the current
+    // ring: the UI already delivered (or never saw) whatever queued up
+    // before, and a first sighting must not be reported as a restart.
+    {
+        std::lock_guard lock(m_LogMutex);
+        m_LogSince = 0;
+        m_LogStarted = 0.0;
+        m_NewLogLines.clear();
+    }
+    m_LogTruncated.store(false);
     m_Running = true;
     m_PollThread = std::thread([this] { pollLoop(); });
 }
@@ -243,6 +256,69 @@ void SystemConnection::pollLoop()
                 m_Snap.haveFrameState = true;
             }
 
+            // log.tail: the engine's serious messages (warning and above)
+            // for the control's Log tab, pulled with a sequence cursor so
+            // each line is delivered exactly once. A failure is not an
+            // error: an engine without the command (an older build) just
+            // never delivers log lines.
+            {
+                std::uint64_t since = 0;
+                {
+                    std::lock_guard lock(m_LogMutex);
+                    since = m_LogSince;
+                }
+                nlohmann::json logResult;
+                std::string logError;
+                if (m_PollClient.request("log.tail", {{"since", since}}, logResult, logError,
+                                         kPollTimeoutMs))
+                {
+                    const std::uint64_t next = logResult.value("next", since);
+                    const bool truncated = logResult.value("truncated", false);
+                    const double started = logResult.value("started", 0.0);
+                    std::lock_guard lock(m_LogMutex);
+                    const bool firstSighting = (m_LogStarted == 0.0);
+                    const bool newRun =
+                        started != 0.0 && !firstSighting && started != m_LogStarted;
+                    if (started != 0.0)
+                    {
+                        m_LogStarted = started;
+                    }
+                    if (newRun)
+                    {
+                        // The engine restarted: its sequence numbers went
+                        // back to 1, so the old cursor is void (this
+                        // response's entries were filtered against it -
+                        // the next cycle re-fetches the fresh ring from
+                        // the start). Mark the gap for the Log tab.
+                        m_LogSince = 0;
+                        m_LogTruncated.store(true);
+                    }
+                    else
+                    {
+                        m_LogSince = next;
+                        if (truncated)
+                        {
+                            m_LogTruncated.store(true); // the ring dropped unseen lines
+                        }
+                        const auto entries =
+                            logResult.value("entries", nlohmann::json::array());
+                        for (const auto& e : entries)
+                        {
+                            m_NewLogLines.push_back({e.value("seq", std::uint64_t{0}),
+                                                     e.value("level", std::string()),
+                                                     e.value("time", 0.0),
+                                                     e.value("message", std::string())});
+                        }
+                        // Cap the queue while the UI is not pulling (a
+                        // hidden window): keep the newest lines.
+                        while (m_NewLogLines.size() > kLogPendingCap)
+                        {
+                            m_NewLogLines.erase(m_NewLogLines.begin());
+                        }
+                    }
+                }
+            }
+
             // Thumbnails: drop cache entries for media the engine no longer
             // has, then fetch at most one pending request (a 4K decode can
             // block for seconds; one in flight keeps the status cadence
@@ -368,6 +444,12 @@ bool SystemConnection::thumbnailFor(std::uint32_t mediaId, int& width, int& heig
     height = it->second.height;
     rgba = it->second.rgba;
     return true;
+}
+
+std::vector<SystemConnection::LogLine> SystemConnection::takeNewLogLines()
+{
+    std::lock_guard lock(m_LogMutex);
+    return std::move(m_NewLogLines);
 }
 
 bool SystemConnection::send(const std::string& method, const nlohmann::json& params,

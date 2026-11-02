@@ -1,6 +1,6 @@
 // The command server: the full control surface mapped onto a real engine,
 // media library and display set. This is the integration test for the
-// protocol layer - it exercises every one of the 25 commands.
+// protocol layer - it exercises every one of the 29 commands.
 
 #include <algorithm>
 #include <atomic>
@@ -333,6 +333,114 @@ TEST_CASE("system.setRenderDevice surfaces the app's rejection")
     CHECK_FALSE(resp.ok);
     CHECK(resp.error.find("cannot present") != std::string::npos);
     CHECK(f.run("status").result.at("renderDevice").at("switching").get<bool>() == false);
+}
+
+TEST_CASE("log.tail is empty until the app logs something serious")
+{
+    Fixture f;
+    const Response resp = f.run("log.tail");
+    REQUIRE(resp.ok);
+    CHECK(resp.result.at("entries").is_array());
+    CHECK(resp.result.at("entries").size() == 0);
+    // An empty ring reports "next" 0: a client cursor at 0 stays at 0.
+    CHECK(resp.result.at("next").get<std::uint64_t>() == 0);
+    CHECK(resp.result.at("truncated").get<bool>() == false);
+
+    // Info and debug never reach the buffer (the control surface only
+    // reports the serious messages).
+    f.server.pushLog(LogLevel::Info, "not serious");
+    f.server.pushLog(LogLevel::Debug, "even less so");
+    const Response stillEmpty = f.run("log.tail");
+    CHECK(stillEmpty.ok);
+    CHECK(stillEmpty.result.at("entries").size() == 0);
+}
+
+TEST_CASE("log.tail carries warning and above with level, seq and time")
+{
+    Fixture f;
+    f.server.pushLog(LogLevel::Warning, "something is off");
+    f.server.pushLog(LogLevel::Error, "render fault");
+
+    const Response resp = f.run("log.tail");
+    REQUIRE(resp.ok);
+    const nlohmann::json entries = resp.result.at("entries");
+    REQUIRE(entries.size() == 2);
+
+    CHECK(entries[0].at("seq").get<std::uint64_t>() == 1);
+    CHECK(entries[0].at("level").get<std::string>() == "warning");
+    CHECK(entries[0].at("message").get<std::string>() == "something is off");
+    CHECK(entries[0].at("time").get<double>() > 0.0);
+
+    CHECK(entries[1].at("seq").get<std::uint64_t>() == 2);
+    CHECK(entries[1].at("level").get<std::string>() == "error");
+    CHECK(entries[1].at("message").get<std::string>() == "render fault");
+
+    // "next" is the newest seq in the ring - the cursor to pass back as
+    // "since" next time (entries are delivered for seq > since).
+    CHECK(resp.result.at("next").get<std::uint64_t>() == 2);
+}
+
+TEST_CASE("log.tail paginates with since/next")
+{
+    Fixture f;
+    f.server.pushLog(LogLevel::Warning, "one");
+    f.server.pushLog(LogLevel::Warning, "two");
+    f.server.pushLog(LogLevel::Error, "three");
+
+    const Response first = f.run("log.tail");
+    REQUIRE(first.ok);
+    CHECK(first.result.at("entries").size() == 3);
+    const std::uint64_t next = first.result.at("next").get<std::uint64_t>();
+    CHECK(next == 3); // the newest seq in the ring
+
+    // Nothing new since the cursor.
+    const Response none = f.run("log.tail", {{"since", next}});
+    REQUIRE(none.ok);
+    CHECK(none.result.at("entries").size() == 0);
+    CHECK(none.result.at("next").get<std::uint64_t>() == next);
+
+    // A new entry (seq 4) is delivered by the same cursor on the next call.
+    f.server.pushLog(LogLevel::Warning, "four");
+    const Response more = f.run("log.tail", {{"since", next}});
+    REQUIRE(more.ok);
+    const nlohmann::json entries = more.result.at("entries");
+    REQUIRE(entries.size() == 1);
+    CHECK(entries[0].at("seq").get<std::uint64_t>() == 4);
+    CHECK(entries[0].at("message").get<std::string>() == "four");
+    CHECK(more.result.at("next").get<std::uint64_t>() == 4);
+    CHECK(more.result.at("truncated").get<bool>() == false);
+}
+
+TEST_CASE("log.tail reports truncation when the client fell behind")
+{
+    Fixture f;
+    // Fill the ring past its capacity (CommandServer::kLogCapacity) so the
+    // oldest entries are dropped.
+    for (std::uint64_t i = 0; i < CommandServer::kLogCapacity + 1; ++i)
+    {
+        f.server.pushLog(LogLevel::Warning, "entry " + std::to_string(i));
+    }
+
+    // A client that never polled has missed the dropped tail: truncated.
+    const Response behind = f.run("log.tail");
+    REQUIRE(behind.ok);
+    CHECK(behind.result.at("entries").size() == CommandServer::kLogCapacity);
+    CHECK(behind.result.at("truncated").get<bool>() == true);
+    CHECK(behind.result.at("entries")[0].at("seq").get<std::uint64_t>() == 2);
+
+    // A client at the ring's oldest seq has the whole window: not truncated.
+    const Response atOldest = f.run("log.tail", {{"since", 1}});
+    REQUIRE(atOldest.ok);
+    CHECK(atOldest.result.at("truncated").get<bool>() == false);
+    CHECK(atOldest.result.at("entries").size() == CommandServer::kLogCapacity);
+}
+
+TEST_CASE("log.tail rejects a non-numeric since")
+{
+    Fixture f;
+    const Response resp = f.run("log.tail", {{"since", "nope"}});
+    CHECK_FALSE(resp.ok);
+    CHECK(resp.error.find("since") != std::string::npos);
 }
 
 TEST_CASE("playback transport commands")
@@ -1798,7 +1906,8 @@ TEST_CASE("every supported method is dispatched")
     {
         if (method == "ping" || method == "status" || method == "frame.state" ||
             method == "scene.list" || method == "scene.clear" || method == "media.list" ||
-            method == "display.list" || method == "show.info" || method == "layer.clear")
+            method == "display.list" || method == "show.info" || method == "layer.clear" ||
+            method == "log.tail")
         {
             // These succeed with no parameters at all.
             CHECK(f.run(method).ok);

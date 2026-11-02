@@ -445,11 +445,12 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
         }
     }
 
-    // 2b) Default dock layout: Playback and Console must share one tab
-    //     block, in the order Playback, Console (renderDockspace).
-    const bool layoutOk = app.testDockLayoutPlaybackConsoleTabs();
+    // 2b) Default dock layout: Playback, Console and Log must share one
+    //     tab block, in the order Playback, Console, Log (renderDockspace).
+    const bool layoutOk = app.testDockLayoutPlaybackConsoleLogTabs();
     std::cout << (layoutOk ? "PASS" : "FAIL")
-              << " default layout tabs Playback and Console together (order: Playback, Console)"
+              << " default layout tabs Playback, Console and Log together (order: Playback,"
+                 " Console, Log)"
               << std::endl;
 
     // 3) Modal dialogs: open each dialog the UI buttons open and verify
@@ -1991,6 +1992,48 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
                           " offline -> " + std::to_string(livePort) + " back online)" + detail + "\n";
             liveOk = liveOk && retargetOk;
         }
+    }
+
+    // 4v) Log tab (log.tail): the engine's serious messages - the command
+    //     phase's media.load failure warning among them - reach the Log tab
+    //     through the systems' poll loops, next to the control's own
+    //     (local) messages. The tab's lines are filled while frames render
+    //     (renderLogWindow pulls the connections' queues).
+    if (haveLiveSystem && liveOk)
+    {
+        bool sawRemote = false;
+        bool sawLocal = false;
+        const auto logDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(6);
+        while (!(sawRemote && sawLocal) && std::chrono::steady_clock::now() < logDeadline)
+        {
+            glfwPollEvents();
+            runtime.renderFrame();
+            for (const auto& line : app.testLogTabLines())
+            {
+                // "source|level|message"
+                const std::size_t first = line.find('|');
+                if (first == std::string::npos)
+                {
+                    continue;
+                }
+                const std::string source = line.substr(0, first);
+                const std::size_t second = line.find('|', first + 1);
+                const std::string message = line.substr(second + 1);
+                if (!sawRemote && source != "local" &&
+                    message.find("definitely_missing_media_xyz") != std::string::npos)
+                {
+                    sawRemote = true;
+                }
+                if (!sawLocal && source == "local")
+                {
+                    sawLocal = true;
+                }
+            }
+        }
+        const bool logOk = sawRemote && sawLocal;
+        liveReport += std::string(logOk ? "PASS " : "FAIL ") +
+                      "Log tab carries the engine's serious messages (log.tail) and the local log\n";
+        liveOk = liveOk && logOk;
     }
 
     // 4w) Displays tree + warp editor (Displays tab rework + warp editor

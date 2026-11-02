@@ -385,6 +385,9 @@ void PlaybackApp::shutdown()
     auto& log = Logger::instance();
 
     m_ControlServer.reset(); // stops the accept thread + client threads
+    // The logger listener forwards into m_CommandServer (destroyed when the
+    // app goes away); detach it now that no command thread can log.
+    Logger::instance().setListener(nullptr);
     m_Pump.stop();
     m_Audio.stop();
 
@@ -1603,6 +1606,19 @@ bool PlaybackApp::initEngine()
         }
         m_CommandServer->setRenderDeviceInfo(m_Vulkan->deviceName(), m_Vulkan->deviceType(),
                                              available);
+    }
+
+    // The control's Log tab (log.tail): serious engine messages (render
+    // faults, media failures, protocol errors - warning and above, the
+    // server's filter) are forwarded from the process logger into the
+    // command server's ring buffer. The Logger outlives the app, so the
+    // listener is cleared in shutdown() before the server is destroyed.
+    {
+        protocol::CommandServer* server = m_CommandServer.get();
+        Logger::instance().setListener(
+            [server](LogLevel level, const std::string& message) {
+                server->pushLog(level, message);
+            });
     }
 
     // Startup show: go through the same command handler as the network

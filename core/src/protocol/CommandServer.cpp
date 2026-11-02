@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <filesystem>
 #include <map>
@@ -102,6 +103,19 @@ nlohmann::json idArray(const std::vector<Id>& ids)
     return arr;
 }
 
+// The protocol-level name for a log level (log.tail entries).
+std::string levelString(LogLevel level)
+{
+    switch (level)
+    {
+        case LogLevel::Debug: return "debug";
+        case LogLevel::Info: return "info";
+        case LogLevel::Warning: return "warning";
+        case LogLevel::Error: return "error";
+    }
+    return "info";
+}
+
 // Case-insensitive name comparison (device names are vendor-cased; the
 // UI passes them back verbatim, and operators may retype them).
 bool sameNameInsensitive(const std::string& a, const std::string& b)
@@ -161,6 +175,7 @@ std::vector<std::string> CommandServer::supportedMethods()
             "frame.state",
             "system.set",
             "system.setRenderDevice",
+            "log.tail",
             "show.load",
             "show.loadJson",
             "show.save",
@@ -210,6 +225,10 @@ Response CommandServer::handle(const Command& cmd) const
         else if (cmd.method == "system.setRenderDevice")
         {
             result = handleSystemSetRenderDevice(cmd.params);
+        }
+        else if (cmd.method == "log.tail")
+        {
+            result = handleLogTail(cmd.params);
         }
         else if (cmd.method == "show.load")
         {
@@ -557,6 +576,77 @@ nlohmann::json CommandServer::handleSystemSetRenderDevice(const nlohmann::json& 
     // result's "renderDevice.switching" tracks it until the app clears it.
     m_RenderDeviceSwitching = true;
     return {{"device", device.empty() ? "(default)" : device}, {"switching", true}};
+}
+
+void CommandServer::pushLog(LogLevel level, const std::string& message)
+{
+    // Only the serious messages (warning and above) reach the control
+    // surface - render faults, media failures, protocol errors. Debug/info
+    // traffic is console-only.
+    if (level < LogLevel::Warning)
+    {
+        return;
+    }
+    const double now = std::chrono::duration<double>(
+                           std::chrono::system_clock::now().time_since_epoch())
+                           .count();
+    std::lock_guard lock(m_LogMutex);
+    m_Log.push_back(LogEntry{m_LogNextSeq++, level, now, message});
+    while (m_Log.size() > kLogCapacity)
+    {
+        m_Log.pop_front();
+    }
+}
+
+nlohmann::json CommandServer::handleLogTail(const nlohmann::json& params) const
+{
+    // "since" (optional, default 0): the last sequence number the client
+    // has seen; the result carries every newer entry in the ring. Clients
+    // pass "next" back as "since" on the next call (the control's poll
+    // loop does, on every 500 ms cycle).
+    std::uint64_t since = 0;
+    if (params.contains("since"))
+    {
+        if (!params["since"].is_number())
+        {
+            throw ParameterError("log.tail: 'since' must be a number");
+        }
+        since = params["since"].get<std::uint64_t>();
+    }
+    nlohmann::json entries = nlohmann::json::array();
+    std::uint64_t oldest = 0;
+    std::uint64_t newest = 0;
+    {
+        std::lock_guard lock(m_LogMutex);
+        if (!m_Log.empty())
+        {
+            oldest = m_Log.front().seq;
+            newest = m_Log.back().seq;
+        }
+        for (const auto& entry : m_Log)
+        {
+            if (entry.seq <= since)
+            {
+                continue;
+            }
+            entries.push_back({{"seq", entry.seq},
+                               {"level", levelString(entry.level)},
+                               {"time", entry.time},
+                               {"message", entry.message}});
+        }
+    }
+    // "next" is the ring's newest seq - the client passes it back as
+    // "since" (entries are delivered for seq > since, so a cursor at the
+    // newest picks up exactly the newer ones). "truncated" tells the
+    // client the ring dropped entries newer than "since" that it never saw
+    // (it fell behind or polled after a restart): the GUI marks the gap
+    // instead of pretending the list is complete. "started" identifies this
+    // engine run (a change means the cursor must be reset - a fresh run's
+    // ring starts at seq 1).
+    return {{"started", m_LogStarted},
+            {"next", newest},
+            {"truncated", newest > 0 && oldest > since + 1},
+            {"entries", entries}};
 }
 
 nlohmann::json CommandServer::handleShowLoad(const nlohmann::json& params) const

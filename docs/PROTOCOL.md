@@ -159,6 +159,41 @@ clean error; clients should check `status.renderDevice` first. The
 playback app also accepts `--device <name>` at startup (see the
 executable's `--help`).
 
+### `log.tail`
+
+The engine's serious log messages (render faults, media failures, protocol
+errors — `warning` and above; `debug`/`info` stay on the engine's console)
+in a bounded ring (the 500 newest). The control interface polls it on its
+500 ms cycle and shows the lines, next to its own local messages, in the
+**Log** tab beside the Console.
+
+- Params: `since` (number, optional, default `0`). The last `seq` the
+  client has seen; the result carries every newer entry. Clients pass the
+  result's `next` back as `since` on the next call, so each line is
+  delivered exactly once.
+- Result:
+  ```json
+  {
+    "started": 1796160000.123,
+    "next": 42,
+    "truncated": false,
+    "entries": [
+      {"seq": 41, "level": "warning", "time": 1796160001.5,
+       "message": "MediaLibrary::load failed for 'x.mp4': cannot open file: x.mp4"},
+      {"seq": 42, "level": "error", "time": 1796160002.0,
+       "message": "render fault ..."}
+    ]
+  }
+  ```
+  `started` identifies the engine run (epoch seconds at engine start): when
+  it changes between calls the engine restarted, its `seq` numbers go back
+  to 1, and the client must reset its cursor to `0` (the next call then
+  re-delivers the fresh ring). `truncated` is true when the ring already
+  dropped entries the client never saw (ones newer than `since`, i.e. the
+  client fell behind or polled after a restart) — clients should mark the
+  gap. `entries` is in sequence order; `time` is epoch seconds on the
+  engine's clock.
+
 ### Shows
 
 #### `show.load`

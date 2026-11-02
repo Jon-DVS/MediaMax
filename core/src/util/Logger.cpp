@@ -19,6 +19,12 @@ void Logger::setLevel(LogLevel level)
     m_Level.store(level, std::memory_order_relaxed);
 }
 
+void Logger::setListener(Listener listener)
+{
+    std::lock_guard lock(m_Mutex);
+    m_Listener = std::move(listener);
+}
+
 void Logger::log(LogLevel level, const std::string& message)
 {
     if (level < m_Level.load(std::memory_order_relaxed))
@@ -56,6 +62,12 @@ void Logger::log(LogLevel level, const std::string& message)
     std::lock_guard lock(m_Mutex);
     std::fprintf(stderr, "[%s] [%-5s] %s\n", timeBuf, tag, message.c_str());
     std::fflush(stderr);
+    // The listener sees the message after it is committed to stderr (it
+    // runs under m_Mutex - see the Listener contract in the header).
+    if (m_Listener)
+    {
+        m_Listener(level, message);
+    }
 }
 
 } // namespace mediamax

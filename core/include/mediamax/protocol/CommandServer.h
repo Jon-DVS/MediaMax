@@ -9,7 +9,9 @@
 // lets the control interface validate commands before sending.
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
+#include <deque>
 #include <exception>
 #include <filesystem>
 #include <functional>
@@ -21,6 +23,7 @@
 #include "mediamax/media/MediaLibrary.h"
 #include "mediamax/playback/PlaybackEngine.h"
 #include "mediamax/protocol/Protocol.h"
+#include "mediamax/util/Logger.h"
 
 namespace mediamax::protocol
 {
@@ -76,6 +79,9 @@ public:
         , m_Media(media)
         , m_Displays(displays)
         , m_SystemName(std::move(systemName))
+        , m_LogStarted(
+              std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch())
+                  .count())
     {
     }
 
@@ -121,6 +127,14 @@ public:
         m_RenderDeviceSwitching = switching;
     }
 
+    // Feeds the log.tail ring buffer from the process logger: the app
+    // installs a Logger::Listener that forwards every emitted message here.
+    // Only Warning and above is stored (the "serious" messages the control
+    // surface reports - render faults, media failures, protocol errors);
+    // the buffer keeps the last kLogCapacity entries.
+    static constexpr std::size_t kLogCapacity = 500;
+    void pushLog(LogLevel level, const std::string& message);
+
     // The machine identity reported in "status": the computer name
     // (`hostname`) and primary IPv4 address (`ip`) of the machine running
     // the engine. The app fills these in (the core has no platform access).
@@ -154,6 +168,7 @@ private:
     nlohmann::json handleFrameState() const;
     nlohmann::json handleSystemSet(const nlohmann::json& params) const;
     nlohmann::json handleSystemSetRenderDevice(const nlohmann::json& params) const;
+    nlohmann::json handleLogTail(const nlohmann::json& params) const;
     nlohmann::json handleShowLoad(const nlohmann::json& params) const;
     nlohmann::json handleShowLoadJson(const nlohmann::json& params) const;
     nlohmann::json handleShowSave(const nlohmann::json& params) const;
@@ -234,6 +249,25 @@ private:
     // lock, like m_SystemName under system.set.
     mutable bool m_RenderDeviceSwitching = false;
     RenderDeviceSwitchFunction m_RenderDeviceSwitchFn;
+
+    // Log ring buffer (log.tail): serious engine messages the control
+    // surface reports. Guarded by m_LogMutex: any thread can log through
+    // pushLog (the logger calls it from wherever the message is produced),
+    // the command threads read it for log.tail.
+    struct LogEntry
+    {
+        std::uint64_t seq = 0; // monotonically increasing, per server
+        LogLevel level = LogLevel::Info; // Warning or above (see pushLog)
+        double time = 0.0; // epoch seconds when the message was produced
+        std::string message;
+    };
+    mutable std::mutex m_LogMutex;
+    std::deque<LogEntry> m_Log;
+    std::uint64_t m_LogNextSeq = 1;
+    // This engine run's identity (epoch seconds at construction): a client
+    // comparing it across log.tail calls detects an engine restart and
+    // resets its sequence cursor (a fresh run's ring starts at seq 1).
+    const double m_LogStarted;
 };
 
 // Thrown by parameter helpers; caught by handle() and turned into a failure

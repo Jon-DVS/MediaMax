@@ -113,10 +113,13 @@ public:
     // with the given name ("" when none - the entry is "unmapped"): the
     // same mapping the Displays tab's System column shows.
     std::string testDisplayMappedSystem(const std::string& displayName) const;
-    // True when the live dock layout has Playback and Console in one tab
-    // block, in that order (the default layout's invariant; the self-test
-    // runs it after the frame phases have built the dockspace).
-    bool testDockLayoutPlaybackConsoleTabs() const;
+    // True when the live dock layout has Playback, Console and Log in one
+    // tab block, in that order (the default layout's invariant; the
+    // self-test runs it after the frame phases have built the dockspace).
+    bool testDockLayoutPlaybackConsoleLogTabs() const;
+    // The Log tab's lines as "source|level|message" (the self-test checks
+    // both local and remote entries); empty when none logged yet.
+    std::vector<std::string> testLogTabLines() const;
     // True once a registered system reports its poll connection up.
     bool testSystemConnected(const std::string& name) const;
     // Gives the fresh self-test editor a deterministic scene (id 1) with one
@@ -441,6 +444,10 @@ private:
     // Show::addCue replaces a cue at an existing time).
     void addCueDefault();
     void renderConsoleWindow();
+    // The Log tab: the control's own messages plus the serious engine
+    // messages (log.tail: warning and above) from every connected system,
+    // in arrival order with a source label each.
+    void renderLogWindow();
     void renderModals();
     // --- Open/Save As file dialogs (ImGuiFileDialog) -------------------------
     // The two dialogs are ordinary ImGui windows owned by the vendored
@@ -609,6 +616,20 @@ private:
     std::string m_ConsoleInput;
     std::vector<std::string> m_ConsoleLog;
     static constexpr size_t kMaxLogLines = 500;
+
+    // Log tab (next to Console): the control's own messages plus the
+    // serious engine messages (log.tail: warning and above) from every
+    // connected system, in arrival order with a source label each.
+    struct LogTabLine
+    {
+        std::string source; // "local" or the system name
+        std::string level; // "info" / "warning" / "error"
+        double time = 0.0; // epoch seconds (engine clock; 0 = local/now)
+        std::string message;
+    };
+    std::vector<LogTabLine> m_LogTab; // guarded by m_LogTabMutex
+    mutable std::mutex m_LogTabMutex; // mutable: the test hooks read it const
+    static constexpr size_t kMaxLogTabLines = 1000;
 
     // Playback edit state (for the active system).
     double m_Seek = 0.0;

@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <filesystem>
 #include <functional>
 #include <utility>
@@ -307,6 +308,31 @@ std::string truncate(const std::string& s, size_t limit)
     return s.size() <= limit ? s : s.substr(0, limit) + " ...";
 }
 
+// Epoch seconds (the engine's log.line "time", 0 = stamp at render time)
+// as a local "HH:MM:SS" stamp for the Log tab.
+void formatEpochSeconds(double epoch, char* out, size_t size)
+{
+    const std::time_t seconds =
+        static_cast<std::time_t>(epoch > 0.0 ? epoch
+                                             : std::chrono::system_clock::now()
+                                                   .time_since_epoch()
+                                                   .count());
+    std::tm tm{};
+#if defined(_WIN32)
+    localtime_s(&tm, &seconds);
+#else
+    localtime_r(&seconds, &tm);
+#endif
+    std::snprintf(out, size, "%02d:%02d:%02d", tm.tm_hour, tm.tm_min, tm.tm_sec);
+}
+
+// The current epoch seconds (double) - the Log tab's local line stamps.
+double nowEpochSeconds()
+{
+    return std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch())
+        .count();
+}
+
 } // namespace
 
 // The hotkey table (Help > Hot Keys lists it; processHotkeys() fires it).
@@ -434,6 +460,7 @@ void ControlGuiApp::frame()
     renderPlaybackWindow();
     renderShowEditorWindow();
     renderConsoleWindow();
+    renderLogWindow();
     renderModals();
     ImGui::End();
     // The show view wants live data (frame.state at 10 Hz) only while it is
@@ -535,6 +562,16 @@ void ControlGuiApp::log(const std::string& line)
     while (m_ConsoleLog.size() > kMaxLogLines)
     {
         m_ConsoleLog.erase(m_ConsoleLog.begin());
+    }
+    // The Log tab carries the control's own messages too (next to the
+    // systems' serious engine messages).
+    {
+        std::lock_guard lock(m_LogTabMutex);
+        m_LogTab.push_back({"local", "info", nowEpochSeconds(), truncate(line, kLogLineLimit)});
+        while (m_LogTab.size() > kMaxLogTabLines)
+        {
+            m_LogTab.erase(m_LogTab.begin());
+        }
     }
 }
 
@@ -891,10 +928,11 @@ void ControlGuiApp::renderDockspace()
         ImGui::DockBuilderDockWindow("Systems", left);
         ImGui::DockBuilderDockWindow("Displays", leftBottom);
         ImGui::DockBuilderDockWindow("Show view", center);
-        // Playback and Console share one tab block (dock order = tab
-        // order: Playback first, Console second).
+        // Playback, Console and Log share one tab block (dock order = tab
+        // order: Playback first, Console second, Log third).
         ImGui::DockBuilderDockWindow("Playback", centerBottom);
         ImGui::DockBuilderDockWindow("Console", centerBottom);
+        ImGui::DockBuilderDockWindow("Log", centerBottom);
         ImGui::DockBuilderDockWindow("Show Editor", right);
         // Finish with the root ID (the one given to DockBuilderAddNode);
         // DockSpace() below must receive the same root every frame.
@@ -3942,6 +3980,95 @@ void ControlGuiApp::renderConsoleWindow()
     ImGui::End();
 }
 
+void ControlGuiApp::renderLogWindow()
+{
+    // Pull the engine log lines (log.tail) accumulated by each system's
+    // poll loop since the last frame, and mark the gaps the engine's ring
+    // dropped. The source label is the system's name, so a restarted
+    // engine's lines are attributable.
+    for (auto& system : m_Systems)
+    {
+        SystemConnection& conn = *system;
+        const std::string name = conn.name();
+        if (conn.logTruncatedPending())
+        {
+            conn.ackLogTruncation();
+            std::lock_guard lock(m_LogTabMutex);
+            m_LogTab.push_back({name, "info", nowEpochSeconds(),
+                                "(older log entries dropped)"});
+        }
+        const auto lines = conn.takeNewLogLines();
+        if (lines.empty())
+        {
+            continue;
+        }
+        std::lock_guard lock(m_LogTabMutex);
+        for (const auto& line : lines)
+        {
+            m_LogTab.push_back({name, line.level, line.time,
+                                truncate(line.message, kLogLineLimit)});
+        }
+        while (m_LogTab.size() > kMaxLogTabLines)
+        {
+            m_LogTab.erase(m_LogTab.begin());
+        }
+    }
+
+    // Begin() may return false; End() must still be called (see above).
+    if (!ImGui::Begin("Log", nullptr, ImGuiWindowFlags_HorizontalScrollbar))
+    {
+        ImGui::End();
+        return;
+    }
+    std::vector<LogTabLine> lines;
+    {
+        std::lock_guard lock(m_LogTabMutex);
+        lines = m_LogTab;
+    }
+    if (lines.empty())
+    {
+        ImGui::TextDisabled(
+            "No messages yet (the engines' warnings and errors appear here)");
+    }
+    else
+    {
+        if (ImGui::BeginChild("logtab", ImVec2(0.0f, -30.0f), true))
+        {
+            for (const auto& line : lines)
+            {
+                char stamp[32];
+                formatEpochSeconds(line.time, stamp, sizeof(stamp));
+                if (line.level == "error")
+                {
+                    ImGui::TextColored(kBadColor, "[%s] %s: %s", stamp, line.source.c_str(),
+                                       line.message.c_str());
+                }
+                else if (line.level == "warning")
+                {
+                    ImGui::TextColored(kWarnColor, "[%s] %s: %s", stamp, line.source.c_str(),
+                                       line.message.c_str());
+                }
+                else
+                {
+                    ImGui::Text("[ %s ] %s: %s", stamp, line.source.c_str(),
+                                line.message.c_str());
+                }
+            }
+            if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 1.0f)
+            {
+                ImGui::SetScrollHereY(1.0f);
+            }
+        }
+        ImGui::EndChild();
+    }
+    if (ImGui::Button("Clear log"))
+    {
+        std::lock_guard lock(m_LogTabMutex);
+        m_LogTab.clear();
+    }
+    ImGui::End();
+}
+
 // --- Open / Save As file dialogs (ImGuiFileDialog) --------------------------------------
 
 const char* ControlGuiApp::fileDialogKey(const std::string& which)
@@ -5489,15 +5616,16 @@ std::string ControlGuiApp::testDisplayMappedSystem(const std::string& displayNam
     return mapped != nullptr ? mapped->name() : std::string();
 }
 
-bool ControlGuiApp::testDockLayoutPlaybackConsoleTabs() const
+bool ControlGuiApp::testDockLayoutPlaybackConsoleLogTabs() const
 {
-    // The default layout must tab Playback and Console together, in that
-    // order. The dock node's Windows list is unordered (Dear ImGui keeps
-    // the user-visible tab order in the node's TabBar), so check both the
-    // shared node and the tab index.
+    // The default layout must tab Playback, Console and Log together, in
+    // that order. The dock node's Windows list is unordered (Dear ImGui
+    // keeps the user-visible tab order in the node's TabBar), so check both
+    // the shared node and the tab index.
     ImGuiContext& g = *ImGui::GetCurrentContext();
     const ImGuiWindow* playback = nullptr;
     const ImGuiWindow* console = nullptr;
+    const ImGuiWindow* log = nullptr;
     for (int wi = 0; wi < g.Windows.Size; ++wi)
     {
         ImGuiWindow* w = g.Windows.Data[static_cast<std::size_t>(wi)];
@@ -5513,19 +5641,25 @@ bool ControlGuiApp::testDockLayoutPlaybackConsoleTabs() const
         {
             console = w;
         }
+        else if (std::string(w->Name) == "Log")
+        {
+            log = w;
+        }
     }
-    if (playback == nullptr || console == nullptr || playback->DockNode == nullptr ||
-        playback->DockNode != console->DockNode)
+    if (playback == nullptr || console == nullptr || log == nullptr ||
+        playback->DockNode == nullptr || playback->DockNode != console->DockNode ||
+        playback->DockNode != log->DockNode)
     {
         return false; // windows missing or not in the same tab block
     }
     const ImGuiDockNode* node = playback->DockNode;
-    if (node->TabBar == nullptr || node->TabBar->Tabs.Size < 2)
+    if (node->TabBar == nullptr || node->TabBar->Tabs.Size < 3)
     {
         return false;
     }
     int playbackTab = -1;
     int consoleTab = -1;
+    int logTab = -1;
     for (int i = 0; i < node->TabBar->Tabs.Size; ++i)
     {
         const ImGuiTabItem& tab = node->TabBar->Tabs.Data[static_cast<std::size_t>(i)];
@@ -5537,8 +5671,24 @@ bool ControlGuiApp::testDockLayoutPlaybackConsoleTabs() const
         {
             consoleTab = i;
         }
+        if (tab.Window == log)
+        {
+            logTab = i;
+        }
     }
-    return playbackTab >= 0 && consoleTab > playbackTab;
+    return playbackTab >= 0 && consoleTab > playbackTab && logTab > consoleTab;
+}
+
+std::vector<std::string> ControlGuiApp::testLogTabLines() const
+{
+    std::vector<std::string> out;
+    std::lock_guard lock(m_LogTabMutex);
+    out.reserve(m_LogTab.size());
+    for (const auto& line : m_LogTab)
+    {
+        out.push_back(line.source + "|" + line.level + "|" + line.message);
+    }
+    return out;
 }
 
 void ControlGuiApp::testGiveEditorALayer()

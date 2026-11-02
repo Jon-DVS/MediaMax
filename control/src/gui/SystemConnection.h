@@ -117,6 +117,28 @@ public:
     bool thumbnailFor(std::uint32_t mediaId, int& width, int& height,
                       std::vector<std::uint8_t>& rgba) const;
 
+    // One serious engine message (the log.tail ring: warning and above -
+    // render faults, media failures, protocol errors).
+    struct LogLine
+    {
+        std::uint64_t seq = 0; // the engine's sequence number (per engine run)
+        std::string level; // "warning" / "error"
+        double time = 0.0; // epoch seconds (the engine's clock)
+        std::string message;
+    };
+
+    // Removes and returns the engine log lines accumulated by the poll
+    // loop since the last call (the control's Log tab pulls them every
+    // frame). Empty for engines without the log.tail command (older
+    // builds) and while the poll connection is down.
+    std::vector<LogLine> takeNewLogLines();
+
+    // True once the engine's log ring dropped entries this client never
+    // saw (a restart or a long gap) - the Log tab marks the gap once, then
+    // the UI acknowledges with ackLogTruncation().
+    bool logTruncatedPending() const { return m_LogTruncated.load(); }
+    void ackLogTruncation() { m_LogTruncated.store(false); }
+
     // While true the poll loop sleeps one 50 ms tick per cycle (10 Hz)
     // instead of 500 ms, so the show view animates smoothly. Set by the UI
     // thread while the show view window is visible (atomic; no lock).
@@ -153,6 +175,16 @@ private:
     std::chrono::steady_clock::time_point m_ThumbnailRetry{std::chrono::steady_clock::now()}; // under
                                                                   // m_SnapMutex
     std::atomic<bool> m_LivePoll{false};
+
+    // Engine log (log.tail): the poll thread accumulates new lines, the UI
+    // thread pulls them (takeNewLogLines); connect() resets the cursor and
+    // the queue while the thread is stopped (a fresh engine run re-sends
+    // its ring).
+    std::mutex m_LogMutex;
+    std::vector<LogLine> m_NewLogLines; // under m_LogMutex
+    std::uint64_t m_LogSince = 0;       // under m_LogMutex
+    double m_LogStarted = 0.0;          // under m_LogMutex; the run id last seen
+    std::atomic<bool> m_LogTruncated{false};
 };
 
 } // namespace mediamax::gui

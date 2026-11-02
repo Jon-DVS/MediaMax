@@ -10,6 +10,7 @@
 #include <atomic>
 #include <cstdio>
 #include <format>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -33,6 +34,15 @@ public:
 
     void setLevel(LogLevel level);
     LogLevel level() const { return m_Level.load(); }
+
+    // Optional listener for every emitted message (i.e. at or above the
+    // current level) - the playback app uses it to feed the control
+    // protocol's log buffer (log.tail). Installed once by the owning app;
+    // nullptr (the default) disables it. The listener runs with the
+    // logger's mutex held, so it must be fast and non-recursive (it must
+    // never log through this Logger again).
+    using Listener = std::function<void(LogLevel, const std::string&)>;
+    void setListener(Listener listener);
 
     template <typename... Args>
     void debug(std::string_view fmt, Args&&... args)
@@ -81,6 +91,8 @@ private:
     // writes it.
     std::atomic<LogLevel> m_Level{LogLevel::Info};
     std::mutex m_Mutex;
+    // Guarded by m_Mutex (read inside log(), swapped by setListener()).
+    Listener m_Listener;
 };
 
 } // namespace mediamax
