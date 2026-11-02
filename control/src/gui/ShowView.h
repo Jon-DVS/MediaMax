@@ -36,11 +36,20 @@
 #include <imgui.h>
 
 #include "gui/SystemConnection.h"
+#include "mediamax/show/Show.h"
 
 namespace mediamax::gui
 {
 
-// One display of the wall (output-space pixels, y down).
+// The scene display id is either the engine's live id or, for a show
+// document entry that no running system shows, the document's (file-local)
+// id with kShowViewDocumentIdBit set: the two id spaces are both allocated
+// from 1 upward and must not collide in one scene.
+inline constexpr std::uint32_t kShowViewDocumentIdBit = 0x80000000u;
+
+// One display of the wall (output-space pixels, y down). Entries that no
+// running system shows come from the show document: their id carries
+// kShowViewDocumentIdBit.
 struct ShowViewDisplay
 {
     std::uint32_t id = 0;
@@ -90,6 +99,16 @@ struct ShowViewScene
 // (live geometry + enabled) with the status poll as fallback; layers:
 // frame.state only (an engine without the command shows the wall only).
 ShowViewScene buildShowViewScene(const SystemConnection::Snapshot& snap);
+
+// Adds the show document's displays that the scene's live wall does not
+// carry (the display NAME is the identity) to the scene. The wall is the
+// document's, so a display that no running system shows (added in the
+// Displays tab, not yet pushed, or its system offline) must still be
+// visible in the show view. Added entries' ids carry
+// kShowViewDocumentIdBit; the live geometry always wins for a name the
+// wall already carries.
+void mergeDocumentDisplays(ShowViewScene& scene,
+                           const std::vector<ShowDisplay>& docDisplays);
 
 // GPU-side texture pool for the show view's layer previews + the shared
 // 1x1 white texture (fallback for media before their thumbnail arrives).

@@ -595,6 +595,45 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
         modalReport += std::string(treeOk ? "PASS " : "FAIL ") +
                        "Displays tab is a tree view (entries: " + names + ")\n";
     }
+    // 3a+) Show view wall: the document's display entry must appear in the
+    //      show view. Live, the seeded entry maps to the active system, so
+    //      it shows exactly once - as the live display, never a duplicate
+    //      document copy. Offline it has no system mapping, so it shows as
+    //      a document entry: a display added without a system is still
+    //      visible.
+    {
+        glfwPollEvents();
+        runtime.renderFrame();
+        const auto wall = app.testShowViewDisplays();
+        int liveCount = 0;
+        int docCount = 0;
+        for (const auto& e : wall)
+        {
+            if (e == "Display 1@live")
+            {
+                ++liveCount;
+            }
+            if (e == "Display 1@doc")
+            {
+                ++docCount;
+            }
+        }
+        const bool wallOk =
+            haveLiveSystem ? (liveCount == 1 && docCount == 0) : (docCount == 1 && liveCount == 0);
+        modalOk = modalOk && wallOk;
+        std::string wallNames;
+        for (const auto& e : wall)
+        {
+            if (!wallNames.empty())
+            {
+                wallNames += ", ";
+            }
+            wallNames += e;
+        }
+        modalReport += std::string(wallOk ? "PASS " : "FAIL ") +
+                       "show view carries the document's display wall (entries: " + wallNames +
+                       ")\n";
+    }
     // 3b) Warp editor pad: open it on the document's display and verify
     //     the pad's view state - aspect-ratioed to the display (the
     //     offline entry is 1920x1080 => 16:9), the whole-lattice view

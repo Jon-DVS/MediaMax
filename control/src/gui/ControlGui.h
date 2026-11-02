@@ -226,6 +226,13 @@ public:
     // entry of the live display opens the settings dialog, added from the
     // live record when missing).
     bool testShowViewEditSelectedDisplay();
+    // The show view's display wall as "name@live" / "name@doc" entries (in
+    // scene order; "@doc" = the entry came from the show document because
+    // no running system shows it). The self-test checks the document's
+    // display entries are in the view: mapped ones once, as the live
+    // display; unmapped ones as document entries (never a duplicate of a
+    // live one).
+    std::vector<std::string> testShowViewDisplays() const;
     // The show view's texture pool state for the self-test: whether the
     // thumbnail of `mediaId` has been uploaded to the GPU, its pixel size,
     // and a copy of its pixels recorded into the frame's command buffer
@@ -375,6 +382,10 @@ private:
     // displays, ~10% margin; an unknown wall shows a 1920x1080 box),
     // centered in the scene child (childSize in screen px).
     void fitShowViewCamera(const ImVec2& childSize, const std::string& signature);
+    // The system part of a show view display's label: the active system's
+    // name for a live display (it runs there), the display's mapped system
+    // - or "unmapped" - for a document-only entry.
+    std::string showViewDisplaySystem(const ShowViewDisplay& d) const;
     // Opens the "Display settings" dialog for the show document display at
     // `docDisplayId` (the persistent wall entry; the dialog edits it). The
     // System dropdown defaults to the entry's current mapping (the system

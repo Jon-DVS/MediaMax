@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <set>
 
 #include "backends/imgui_impl_vulkan.h"
 
@@ -126,6 +127,31 @@ ShowViewScene buildShowViewScene(const SystemConnection::Snapshot& snap)
         }
     }
     return scene;
+}
+
+void mergeDocumentDisplays(ShowViewScene& scene, const std::vector<ShowDisplay>& docDisplays)
+{
+    std::set<std::string> liveNames;
+    for (const auto& d : scene.displays)
+    {
+        liveNames.insert(d.name);
+    }
+    for (const auto& d : docDisplays)
+    {
+        if (d.name.empty() || liveNames.count(d.name) != 0u)
+        {
+            continue; // the live wall carries it: the live geometry wins
+        }
+        ShowViewDisplay disp;
+        disp.id = d.id | kShowViewDocumentIdBit;
+        disp.name = d.name;
+        disp.x = static_cast<float>(d.x);
+        disp.y = static_cast<float>(d.y);
+        disp.w = static_cast<float>(d.width);
+        disp.h = static_cast<float>(d.height);
+        disp.enabled = d.enabled;
+        scene.displays.push_back(std::move(disp));
+    }
 }
 
 // --- texture pool ----------------------------------------------------------------

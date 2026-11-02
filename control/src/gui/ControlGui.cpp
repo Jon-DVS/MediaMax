@@ -2490,6 +2490,19 @@ void ControlGuiApp::fitShowViewCamera(const ImVec2& childSize, const std::string
     m_ShowFittedSignature = signature;
 }
 
+std::string ControlGuiApp::showViewDisplaySystem(const ShowViewDisplay& d) const
+{
+    if ((d.id & kShowViewDocumentIdBit) == 0u)
+    {
+        // A live display of the active system: it runs there.
+        const SystemConnection* active = activeConnection();
+        return active != nullptr ? active->name() : std::string();
+    }
+    // A document-only entry: show what actually runs it, if anything.
+    const SystemConnection* mapped = mappedSystemFor(d.name);
+    return mapped != nullptr ? mapped->name() : std::string("unmapped");
+}
+
 void ControlGuiApp::renderShowViewWindow()
 {
     m_ShowViewEditPopupOpen = false;
@@ -2535,6 +2548,11 @@ void ControlGuiApp::renderShowViewWindow()
     const SystemConnection::Snapshot snap =
         active ? active->snapshot() : SystemConnection::Snapshot{};
     m_ShowScene = buildShowViewScene(snap);
+    // The wall is the show document's: its display entries that no running
+    // system shows (added in the Displays tab, not yet pushed, or its
+    // system offline) are merged in so the view shows the whole wall, not
+    // only what the active system runs.
+    mergeDocumentDisplays(m_ShowScene, m_Editor.show().displays);
     const std::string signature = m_ShowScene.displaySignature();
 
     // Drop a selection whose item left the scene (the engine removed it,
@@ -2692,7 +2710,7 @@ void ControlGuiApp::renderShowViewWindow()
         {
             std::string label = d.name + "  \u00b7  " + std::to_string(static_cast<int>(d.w)) +
                                 "x" + std::to_string(static_cast<int>(d.h));
-            const std::string systemName = active ? active->name() : std::string();
+            const std::string systemName = showViewDisplaySystem(d);
             if (!systemName.empty())
             {
                 label += "  \u00b7  " + systemName;
@@ -2924,12 +2942,36 @@ void ControlGuiApp::renderShowViewWindow()
                     std::string error;
                     if (m_ShowDragIsDisplay)
                     {
-                        sendActive(
-                            "display.set",
-                            {{"display", m_ShowDragId},
-                             {"x", static_cast<std::int32_t>(std::llround(m_ShowDragOrigX + dx))},
-                             {"y", static_cast<std::int32_t>(std::llround(m_ShowDragOrigY + dy))}},
-                            error);
+                        if ((m_ShowDragId & kShowViewDocumentIdBit) != 0u)
+                        {
+                            // A document-only display has no system to tell:
+                            // the drag edits the document entry directly (the
+                            // auto-push propagates it to the systems that
+                            // pick the show up on load).
+                            const Id docId =
+                                static_cast<Id>(m_ShowDragId & ~kShowViewDocumentIdBit);
+                            for (auto& d : m_Editor.show().displays)
+                            {
+                                if (d.id == docId)
+                                {
+                                    d.x = static_cast<std::int32_t>(
+                                        std::llround(m_ShowDragOrigX + dx));
+                                    d.y = static_cast<std::int32_t>(
+                                        std::llround(m_ShowDragOrigY + dy));
+                                    m_Editor.touch();
+                                    break;
+                                }
+                            }
+                        }
+                        else
+                        {
+                            sendActive(
+                                "display.set",
+                                {{"display", m_ShowDragId},
+                                 {"x", static_cast<std::int32_t>(std::llround(m_ShowDragOrigX + dx))},
+                                 {"y", static_cast<std::int32_t>(std::llround(m_ShowDragOrigY + dy))}},
+                                error);
+                        }
                     }
                     else
                     {
@@ -2939,9 +2981,10 @@ void ControlGuiApp::renderShowViewWindow()
                                     {"y", m_ShowDragOrigY + dy}},
                                    error);
                     }
-                    // The wall signature moves with our own display.set:
-                    // mark the camera fitted to it so the auto-refit neither
-                    // fights the drag nor jumps on release.
+                    // The wall signature moves with our own display.set (or
+                    // document edit): mark the camera fitted to it so the
+                    // auto-refit neither fights the drag nor jumps on
+                    // release.
                     m_ShowFittedSignature = signature;
                 }
                 if (!ImGui::IsMouseDown(ImGuiMouseButton_Left))
@@ -3003,7 +3046,7 @@ void ControlGuiApp::renderShowViewWindow()
             text = selDisplay->name + "  \u00b7  " +
                    std::to_string(static_cast<int>(selDisplay->w)) + "x" +
                    std::to_string(static_cast<int>(selDisplay->h));
-            const std::string systemName = active ? active->name() : std::string();
+            const std::string systemName = showViewDisplaySystem(*selDisplay);
             if (!systemName.empty())
             {
                 text += "  \u00b7  " + systemName;
@@ -5632,6 +5675,17 @@ std::string ControlGuiApp::testDisplayMappedSystem(const std::string& displayNam
 {
     SystemConnection* mapped = mappedSystemFor(displayName);
     return mapped != nullptr ? mapped->name() : std::string();
+}
+
+std::vector<std::string> ControlGuiApp::testShowViewDisplays() const
+{
+    std::vector<std::string> out;
+    for (const auto& d : m_ShowScene.displays)
+    {
+        out.push_back(d.name + "@" +
+                      ((d.id & kShowViewDocumentIdBit) != 0u ? "doc" : "live"));
+    }
+    return out;
 }
 
 bool ControlGuiApp::testDockLayoutPlaybackConsoleLogTabs() const
