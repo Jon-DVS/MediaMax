@@ -475,6 +475,24 @@ void ControlGuiApp::frame()
     renderFileDialogs();
     if (m_FirstFrame)
     {
+        // The bottom tab block opens on Playback. Dear ImGui auto-selects
+        // the last tab submitted to a dock node (DockNodeUpdateTabBar: new
+        // tabs select Tabs.back()) - here the layout's last window, Log -
+        // and gives it the navigation focus (every just-activated window
+        // FocusWindow()s in Begin order, so the last one wins). The dock
+        // node's tab selection then follows the nav focus on every frame,
+        // so both must be set: pin the tab and focus Playback. A user
+        // clicking another tab still wins (the click focuses that window,
+        // which the node then keeps selected).
+        if (ImGuiWindow* playback = ImGui::FindWindowByName("Playback");
+            playback != nullptr && playback->DockNode != nullptr &&
+            playback->DockNode->TabBar != nullptr)
+        {
+            playback->DockNode->SelectedTabId = playback->TabId;
+            playback->DockNode->TabBar->SelectedTabId = playback->TabId;
+            playback->DockNode->TabBar->NextSelectedTabId = playback->TabId;
+        }
+        ImGui::SetWindowFocus("Playback");
         m_FirstFrame = false;
     }
     // After the UI: the debounced auto-push of edited shows (no ImGui work).
@@ -5677,6 +5695,39 @@ bool ControlGuiApp::testDockLayoutPlaybackConsoleLogTabs() const
         }
     }
     return playbackTab >= 0 && consoleTab > playbackTab && logTab > consoleTab;
+}
+
+std::string ControlGuiApp::testBottomSelectedTab() const
+{
+    // The bottom block's node, via its Playback window (present in the
+    // default layout; the layout check runs first and fails otherwise).
+    ImGuiContext& g = *ImGui::GetCurrentContext();
+    const ImGuiWindow* playback = nullptr;
+    for (int wi = 0; wi < g.Windows.Size; ++wi)
+    {
+        const ImGuiWindow* w = g.Windows.Data[static_cast<std::size_t>(wi)];
+        if (w != nullptr && w->Name != nullptr && std::string(w->Name) == "Playback")
+        {
+            playback = w;
+            break;
+        }
+    }
+    if (playback == nullptr || playback->DockNode == nullptr ||
+        playback->DockNode->TabBar == nullptr)
+    {
+        return "";
+    }
+    const ImGuiTabBar* tabBar = playback->DockNode->TabBar;
+    for (int i = 0; i < tabBar->Tabs.Size; ++i)
+    {
+        const ImGuiTabItem& tab = tabBar->Tabs.Data[static_cast<std::size_t>(i)];
+        if (tab.ID == tabBar->SelectedTabId && tab.Window != nullptr &&
+            tab.Window->Name != nullptr)
+        {
+            return std::string(tab.Window->Name);
+        }
+    }
+    return "";
 }
 
 std::vector<std::string> ControlGuiApp::testLogTabLines() const

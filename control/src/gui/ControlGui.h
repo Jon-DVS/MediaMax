@@ -117,6 +117,11 @@ public:
     // tab block, in that order (the default layout's invariant; the
     // self-test runs it after the frame phases have built the dockspace).
     bool testDockLayoutPlaybackConsoleLogTabs() const;
+    // The window name of the tab selected in the bottom (Playback /
+    // Console / Log) dock node; empty when the node or its tab bar does
+    // not exist yet. The self-test checks the default selection is
+    // Playback.
+    std::string testBottomSelectedTab() const;
     // The Log tab's lines as "source|level|message" (the self-test checks
     // both local and remote entries); empty when none logged yet.
     std::vector<std::string> testLogTabLines() const;

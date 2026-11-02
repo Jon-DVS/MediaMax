@@ -453,6 +453,21 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
                  " Console, Log)"
               << std::endl;
 
+    // 2c) The bottom block opens on the Playback tab: Dear ImGui would
+    //     auto-select the last tab of a dock node (Log) without the
+    //     first-frame pin + focus in frame(). The check runs again after
+    //     the modal phases (focus moves through them) below.
+    auto checkDefaultTab = [&app](const char* context) -> bool
+    {
+        const std::string selected = app.testBottomSelectedTab();
+        const bool ok = (selected == "Playback");
+        std::cout << (ok ? "PASS" : "FAIL") << " selected tab is Playback"
+                  << (context == nullptr ? "" : std::string(" (") + context + ")") << " (got: "
+                  << (selected.empty() ? "<none>" : selected) << ")" << std::endl;
+        return ok;
+    };
+    bool defaultTabOk = checkDefaultTab(nullptr);
+
     // 3) Modal dialogs: open each dialog the UI buttons open and verify
     //    Dear ImGui actually shows it, then verify it closes again. This is
     //    the regression guard for "clicking Open / Save As / About does
@@ -2316,6 +2331,11 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
     // the test bmp's path); remove the scratch file. No-op headless.
     app.testRemoveSelfTestBmp();
 
+    // The modal and live phases moved the focus around; the default
+    // selection must have survived them (imgui restores the pre-modal
+    // focus when a modal closes).
+    defaultTabOk = checkDefaultTab("after all modal and live phases") && defaultTabOk;
+
     runtime.shutdown();
     glfwDestroyWindow(window);
     glfwTerminate();
@@ -2329,7 +2349,7 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
         std::cout << (liveOk ? "gui-self-test: live system OK" : "gui-self-test: live system FAILED")
                   << std::endl;
     }
-    return (liveOk && modalOk && layoutOk && rendered > 0) ? 0 : 1;
+    return (liveOk && modalOk && layoutOk && defaultTabOk && rendered > 0) ? 0 : 1;
 }
 
 } // namespace mediamax::gui
