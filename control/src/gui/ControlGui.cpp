@@ -2910,6 +2910,7 @@ void ControlGuiApp::renderShowViewWindow()
                         m_ShowDragActive = true;
                         m_ShowDragIsDisplay = true;
                         m_ShowDragId = hitDisplay->id;
+                        m_ShowDragName = hitDisplay->name;
                         m_ShowDragStartWX = wx;
                         m_ShowDragStartWY = wy;
                         m_ShowDragOrigX = hitDisplay->x;
@@ -2971,6 +2972,25 @@ void ControlGuiApp::renderShowViewWindow()
                                  {"x", static_cast<std::int32_t>(std::llround(m_ShowDragOrigX + dx))},
                                  {"y", static_cast<std::int32_t>(std::llround(m_ShowDragOrigY + dy))}},
                                 error);
+                            // The display settings (the show document's wall
+                            // entry of the same name) follow the live move,
+                            // so the persistent position is the one the
+                            // operator just set (the auto-push propagates
+                            // it; a show load re-applies it). A display with
+                            // no document entry is left to the Edit...
+                            // action to add.
+                            for (auto& doc : m_Editor.show().displays)
+                            {
+                                if (doc.name == m_ShowDragName)
+                                {
+                                    doc.x = static_cast<std::int32_t>(
+                                        std::llround(m_ShowDragOrigX + dx));
+                                    doc.y = static_cast<std::int32_t>(
+                                        std::llround(m_ShowDragOrigY + dy));
+                                    m_Editor.touch();
+                                    break;
+                                }
+                            }
                         }
                     }
                     else
@@ -2980,6 +3000,38 @@ void ControlGuiApp::renderShowViewWindow()
                                     {"x", m_ShowDragOrigX + dx},
                                     {"y", m_ShowDragOrigY + dy}},
                                    error);
+                        // The show's layer settings follow the live move:
+                        // the engine keeps the document's layer ids, so the
+                        // dragged layer is found by id in any scene. A
+                        // keyframe track owns the on-screen position while
+                        // it has keyframes - only the static transform
+                        // fields the track does not drive are written.
+                        for (auto& scene : m_Editor.show().scenes)
+                        {
+                            bool written = false;
+                            for (auto& layer : scene.layers)
+                            {
+                                if (layer.id != m_ShowDragId)
+                                {
+                                    continue;
+                                }
+                                if (layer.xTrack.empty())
+                                {
+                                    layer.transform.x = static_cast<float>(m_ShowDragOrigX + dx);
+                                }
+                                if (layer.yTrack.empty())
+                                {
+                                    layer.transform.y = static_cast<float>(m_ShowDragOrigY + dy);
+                                }
+                                m_Editor.touch();
+                                written = true;
+                                break;
+                            }
+                            if (written)
+                            {
+                                break;
+                            }
+                        }
                     }
                     // The wall signature moves with our own display.set (or
                     // document edit): mark the camera fitted to it so the
@@ -5686,6 +5738,70 @@ std::vector<std::string> ControlGuiApp::testShowViewDisplays() const
                       ((d.id & kShowViewDocumentIdBit) != 0u ? "doc" : "live"));
     }
     return out;
+}
+
+bool ControlGuiApp::testShowDisplayDocPosition(const std::string& name, int& x, int& y) const
+{
+    for (const auto& d : m_Editor.show().displays)
+    {
+        if (d.name == name)
+        {
+            x = d.x;
+            y = d.y;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool ControlGuiApp::testSetShowDisplayDocPosition(const std::string& name, int x, int y)
+{
+    for (auto& d : m_Editor.show().displays)
+    {
+        if (d.name == name)
+        {
+            d.x = x;
+            d.y = y;
+            m_Editor.touch();
+            return true;
+        }
+    }
+    return false;
+}
+
+bool ControlGuiApp::testShowLayerDocPosition(Id layerId, float& x, float& y) const
+{
+    for (const auto& scene : m_Editor.show().scenes)
+    {
+        for (const auto& layer : scene.layers)
+        {
+            if (layer.id == layerId)
+            {
+                x = layer.transform.x;
+                y = layer.transform.y;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool ControlGuiApp::testSetShowLayerDocPosition(Id layerId, float x, float y)
+{
+    for (auto& scene : m_Editor.show().scenes)
+    {
+        for (auto& layer : scene.layers)
+        {
+            if (layer.id == layerId)
+            {
+                layer.transform.x = x;
+                layer.transform.y = y;
+                m_Editor.touch();
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 bool ControlGuiApp::testDockLayoutPlaybackConsoleLogTabs() const

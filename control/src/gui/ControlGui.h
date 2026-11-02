@@ -233,6 +233,24 @@ public:
     // display; unmapped ones as document entries (never a duplicate of a
     // live one).
     std::vector<std::string> testShowViewDisplays() const;
+    // The show document's display entry's x/y by name (false when the
+    // document does not define the display) - the live self-test checks the
+    // show view's display drag writes the position back to the display
+    // settings.
+    bool testShowDisplayDocPosition(const std::string& name, int& x, int& y) const;
+    // Sets the show document's display entry's x/y by name and marks the
+    // show edited (false when the document does not define the display) -
+    // the live self-test restores the wall after the display drag check.
+    bool testSetShowDisplayDocPosition(const std::string& name, int x, int y);
+    // The show document's layer's transform x/y by id (the engine keeps the
+    // document's layer ids, so the frame.state id is the document's;
+    // searches every scene) - the live self-test checks the show view's
+    // layer drag writes the position back to the show's layer settings.
+    bool testShowLayerDocPosition(Id layerId, float& x, float& y) const;
+    // Sets the show document's layer's transform x/y by id and marks the
+    // show edited (false when no scene has the layer) - the live
+    // self-test restores the layer after the layer drag check.
+    bool testSetShowLayerDocPosition(Id layerId, float x, float y);
     // The show view's texture pool state for the self-test: whether the
     // thumbnail of `mediaId` has been uploaded to the GPU, its pixel size,
     // and a copy of its pixels recorded into the frame's command buffer
@@ -783,6 +801,10 @@ private:
     bool m_ShowDragActive = false;
     bool m_ShowDragIsDisplay = false;
     Id m_ShowDragId = kInvalidId;
+    // The display's name at the drag's press (displays only): the display
+    // settings write-back looks the document's wall entry up by name (the
+    // wall's identity).
+    std::string m_ShowDragName;
     float m_ShowDragStartWX = 0.f;
     float m_ShowDragStartWY = 0.f;
     float m_ShowDragOrigX = 0.f;

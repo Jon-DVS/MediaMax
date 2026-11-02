@@ -1365,10 +1365,30 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
                 liveReport += std::string(dragDispOk ? "PASS " : "FAIL ") +
                               "display drag moves the live display (" + dragDispDetail + ")\n";
                 liveOk = liveOk && dragDispOk;
-                // Restore the original geometry (the scratch engine's real
-                // window moved).
+                // The display settings (the show document's wall entry of
+                // the same name) followed the live move - the write-back
+                // this check guards.
+                int docX = 0;
+                int docY = 0;
+                const bool haveDocEntry = app.testShowDisplayDocPosition(dispName, docX, docY);
+                const double docExpX = dispX0 + dragDx / scale;
+                const double docExpY = dispY0 + dragDy / scale;
+                const bool dragDispDocOk =
+                    haveDocEntry && std::abs(docX - docExpX) <= 2.0 &&
+                    std::abs(docY - docExpY) <= 2.0;
+                liveReport += std::string(dragDispDocOk ? "PASS " : "FAIL ") +
+                              "display drag updates the display settings (doc " +
+                              std::to_string(docX) + "," + std::to_string(docY) + " want ~" +
+                              std::to_string(static_cast<int>(docExpX)) + "," +
+                              std::to_string(static_cast<int>(docExpY)) + ")\n";
+                liveOk = liveOk && dragDispDocOk;
+                // Restore the original geometry - the live display (the
+                // scratch engine's real window moved) and the document's
+                // entry (the drag wrote it; the auto-push carries the final
+                // state).
                 sendRaw("display.set",
                         {{"display", dispId}, {"x", dispX0}, {"y", dispY0}}, dummy);
+                app.testSetShowDisplayDocPosition(dispName, dispX0, dispY0);
 
                 // 8) Dragging the selected layer moves the engine's layer
                 //    position (layer.set, read back from frame.state x/y).
@@ -1417,9 +1437,30 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
                               "layer drag moves the layer (frame.state x/y " + dragLayerDetail +
                               ")\n";
                 liveOk = liveOk && dragLayerOk;
-                // Restore the original position.
+                // The show's layer settings (the document's layer, found by
+                // id - the engine keeps the document's layer ids) followed
+                // the live move - the write-back this check guards.
+                float docLX = 0.f;
+                float docLY = 0.f;
+                const bool haveDocLayer = app.testShowLayerDocPosition(layerId, docLX, docLY);
+                const double layerDocExpX = layerX0 + dragDx / scale;
+                const double layerDocExpY = layerY0 + dragDy / scale;
+                const bool dragLayerDocOk =
+                    haveDocLayer && std::abs(docLX - layerDocExpX) <= 2.0 &&
+                    std::abs(docLY - layerDocExpY) <= 2.0;
+                liveReport += std::string(dragLayerDocOk ? "PASS " : "FAIL ") +
+                              "layer drag updates the layer settings (doc " +
+                              std::to_string(docLX) + "," + std::to_string(docLY) + " want ~" +
+                              std::to_string(static_cast<int>(layerDocExpX)) + "," +
+                              std::to_string(static_cast<int>(layerDocExpY)) + ")\n";
+                liveOk = liveOk && dragLayerDocOk;
+                // Restore the original position - live (the engine's
+                // override) and in the show document (the drag wrote it
+                // back).
                 sendRaw("layer.set",
                         {{"layer", layerId}, {"x", layerX0}, {"y", layerY0}}, dummy);
+                app.testSetShowLayerDocPosition(layerId, static_cast<float>(layerX0),
+                                                static_cast<float>(layerY0));
 
                 // 9) The right-click context menu over the selected display:
                 //    drop the document's display entry first so the Edit...
