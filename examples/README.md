@@ -81,14 +81,17 @@ the right (x=2880), and the 3840 px plasma strip crosses **both** windows.
 At 8 s the panels swap.
 
 While it runs, try a projection warp from the control console (display 1,
-a 2x2 grid of display-local UV points — a mild trapezoid):
+a 2x2 grid of display-local UV points — a mild trapezoid). The warp is
+off by default, so enable it on display 1 first:
 
 ```
+display.set {"display":1,"warpEnabled":true}
 display.warp.set {"display":1,"points":[[0,0],[1,0],[0.05,0.95],[0.95,0.95]]}
 ```
 
 and reset it with the identity grid
-`{"display":1,"points":[[0,0],[1,0],[0,1],[1,1]]}`.
+`{"display":1,"points":[[0,0],[1,0],[0,1],[1,1]]}`, then turn the warp
+off again with `display.set {"display":1,"warpEnabled":false}`.
 
 ## Regenerating the media
 

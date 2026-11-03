@@ -279,6 +279,12 @@ public:
     // show edited (false when the document does not define the display) -
     // the live self-test restores the wall after the display drag check.
     bool testSetShowDisplayDocPosition(const std::string& name, int x, int y);
+    // Sets the show document's display entry's warpEnabled by name and
+    // marks the show edited (false when the document does not define the
+    // display) - the live self-test mirrors the live engine's warp state
+    // into the document before the warp editor check (the editor opens on
+    // the document entry; its live preview follows that value).
+    bool testSetShowDisplayDocWarpEnabled(const std::string& name, bool enabled);
     // The show document's layer's transform x/y by id (the engine keeps the
     // document's layer ids, so the frame.state id is the document's;
     // searches every scene) - the live self-test checks the show view's

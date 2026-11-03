@@ -2264,7 +2264,9 @@ void ControlGuiApp::renderDisplaysBlock()
             m_Editor.touch();
             liveSetDisplayField(d, "statusOverlay", d.statusOverlay);
         }
-        // The warp submenu: the on/off toggle + the warp editor.
+        // The warp submenu: the grid summary (the on/off state is set in
+        // the warp editor, where the "Warp enabled" checkbox lives) + the
+        // warp editor.
         const char* warpMode =
             d.warp.interpolation() == WarpInterpolation::Spline ? "spline" : "grid";
         const std::string warpLabel = "Warp (" + std::to_string(d.warp.rows()) + "x" +
@@ -2272,11 +2274,6 @@ void ControlGuiApp::renderDisplaysBlock()
                                       (d.warpEnabled ? "on" : "off") + ")";
         if (ImGui::CollapsingHeader(warpLabel.c_str()))
         {
-            if (ImGui::Checkbox("Warp enabled", &d.warpEnabled))
-            {
-                m_Editor.touch();
-                liveSetDisplayField(d, "warpEnabled", d.warpEnabled);
-            }
             if (ImGui::Button("Warp editor...##warpedit"))
             {
                 openWarpEdit(d.id);
@@ -4829,10 +4826,11 @@ void ControlGuiApp::renderModals()
                         "(unmapped: no connected system runs this display - Apply saves the "
                         "warp to the show only)");
                 }
-                // The warp on/off toggle (also in the Displays tree's warp
-                // submenu): off = the renderer skips the warp entirely (no
-                // texture upload, no per-pixel lookup). Applied live to the
-                // mapped system; the preview overlay follows the toggle.
+                // The warp on/off toggle: off = the renderer skips the warp
+                // entirely (no texture upload, no per-pixel lookup). The
+                // checkbox lives here (the warp editor), not in the
+                // Displays tree. Applied live to the mapped system; the
+                // preview overlay follows the toggle.
                 if (sd != nullptr &&
                     ImGui::Checkbox("Warp enabled##warpenabled", &sd->warpEnabled))
                 {
@@ -5888,6 +5886,20 @@ bool ControlGuiApp::testSetShowDisplayDocPosition(const std::string& name, int x
         {
             d.x = x;
             d.y = y;
+            m_Editor.touch();
+            return true;
+        }
+    }
+    return false;
+}
+
+bool ControlGuiApp::testSetShowDisplayDocWarpEnabled(const std::string& name, bool enabled)
+{
+    for (auto& d : m_Editor.show().displays)
+    {
+        if (d.name == name)
+        {
+            d.warpEnabled = enabled;
             m_Editor.touch();
             return true;
         }

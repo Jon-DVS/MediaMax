@@ -552,9 +552,10 @@ std::optional<Show> Show::fromJson(const nlohmann::json& in, std::string& error)
             d.alwaysOnTop = dj.value("alwaysOnTop", true);
             d.statusOverlay = dj.value("statusOverlay", false);
             d.vsync = dj.value("vsync", true);
-            // Older show files (before the warp on/off toggle) omit it: the
-            // warp is on, matching the runtime default.
-            d.warpEnabled = dj.value("warpEnabled", true);
+            // Older show files (before the warp on/off toggle) omit it:
+            // the warp is off, matching the default - an omitted toggle
+            // must not turn on a correction the operator never asked for.
+            d.warpEnabled = dj.value("warpEnabled", false);
             if (dj.contains("warp") && dj["warp"].is_object())
             {
                 const auto& wj = dj["warp"];

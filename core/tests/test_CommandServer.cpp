@@ -1121,13 +1121,13 @@ TEST_CASE("display.set toggles vsync (default on)")
     CHECK_FALSE(f.run("display.set", {{"display", 999}, {"vsync", true}}).ok);
 }
 
-TEST_CASE("display.set toggles the warp on/off (default on)")
+TEST_CASE("display.set toggles the warp on/off (default off)")
 {
     Fixture f;
-    // Default: on (reported in the display record so clients can show it).
+    // Default: off (reported in the display record so clients can show it).
     const Response list = f.run("display.list");
     REQUIRE(list.ok);
-    CHECK(list.result.at("displays").at(0).at("warpEnabled").get<bool>() == true);
+    CHECK(list.result.at("displays").at(0).at("warpEnabled").get<bool>() == false);
 
     // Off: the renderer skips the warp texture and the per-pixel lookup
     // entirely; the grid itself is kept (the toggle does not reset it).
@@ -1468,7 +1468,7 @@ TEST_CASE("show.loadJson with a displays section reconciles the engine's wall")
     CHECK(extraJson.at("height").get<int>() == 1080);
     CHECK(extraJson.at("enabled").get<bool>() == true);
     CHECK(extraJson.at("vsync").get<bool>() == true); // document default
-    CHECK(extraJson.at("warpEnabled").get<bool>() == true); // document default
+    CHECK(extraJson.at("warpEnabled").get<bool>() == false); // document default
 
     // "side" is not in the document anymore: it is gone.
     for (const auto& d : displays)

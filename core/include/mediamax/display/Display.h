@@ -29,11 +29,12 @@ struct Display
     // map (with the grid the client sent).
     WarpMap warp{2, 2};
 
-    // Projection warp on/off (on by default). When off the renderer skips
-    // the warp entirely - no warp texture upload, no per-pixel lookup -
-    // so a wall that does not need correction pays nothing for it. The
-    // warp grid itself is kept (the toggle does not reset it).
-    bool warpEnabled = true;
+    // Projection warp on/off (off by default: the warp is an opt-in
+    // correction). When off the renderer skips the warp entirely - no warp
+    // texture upload, no per-pixel lookup - so a wall that does not need
+    // correction pays nothing for it. The warp grid itself is kept (the
+    // toggle does not reset it).
+    bool warpEnabled = false;
 
     // Transient (not persisted in the show file): when true the renderer
     // draws the warp grid and the node markers over this output, so the

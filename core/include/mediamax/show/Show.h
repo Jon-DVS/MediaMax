@@ -55,9 +55,10 @@ struct ShowDisplay
     // Projection warp (identity 2x2 grid when never edited) - the same
     // model and wire layout as the runtime display's warp.
     WarpMap warp{2, 2};
-    // Projection warp on/off (on by default; the warp grid is kept when it
-    // is off). Mirrors the runtime display's field.
-    bool warpEnabled = true;
+    // Projection warp on/off (off by default: the warp is an opt-in
+    // correction; the warp grid is kept when it is off). Mirrors the
+    // runtime display's field.
+    bool warpEnabled = false;
 };
 
 // A playback system the show runs on (issue 18: the show file is where the

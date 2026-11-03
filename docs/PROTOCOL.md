@@ -504,10 +504,11 @@ the engine's next frame (the command result already reports the new value). `mon
 window is on (the OS monitor name, empty when the window is not on a
 monitor); the playback engine maintains it — it follows the window when
 the window manager moves it to another output — and clients treat it as
-read-only. `warpEnabled` (default `true`) switches the display's projection
-warp on or off. When off, the renderer skips the warp texture and the
-per-pixel lookup entirely (the output is an undistorted rectangle); the
-display's warp grid is kept, so turning it back on restores the same warp.
+read-only. `warpEnabled` (default `false` — the warp is an opt-in
+correction) switches the display's projection warp on or off. When off,
+the renderer skips the warp texture and the per-pixel lookup entirely
+(the output is an undistorted rectangle); the display's warp grid is
+kept, so turning it back on restores the same warp.
 `display.set` can change it. `warpPreview` (default `false`) is transient
 operator state, not a setting: while true, the engine draws a live-preview
 overlay on that output — a 1px reference grid at the nodes' ideal
@@ -539,8 +540,9 @@ overlay** checkboxes. Every one of these controls is a document edit
 reconcile their live walls to the document on the next show load) *and*
 an immediate `display.set` on the mapped system when one is connected, so
 the change reaches the running engine at once. The node's **Warp (n x n,
-mode, on|off)** section has the **Warp enabled** checkbox (the same dual
-edit, as `display.set` `warpEnabled`) and a **Warp editor...** button.
+mode, on|off)** section has a **Warp editor...** button — the on/off
+toggle (the `display.set` `warpEnabled` dual edit) lives in the warp
+editor itself, where its **Warp enabled** checkbox is.
 **Edit settings...** opens the Display settings dialog; **Remove**
 deletes the entry from the document (a document edit — the systems drop
 the display on the next show push).
@@ -612,7 +614,7 @@ Update any subset of a display's properties.
   (ints, applied as one geometry update), `name` (string, the display's
   label), `brightness` (number, default 1.0), `enabled` (bool),
   `alwaysOnTop` (bool, default true), `statusOverlay` (bool, default false),
-  `vsync` (bool, default true), `warpEnabled` (bool, default true),
+  `vsync` (bool, default true), `warpEnabled` (bool, default false),
   `warpPreview` (bool, default false).
 - Result: the updated display object.
 

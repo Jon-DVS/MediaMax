@@ -318,12 +318,14 @@ TEST_CASE("Round trip: display wall (geometry, flags, warp)")
     CHECK(b.width == 1920);
     CHECK(b.height == 1080);
     CHECK(b.vsync);
-    CHECK(b.warpEnabled); // the default (on)
+    CHECK(!b.warpEnabled); // the default (off)
     CHECK(b.warp.rows() == 2);
     CHECK(b.warp.cols() == 2);
 
     // Older show files predate the warp on/off toggle: a display entry
-    // that omits warpEnabled reads back as on (the runtime default).
+    // that omits warpEnabled reads back as off (the default) - an
+    // omitted toggle must not turn on a correction the operator never
+    // asked for.
     const nlohmann::json legacyDisplays = nlohmann::json::array({
         {{"id", 1},
          {"name", "Wall A"},
@@ -335,7 +337,7 @@ TEST_CASE("Round trip: display wall (geometry, flags, warp)")
     legacyDoc["displays"] = legacyDisplays;
     auto legacyShow = Show::fromJson(legacyDoc, error);
     REQUIRE(legacyShow.has_value());
-    CHECK(legacyShow->displays[0].warpEnabled);
+    CHECK(!legacyShow->displays[0].warpEnabled);
 
     // A show with no displays omits the section entirely, so saving such a
     // show leaves existing documents (and a system's live display set)

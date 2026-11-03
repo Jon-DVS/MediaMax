@@ -2655,6 +2655,12 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
             liveReport += std::string(enabledOk ? "PASS " : "FAIL ") +
                           "display.set warpEnabled round-trips (off -> on)\n";
             liveOk = liveOk && enabledOk;
+            // Mirror the live state into the document entry: the warp
+            // editor opens on the document entry and its live preview
+            // follows the document's warpEnabled (the round-trip above
+            // ended with the live display on; the document entry keeps the
+            // document default, off).
+            app.testSetShowDisplayDocWarpEnabled("Display 1", true);
             // The warp editor drives the live display: open it (the
             // document's first entry, mapped to its live system).
             app.testOpenModal("warp");
