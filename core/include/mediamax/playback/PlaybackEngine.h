@@ -102,6 +102,13 @@ public:
     PlayState state() const { return m_State; }
     Time time() const { return m_Time; }
 
+    // Monotonic count of playhead jumps through seek() (host seeks and
+    // SeekTo cues alike). A host that re-derives its consumers from the
+    // playhead (the playback app re-seeks its media pump channels) can use
+    // this to tell a deliberate jump apart from the clock simply advancing:
+    // tick() alone never moves the playhead by more than the caller's dt.
+    std::uint64_t seekCount() const { return m_SeekCount; }
+
     // Starts (or resumes) playback. When stopped at the end of a finite show,
     // playback restarts from the beginning.
     void play();
@@ -218,6 +225,9 @@ private:
     Show m_Show;
     PlayState m_State = PlayState::Stopped;
     Time m_Time;
+    // Monotonic (never reset, even by loadShow): hosts diff it against the
+    // last value they saw, so a reset would look like a huge jump.
+    std::uint64_t m_SeekCount = 0;
     int m_PreviewScene = 0;
     // The operator's manual scene set (scene.set/scene.toggle), mapping each
     // scene to the show time at which it was activated (its media start from

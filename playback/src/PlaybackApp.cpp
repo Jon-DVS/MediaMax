@@ -894,21 +894,31 @@ PlaybackApp::FrameSnapshot PlaybackApp::takeFrameSnapshot(const Time& dt)
     snap.playing = m_Engine.state() == PlayState::Playing;
     m_AudioActive.store(snap.playing);
 
-    // The pump re-seeks channels when the show time jumps (seek command,
-    // SeekTo cue, stop-to-start). Loop wraps are caught by the pump itself
-    // (per-channel backward jump).
-    if (m_HaveLastPublishedShowTime)
+    // The pump re-seeks channels when the playhead jumps: on a deliberate
+    // seek (the engine's seek count changed: playback.seek command, SeekTo
+    // cue) or when the jump is too large to come from a single tick (ticks
+    // are capped at kMaxFrameDeltaSeconds, so this only catches show
+    // changes and stop-to-start). A render stall of up to the cap must NOT
+    // bump the generation: the forced re-seek discards the queued frames
+    // and stalls the display a second time (see the HAP loop diagnosis).
+    const std::uint64_t seekCount = m_Engine.seekCount();
+    if (seekCount != m_LastEngineSeekCount)
+    {
+        m_PumpGeneration++;
+    }
+    else if (m_HaveLastPublishedShowTime)
     {
         Time jump = snap.fs.showTime - m_LastPublishedShowTime;
         if (jump.isNegative())
         {
             jump = -jump;
         }
-        if (jump > Time::fromSeconds(0.25))
+        if (jump > Time::fromSeconds(kMaxFrameDeltaSeconds))
         {
             m_PumpGeneration++;
         }
     }
+    m_LastEngineSeekCount = seekCount;
     m_LastPublishedShowTime = snap.fs.showTime;
     m_HaveLastPublishedShowTime = true;
 

@@ -157,6 +157,45 @@ TEST_CASE("Seeking changes the resolved state immediately (pure function)")
     CHECK(engine.activeSceneAt(engine.time()) == 1);
 }
 
+TEST_CASE("seekCount() counts playhead jumps (seeks and SeekTo cues only)")
+{
+    auto media = makeLoadedMediaLibrary();
+    auto engine = makeTestEngine(media);
+
+    CHECK(engine.seekCount() == 0);
+
+    // Plain ticks never count as seeks...
+    engine.play();
+    engine.tick(Time::fromSeconds(1.0));
+    engine.tick(Time::fromSeconds(0.5));
+    CHECK(engine.seekCount() == 0);
+
+    // ...but an explicit seek does (forward)...
+    engine.seek(Time::fromSeconds(3.0));
+    CHECK(engine.seekCount() == 1);
+    // ...and (backward).
+    engine.seek(Time::fromSeconds(1.0));
+    CHECK(engine.seekCount() == 2);
+
+    // A SeekTo cue crossing within a tick counts as well.
+    Show seekShow;
+    seekShow.frameRate = FrameRate::fps30();
+    seekShow.duration = Time::fromSeconds(10.0);
+    seekShow.addCue(Cue{Time::fromSeconds(2.0), "jump", SeekTo{Time::fromSeconds(8.0)}});
+    engine.loadShow(seekShow);
+    engine.play();
+    engine.tick(Time::fromSeconds(1.0)); // no cue crossed
+    CHECK(engine.seekCount() == 2);
+    engine.tick(Time::fromSeconds(1.5)); // crosses the seek cue at t=2
+    CHECK(engine.seekCount() == 3);
+    CHECK(engine.time() == Time::fromSeconds(8.0));
+
+    // The count is monotonic across loadShow: hosts diff it against the
+    // last value they saw, so a reset would look like a huge jump.
+    engine.loadShow(makeTestShow());
+    CHECK(engine.seekCount() == 3);
+}
+
 TEST_CASE("Layer state resolves tracks and overrides")
 {
     auto media = makeLoadedMediaLibrary();

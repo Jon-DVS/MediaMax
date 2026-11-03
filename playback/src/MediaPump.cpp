@@ -22,6 +22,14 @@ constexpr double kAudioTrimHistorySeconds = 0.25;
 constexpr int kMaxVideoDecodesPerPass = 32;
 constexpr int kMaxAudioDecodesPerPass = 128;
 
+// Maximum frames the loop pre-decode drains from the source tail. It must
+// cover everything the source can still produce once the trigger window
+// opens: the window is kPreLoopFrames + kPreLoopMarginFrames plus 0.1 s,
+// i.e. 18 frames at 60 fps and 24 at 120 fps. 32 covers the worst case
+// with margin (frames beyond the cap are dropped at the wrap anyway, see
+// the front trim in decodeChannel).
+constexpr int kPreLoopDrainMaxFrames = 32;
+
 // A channel re-seeks when its target media time jumps backwards by more than
 // this (loop wrap or a seek the generation counter did not catch).
 constexpr double kBackwardJumpSeconds = 0.25;
@@ -169,7 +177,7 @@ void MediaPump::pumpLoop()
                 if (cit != m_Channels.end())
                 {
                     std::lock_guard chLock(cit->second->mutex);
-                    m_DroppedRetired += cit->second->dropCounter.total();
+                    m_DroppedRetired += cit->second->dropTotal.load(std::memory_order_relaxed);
                     m_Channels.erase(cit);
                 }
                 m_Workers.erase(worker->layerId);
@@ -215,7 +223,8 @@ std::shared_ptr<MediaPump::Channel> MediaPump::channelForLocked(const LayerTarge
             // The layer's media changed: bank the old drop count, rebind
             // and reset all state (the new worker re-primes everything).
             std::lock_guard chLock(channel->mutex);
-            m_DroppedRetired += channel->dropCounter.total();
+            m_DroppedRetired += channel->dropTotal.load(std::memory_order_relaxed);
+            channel->dropTotal = 0;
             channel->mediaId = target.mediaId;
             channel->dropCounter.reset();
             channel->generation = 0;
@@ -380,6 +389,28 @@ void MediaPump::decodeChannel(Worker& worker, Channel& ch, const LayerTarget& ta
         const bool wrapWithCache =
             backwardJump && !generationStale && target.loop && target.loopStart.isValid() &&
             loopStartInQueue(ch, target);
+        if (!wrapWithCache)
+        {
+            // The seek runs WITHOUT the channel lock (the source is
+            // worker-private, exactly like the loop pre-decode):
+            // av_seek_frame plus the decoder flush can take tens of ms on
+            // large files, and holding the lock would stall every
+            // deliverVideo()/mixAudio() of the frame loop meanwhile.
+            // Deliveries during the seek pick from the still-valid old
+            // queue; the successful seek clears it right after.
+            lock.unlock();
+            const bool seeked = source->seek(target.mediaTime);
+            lock.lock();
+            if (!seeked)
+            {
+                // The source stayed exactly where it was (no flush, no
+                // dropped frames - see IMediaSource::seek): keep the
+                // queued data and retry on the next pass.
+                ch.primed = false; // retry on the next pass
+                finishPass();
+                return;
+            }
+        }
         if (wrapWithCache)
         {
             // The start of the loop was pre-decoded: continue without a
@@ -410,12 +441,6 @@ void MediaPump::decodeChannel(Worker& worker, Channel& ch, const LayerTarget& ta
             ch.audio.clear();
             ch.audioBase = Time::zero();
             ch.audioDecodedUpTo = Time::zero();
-        }
-        else if (!source->seek(target.mediaTime))
-        {
-            ch.primed = false; // retry on the next pass
-            finishPass();
-            return;
         }
         else
         {
@@ -500,25 +525,57 @@ void MediaPump::decodeChannel(Worker& worker, Channel& ch, const LayerTarget& ta
         // into the live queue.)
         if (!worker.pumpSuspended)
         {
-            int decodes = 0;
-            while (ch.video.size() < static_cast<size_t>(kVideoLookaheadFrames + 2) &&
-                   ++decodes <= kMaxVideoDecodesPerPass)
+            const std::size_t targetSize = static_cast<std::size_t>(kVideoLookaheadFrames + 2);
+            const std::size_t toDecode =
+                ch.video.size() < targetSize
+                    ? std::min<std::size_t>(targetSize - ch.video.size(),
+                                            static_cast<std::size_t>(kMaxVideoDecodesPerPass))
+                    : 0;
+            if (toDecode > 0)
             {
-                VideoFrame frame;
-                const auto d0 = std::chrono::steady_clock::now();
-                const bool got = source->nextVideoFrame(frame, kDecodeTimeoutMs);
-                const std::int64_t dn = nanosSince(d0);
-                ch.decodeCalls++;
-                ch.decodeNanos += dn;
-                if (dn > kSlowDecodeNanos)
+                // The DECODE runs WITHOUT the channel lock (the source is
+                // worker-private, exactly like the loop pre-decode): a
+                // single nextVideoFrame() on a heavy format (e.g. a 4K HAP)
+                // takes 10-20 ms, and holding the lock through the whole
+                // pass made the render thread's deliverVideo() and the
+                // audio callback's mixAudio() wait on every frame. While
+                // the lock is released the render thread keeps delivering
+                // from the existing queue - nothing else ever grows it, so
+                // committing toDecode frames below cannot overshoot
+                // targetSize. The channel stats accumulate locally and are
+                // committed under the lock (printHealth reads them under it).
+                std::vector<VideoFrame> decoded;
+                decoded.reserve(toDecode);
+                std::int64_t calls = 0;
+                std::int64_t nanos = 0;
+                std::int64_t slow = 0;
+                lock.unlock();
+                for (std::size_t i = 0; i < toDecode; ++i)
                 {
-                    ++ch.slowDecodes;
+                    VideoFrame frame;
+                    const auto d0 = std::chrono::steady_clock::now();
+                    const bool got = source->nextVideoFrame(frame, kDecodeTimeoutMs);
+                    const std::int64_t dn = nanosSince(d0);
+                    calls++;
+                    nanos += dn;
+                    if (dn > kSlowDecodeNanos)
+                    {
+                        ++slow;
+                    }
+                    if (!got)
+                    {
+                        break; // EOF or decoder not ready yet
+                    }
+                    decoded.push_back(std::move(frame));
                 }
-                if (!got)
+                lock.lock();
+                ch.decodeCalls += calls;
+                ch.decodeNanos += nanos;
+                ch.slowDecodes += slow;
+                for (auto& frame : decoded)
                 {
-                    break; // EOF or decoder not ready yet
+                    ch.video.push_back(std::move(frame));
                 }
-                ch.video.push_back(std::move(frame));
             }
         }
         // Frames already handed to the GPU are only needed for the next
@@ -560,26 +617,51 @@ void MediaPump::decodeChannel(Worker& worker, Channel& ch, const LayerTarget& ta
     if (md.hasAudio && md.audioSampleRate > 0.0 && !worker.pumpSuspended)
     {
         const Time horizon = target.mediaTime + Time::fromSeconds(kAudioLookaheadSeconds);
-        int decodes = 0;
-        while (ch.audioDecodedUpTo < horizon && ++decodes <= kMaxAudioDecodesPerPass)
+        if (ch.audioDecodedUpTo < horizon)
         {
-            AudioFrame block;
-            if (!source->nextAudioFrame(block, kDecodeTimeoutMs))
+            // Decoded WITHOUT the channel lock, committed under it (same
+            // rationale as the video loop above: the source is
+            // worker-private, and the audio callback must not wait on a
+            // decode pass). audioBase/audioDecodedUpTo are read above
+            // under the lock and nobody else writes them, so the local
+            // copies stay valid across the unlock.
+            std::vector<float> samples;
+            Time base;
+            bool haveBase = ch.audioBase.isValid();
+            Time upTo = ch.audioDecodedUpTo;
+            lock.unlock();
+            int decodes = 0;
+            while (upTo < horizon && ++decodes <= kMaxAudioDecodesPerPass)
             {
-                break; // EOF or decoder not ready yet
+                AudioFrame block;
+                if (!source->nextAudioFrame(block, kDecodeTimeoutMs))
+                {
+                    break; // EOF or decoder not ready yet
+                }
+                if (block.channels == 0 || block.sampleRate <= 0.0 || block.samples.empty())
+                {
+                    break;
+                }
+                samples.insert(samples.end(), block.samples.begin(), block.samples.end());
+                if (!haveBase)
+                {
+                    haveBase = true;
+                    base = block.time;
+                }
+                upTo = block.time +
+                       Time::fromSeconds(static_cast<double>(block.samples.size() / block.channels) /
+                                         block.sampleRate);
             }
-            if (block.channels == 0 || block.sampleRate <= 0.0 || block.samples.empty())
+            lock.lock();
+            if (!samples.empty())
             {
-                break;
+                ch.audio.insert(ch.audio.end(), samples.begin(), samples.end());
+                ch.audioDecodedUpTo = upTo;
+                if (haveBase && !ch.audioBase.isValid())
+                {
+                    ch.audioBase = base;
+                }
             }
-            ch.audio.insert(ch.audio.end(), block.samples.begin(), block.samples.end());
-            if (!ch.audioBase.isValid())
-            {
-                ch.audioBase = block.time;
-            }
-            ch.audioDecodedUpTo =
-                block.time + Time::fromSeconds(static_cast<double>(block.samples.size() / block.channels) /
-                                               block.sampleRate);
         }
 
         // Trim history: nothing older than kAudioTrimHistorySeconds behind the
@@ -653,7 +735,7 @@ MediaPump::preDecodeUnlocked(IMediaSource& source, const LayerTarget& target,
     //    last tenths of a second before the wrap would freeze on screen.
     {
         int drain = 0;
-        while (++drain <= 16)
+        while (++drain <= kPreLoopDrainMaxFrames)
         {
             VideoFrame frame;
             if (!source.nextVideoFrame(frame, kDecodeTimeoutMs))
@@ -811,11 +893,13 @@ nvrhi::TextureHandle MediaPump::deliverVideo(const LayerTarget& target)
 
         // Dropped-frames metric: one presentation pass per call, whether or
         // not a new frame reached the screen (a repeated or missing frame
-        // while the playhead runs on counts as drops).
+        // while the playhead runs on counts as drops). The published total
+        // feeds the lock-free per-frame read in droppedVideoFrames().
         const Time frameStep = Time::fromFrames(1, channel->mediaFrameRate);
-        channel->dropCounter.advance(
+        const std::uint64_t dropped = channel->dropCounter.advance(
             target.mediaTime, chosen != nullptr ? std::optional<Time>(chosen->time) : std::nullopt,
             frameStep);
+        channel->dropTotal.fetch_add(dropped, std::memory_order_relaxed);
 
         texture = m_Renderer.mediaTexture(target.layerId);
     }
@@ -892,12 +976,17 @@ void MediaPump::mixAudio(const std::vector<LayerTarget>& targets, float* outSter
 
 std::uint64_t MediaPump::droppedVideoFrames() const
 {
+    // The per-frame status read must NOT take a channel lock: a pass holds
+    // the lock across decode commits, and waiting on it here (every
+    // rendered frame) used to stall the render loop behind the decode
+    // passes. The published totals are atomics (Channel::dropTotal); the
+    // channel map is only mutated by the coordinator under m_ChannelsMutex,
+    // so that lock is taken briefly to iterate it.
     std::lock_guard lock(m_ChannelsMutex);
     std::uint64_t total = m_DroppedRetired;
     for (const auto& [layerId, channel] : m_Channels)
     {
-        std::lock_guard channelLock(channel->mutex);
-        total += channel->dropCounter.total();
+        total += channel->dropTotal.load(std::memory_order_relaxed);
     }
     return total;
 }

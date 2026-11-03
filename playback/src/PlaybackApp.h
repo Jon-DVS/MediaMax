@@ -248,6 +248,10 @@ private:
     std::uint64_t m_PumpGeneration = 0;
     Time m_LastPublishedShowTime;
     bool m_HaveLastPublishedShowTime = false;
+    // Last engine seekCount() observed by the frame loop (see
+    // takeFrameSnapshot): a change marks a deliberate playhead jump
+    // (playback.seek / SeekTo cue) that must re-seek the pump channels.
+    std::uint64_t m_LastEngineSeekCount = 0;
 
     std::atomic<bool> m_ShutdownRequested{false};
     bool m_GlfwActive = false;

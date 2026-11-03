@@ -465,9 +465,14 @@ bool FFmpegSource::setupVideo(std::string& error)
     // kInFlightReorderMargin.
     m_VideoInFlightCap = m_VideoCodec->thread_count + kInFlightReorderMargin;
 
+    // Same output-format choice as setVideoOutputSizeHint (the RGB0 no-op
+    // fast path for RGB0 sources): the initial context may outlive all size
+    // hints when the display shows the media at native size.
+    const AVPixelFormat outFmt =
+        (m_VideoCodec->pix_fmt == AV_PIX_FMT_RGB0) ? AV_PIX_FMT_RGB0 : AV_PIX_FMT_RGBA;
     m_Sws = sws_getContext(m_VideoCodec->width, m_VideoCodec->height,
                            m_VideoCodec->pix_fmt, m_VideoCodec->width, m_VideoCodec->height,
-                           AV_PIX_FMT_RGBA, SWS_BILINEAR, nullptr, nullptr, nullptr);
+                           outFmt, SWS_BILINEAR, nullptr, nullptr, nullptr);
     if (!m_Sws)
     {
         error = "sws_getContext failed";
@@ -554,22 +559,43 @@ void FFmpegSource::flushDecoders()
 bool FFmpegSource::seek(const Time& t)
 {
     const int64_t targetUs = t.toMicroseconds();
+    int ret = 0;
 
     if (m_VideoStream)
     {
         const int64_t ts = av_rescale_q(targetUs, AVRational{1, 1000000},
                                         m_VideoStream->time_base);
-        const int ret =
+        const int videoRet =
             av_seek_frame(m_FormatCtx, m_VideoStream->index, ts, AVSEEK_FLAG_BACKWARD);
-        Logger::instance().debug("seek: video av_seek_frame t={}us ret={}", targetUs, ret);
+        Logger::instance().debug("seek: video av_seek_frame t={}us ret={}", targetUs,
+                                 videoRet);
+        if (videoRet < 0)
+        {
+            ret = videoRet;
+        }
     }
     if (m_AudioStream)
     {
         const int64_t ts = av_rescale_q(targetUs, AVRational{1, 1000000},
                                         m_AudioStream->time_base);
-        const int ret =
+        const int audioRet =
             av_seek_frame(m_FormatCtx, m_AudioStream->index, ts, AVSEEK_FLAG_BACKWARD);
-        Logger::instance().debug("seek: audio av_seek_frame t={}us ret={}", targetUs, ret);
+        Logger::instance().debug("seek: audio av_seek_frame t={}us ret={}", targetUs,
+                                 audioRet);
+        if (audioRet < 0)
+        {
+            ret = audioRet;
+        }
+    }
+    if (ret < 0)
+    {
+        // Report the failure and skip the flush: the queued frames are
+        // still the best data we have (a fully failed seek moved nothing;
+        // a partially failed one may have moved only one stream), and the
+        // consumer can keep delivering from them. The caller (the pump)
+        // retries the seek on its next pass.
+        Logger::instance().error("seek to {}us failed: {}", targetUs, errorString(ret));
+        return false;
     }
     flushDecoders();
     m_HaveLastVideoTime = false;
@@ -742,7 +768,14 @@ bool FFmpegSource::pumpVideo(uint64_t deadlineMs)
         }
         if (result == kPacketEof)
         {
-            // EOF: flush the decoder to drain its internal buffers.
+            // EOF: no more video packets will arrive. Mark the stream
+            // finished BEFORE the flush so the flush burst (up to the
+            // in-flight cap of frames delivered at once) is queued without
+            // eviction - at the tail of a looping pass those are exactly
+            // the frames the display is about to show (see
+            // decodeVideoFrame). Then flush the decoder to drain its
+            // internal buffers.
+            m_VideoFinished = 1;
             avcodec_send_packet(m_VideoCodec, nullptr);
             bool gotMore = false;
             AVFrame flushFrame = {};
@@ -758,7 +791,6 @@ bool FFmpegSource::pumpVideo(uint64_t deadlineMs)
             }
             if (!gotMore)
             {
-                m_VideoFinished = 1;
                 // A normal flush yields the still-in-flight frames before
                 // this point; the empty flush marks the true end of the
                 // stream (kept as a tail-of-pass marker).
@@ -976,9 +1008,18 @@ void FFmpegSource::setVideoOutputSizeHint(Size2i onScreenSize)
     {
         return; // idempotent while the hint matches the current output
     }
+    // Scaler output format: RGBA, except when the decoder already outputs
+    // RGB0 (the HAP decoder). RGB0 and RGBA have an identical byte layout
+    // (packed RGBA, A=0xFF), so for those sources the "conversion" is a
+    // byte no-op - requesting RGB0 lets swscale take its fast same-format
+    // scaling path instead of the generic rgb2rgb conversion (measured
+    // ~2x faster at 4K->720p for HAP). The queued pixels are consumed as
+    // RGBA either way (the layout is the same).
+    const AVPixelFormat outFmt =
+        (m_VideoCodec->pix_fmt == AV_PIX_FMT_RGB0) ? AV_PIX_FMT_RGB0 : AV_PIX_FMT_RGBA;
     SwsContext* sws =
-        sws_getContext(nativeW, nativeH, m_VideoCodec->pix_fmt, w, h, AV_PIX_FMT_RGBA,
-                       SWS_BILINEAR, nullptr, nullptr, nullptr);
+        sws_getContext(nativeW, nativeH, m_VideoCodec->pix_fmt, w, h, outFmt, SWS_BILINEAR,
+                       nullptr, nullptr, nullptr);
     if (!sws)
     {
         Logger::instance().debug("sws_getContext failed for output size {}x{}", w, h);
@@ -1019,8 +1060,18 @@ void FFmpegSource::decodeVideoFrame(const AVFrame& frame)
         return;
     }
 
-    if (m_VideoQueue.size() >= kMaxQueuedVideoFrames)
+    if (m_VideoQueue.size() >= kMaxQueuedVideoFrames && !m_VideoFinished)
     {
+        // The cap bounds memory while the stream is open: the overflow
+        // means the consumer is behind and the OLDEST queued frame is the
+        // one it can least still use, so it is dropped. At the stream's end
+        // that is backwards - the frames arriving here (the decoder's EOF
+        // flush burst, up to the in-flight cap of them at once) ARE the
+        // tail the consumer is about to display, and nothing more will
+        // arrive. Evicting the oldest burst frame would punch a visible
+        // hole in the last tenths of a second of a looping pass, so the
+        // queue grows past the cap while finished: the excess is bounded by
+        // the burst size and is pulled within the wrap.
         m_VideoQueue.pop_front();
         ++m_VideoQueueDropped;
     }

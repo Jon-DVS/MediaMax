@@ -114,6 +114,7 @@ void PlaybackEngine::seek(const Time& t)
         target = Time::zero();
     }
     m_Time = target;
+    ++m_SeekCount;
 }
 
 void PlaybackEngine::tick(const Time& dt)
@@ -160,6 +161,7 @@ void PlaybackEngine::tick(const Time& dt)
         if (const auto* seek = std::get_if<SeekTo>(&cue.action))
         {
             m_Time = seek->time;
+            ++m_SeekCount; // a cue seek is a playhead jump like any other
             break; // at most one seek per tick; no cue re-firing
         }
     }

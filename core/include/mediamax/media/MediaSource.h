@@ -31,7 +31,10 @@ public:
     virtual MediaMetadata metadata() const = 0;
 
     // Positions the stream at media time t (seek to the keyframe at or
-    // before t for video).
+    // before t for video). Returns false when the seek is not possible
+    // (e.g. the container/codec has no seek points): the stream then stays
+    // exactly where it was - no frames were dropped, no decoders flushed -
+    // so the consumer can keep delivering and retry later.
     virtual bool seek(const Time& t) = 0;
 
     // Advances and returns the next video frame. Blocks up to timeoutMs

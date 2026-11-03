@@ -166,6 +166,14 @@ private:
 
         // Dropped-frames metric (render thread advances it in deliverVideo).
         FrameDropCounter dropCounter;
+        // Published dropped-frames total: a high-water mirror of the
+        // counter above. The render thread fetch_add's it in deliverVideo;
+        // the coordinator banks it into m_DroppedRetired (and resets it)
+        // when the channel is rebound or retired, under `mutex`. Atomic
+        // because droppedVideoFrames() reads it EVERY FRAME without taking
+        // the channel lock - the render thread must never wait on a decode
+        // pass for a status metric.
+        std::atomic<std::uint64_t> dropTotal{0};
 
         // Decoded audio (source rate, interleaved).
         std::vector<float> audio;

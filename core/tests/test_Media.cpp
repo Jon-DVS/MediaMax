@@ -652,6 +652,101 @@ TEST_CASE("FFmpeg: alternating video/audio pulls keep the audio continuous (A/V 
     CHECK(maxGapSeconds < 0.010);
 }
 
+TEST_CASE("FFmpeg: seek repositions the stream without loss or restart (seek contract)")
+{
+    // The success half of the IMediaSource::seek contract: a seek returns
+    // true, flushes the decoders, and the stream continues from the
+    // requested point - no restart at t=0, no frames lost past the target,
+    // and repeating it is an idempotent reposition.
+    //
+    // (The failure half - return false and stay exactly put, no flush -
+    // is currently unreachable from file-based media: FFmpeg 9's
+    // av_seek_frame carries a generic scan fallback that succeeds on every
+    // local container/raw format (mjpeg, m2v, y4m, bmp_pipe, index-less
+    // AVI, seeks before start or past EOF). That branch exists for
+    // non-seekable inputs (pipes, network) and pathological containers;
+    // the pump's retry-on-false path is exercised by the playback
+    // self-tests.)
+    const auto ffmpeg = findFfmpegCli();
+    if (ffmpeg.empty())
+    {
+        std::fprintf(stderr,
+                     "[skip] ffmpeg CLI not available; skipping seek contract test\n");
+        return;
+    }
+
+    const auto dir = std::filesystem::temp_directory_path() / "mediamax-tests";
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    static std::atomic<std::uint64_t> counter{0};
+    const auto path =
+        dir / ("seek-contract-" + std::to_string(counter.fetch_add(1)) + ".mp4");
+
+    // 2 s of 64x36@30 h264 with every frame a keyframe (-g 1): a backward
+    // seek then lands EXACTLY on the requested frame, so the assertions
+    // below are deterministic.
+    const std::string cmd = "\"" + ffmpeg.string() + "\" -hide_banner -loglevel error -y "
+        "-f lavfi -i testsrc=duration=2:size=64x36:rate=30 "
+        "-c:v libx264 -preset ultrafast -pix_fmt yuv420p -g 1 " +
+        "\"" + path.string() + "\"";
+    const int rc = runCommandLine(cmd);
+    if (rc != 0)
+    {
+        std::fprintf(stderr, "[skip] ffmpeg failed to generate the test file (rc=%d)\n", rc);
+        std::filesystem::remove(path);
+        return;
+    }
+
+    std::string error;
+    auto source = ffmpeg::createSource(path.string(), error);
+    REQUIRE(source != nullptr);
+    const MediaMetadata meta = source->metadata();
+    REQUIRE(meta.hasVideo);
+    REQUIRE_FALSE(meta.hasAudio);
+
+    // Consume 10 frames: the position is now just past frame 9 (t=0.3).
+    const FrameRate fps = FrameRate::fps30();
+    VideoFrame frame;
+    Time lastTime = Time::zero();
+    for (int i = 0; i < 10; ++i)
+    {
+        REQUIRE(source->nextVideoFrame(frame, 5000));
+        lastTime = frame.time;
+    }
+    CHECK(lastTime == Time::fromFrames(9, fps));
+
+    // A forward seek lands exactly on the frame at t=1.0 (it is a
+    // keyframe)...
+    REQUIRE(source->seek(Time::fromSeconds(1.0)));
+    REQUIRE(source->nextVideoFrame(frame, 5000));
+    CHECK(frame.time == Time::fromSeconds(1.0));
+
+    // ...and the rest of the stream plays on: strictly consecutive 1/30 s
+    // steps until EOF - nothing was lost by the flush, nothing restarted.
+    Time prev = frame.time;
+    int rest = 0;
+    while (source->nextVideoFrame(frame, 5000))
+    {
+        const double stepSeconds = (frame.time - prev).toSeconds();
+        CHECK(stepSeconds > 1.0 / 30.0 - 0.001);
+        CHECK(stepSeconds < 1.0 / 30.0 + 0.001);
+        prev = frame.time;
+        ++rest;
+    }
+    // 60 frames total: 10 consumed, the seek lands on frame 30, so 29
+    // remain.
+    CHECK(rest == 29);
+
+    // Seeking to the same point again is an idempotent reposition: the
+    // next frame is the same frame, not a skip past it.
+    REQUIRE(source->seek(Time::fromSeconds(1.0)));
+    REQUIRE(source->nextVideoFrame(frame, 5000));
+    CHECK(frame.time == Time::fromSeconds(1.0));
+
+    source.reset(); // Windows: the format context holds the file handle
+    std::filesystem::remove(path);
+}
+
 TEST_CASE("FFmpeg: setVideoOutputSizeHint decodes at min(native, hint)")
 {
     // The decode worker hints each source with the layer's on-screen size
