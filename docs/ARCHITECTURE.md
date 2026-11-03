@@ -338,7 +338,14 @@ is forbidden by the single-dispatcher rule). Its scene model
 (`ShowViewScene`) is rebuilt every frame from the `frame.state` poll — the
 poll connection switches from its 500 ms status cadence to a 10 Hz live poll
 only while the view is visible — and the free camera (wheel-zoom, drag-pan,
-reset) auto-refits when the display wall changes. Layer previews draw the
+reset) auto-refits when the display wall changes. The view-mode radios
+(Display / Layer / Show) pick what a left click selects; **display mode also
+changes the drawing**: the display wall is drawn on top of the layers and
+the layer fills are dimmed so the wall reads through them - a show-view
+effect only (the rendered output is never affected); the other modes keep
+the layers on top at full opacity. The right-click context menu over the
+selected display offers the settings dialog (Edit...) and the warp editor
+(Warp editor...). Layer previews draw the
 engine's `media.thumbnail` payloads: the poll thread fetches them (one in
 flight, with backoff) and `ShowTexturePool` keeps one VkImage + ImGui
 descriptor set per media (plus the shared 1x1 white fallback, entry 0) and

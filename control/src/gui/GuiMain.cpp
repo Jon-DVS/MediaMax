@@ -645,6 +645,19 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
                        "show view carries the document's display wall (entries: " + wallNames +
                        ")\n";
     }
+    // 3a++) Show view display mode: the default mode draws the display wall
+    //       ON TOP of the layers, dimmed so the wall reads through them - a
+    //       show-view effect only, the rendered output is never affected.
+    //       Check the recorded draw order and the dim factor.
+    {
+        const std::string order = app.testShowViewDrawOrder();
+        const float dim = app.testShowViewLayerDim();
+        const bool orderOk = order == "layers,displays" && dim > 0.0f && dim < 1.0f;
+        modalOk = modalOk && orderOk;
+        modalReport += std::string(orderOk ? "PASS " : "FAIL ") +
+                       "show view display mode draws the wall on top of dimmed layers (order " +
+                       order + ", dim " + std::to_string(dim) + ")\n";
+    }
     // 3b) Warp editor pad: open it on the document's display and verify
     //     the pad's view state - aspect-ratioed to the display (the
     //     offline entry is 1920x1080 => 16:9), the whole-lattice view
@@ -1505,10 +1518,16 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
                                     VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0,
                                     nullptr, 0, nullptr, 1, &back);
                             });
+                        // Layer mode: the capture samples the quad's fill at
+                        // full opacity. Display mode dims the layers for the
+                        // wall view (that effect is checked separately) and
+                        // would shift the expected red.
+                        app.testShowViewSetMode("layer");
                         glfwPollEvents();
                         runtime.renderFrame();
                         runtime.waitForFrame();
                         runtime.setPostRenderPassHook(nullptr);
+                        app.testShowViewSetMode("display");
                         void* mapped = nullptr;
                         if (vkMapMemory(runtime.device(), capMem, 0, capSize, 0, &mapped) !=
                             VK_SUCCESS)
@@ -1603,6 +1622,19 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
                               std::to_string(dispId) + ")\n";
                 liveOk = liveOk && dispSelOk;
 
+                // 3b) Display mode draws the wall ON TOP of dimmed layers
+                //     (a show-view effect only): check the recorded draw
+                //     order and the dim factor.
+                const std::string dispOrder = app.testShowViewDrawOrder();
+                const float dispDim = app.testShowViewLayerDim();
+                const bool dispOrderOk = dispOrder == "layers,displays" && dispDim > 0.0f &&
+                                         dispDim < 1.0f;
+                liveReport +=
+                    std::string(dispOrderOk ? "PASS " : "FAIL ") +
+                    "display mode draws the displays on top of dimmed layers (order " + dispOrder +
+                    ", dim " + std::to_string(dispDim) + ")\n";
+                liveOk = liveOk && dispOrderOk;
+
                 // 4) Layer mode: the same point selects the topmost layer
                 //    (the testbmp media layer, which covers the wall).
                 app.testShowViewSetMode("layer");
@@ -1613,6 +1645,17 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
                               "layer mode click selects the topmost layer (id " +
                               std::to_string(layerId) + ")\n";
                 liveOk = liveOk && layerSelOk;
+
+                // 4b) Layer mode keeps the old draw order (the layers on
+                //     top of the wall) at full opacity.
+                const std::string layerOrder = app.testShowViewDrawOrder();
+                const float layerDim = app.testShowViewLayerDim();
+                const bool layerOrderOk = layerOrder == "displays,layers" &&
+                                          layerDim == 1.0f;
+                liveReport += std::string(layerOrderOk ? "PASS " : "FAIL ") +
+                              "layer mode keeps the old draw order at full opacity (order " +
+                              layerOrder + ", dim " + std::to_string(layerDim) + ")\n";
+                liveOk = liveOk && layerOrderOk;
 
                 // 5) Show mode: clicks select nothing (the selection from
                 //    the previous mode persists, unchanged).
@@ -1806,6 +1849,18 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
                     runtime.renderFrame();
                     popupSeen = app.testShowViewEditPopupOpen();
                 }
+                // 9a) While the menu is open, it records its items: it must
+                //     carry both "Edit..." and the new "Warp editor...".
+                const auto& menuItems = app.testShowViewMenuItems();
+                const bool hasEditItem =
+                    std::find(menuItems.begin(), menuItems.end(), "Edit...") != menuItems.end();
+                const bool hasWarpItem =
+                    std::find(menuItems.begin(), menuItems.end(), "Warp editor...") != menuItems.end();
+                const bool menuItemsOk = popupSeen && hasEditItem && hasWarpItem;
+                liveReport += std::string(menuItemsOk ? "PASS " : "FAIL ") +
+                              "show view right-click menu has Edit... and Warp editor... items\n";
+                liveOk = liveOk && menuItemsOk;
+
                 const bool editActionOk = popupSeen && app.testShowViewEditSelectedDisplay();
                 bool editShown = false;
                 for (int i = 0; i < 10 && !editShown; ++i)
@@ -1843,6 +1898,54 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
                     }
                 }
                 app.testShowViewSetMode("display");
+
+                // 9b) The menu's "Warp editor..." action: right-click the
+                //     selected display again to reopen the menu, run the
+                //     action - the warp editor opens on the (re-)added
+                //     document entry - then close it.
+                {
+                    runtime.preNewFrameHook = [sx, sy] {
+                        ImGui::GetIO().AddMousePosEvent(sx, sy);
+                        ImGui::GetIO().AddMouseButtonEvent(1, true);
+                    };
+                    glfwPollEvents();
+                    runtime.renderFrame();
+                    runtime.preNewFrameHook = [sx, sy] {
+                        ImGui::GetIO().AddMousePosEvent(sx, sy);
+                        ImGui::GetIO().AddMouseButtonEvent(1, false);
+                    };
+                    glfwPollEvents();
+                    runtime.renderFrame();
+                    runtime.preNewFrameHook = nullptr;
+                }
+                bool warpPopupSeen = false;
+                for (int i = 0; i < 10 && !warpPopupSeen; ++i)
+                {
+                    glfwPollEvents();
+                    runtime.renderFrame();
+                    warpPopupSeen = app.testShowViewEditPopupOpen();
+                }
+                const bool warpActionOk =
+                    warpPopupSeen && app.testShowViewWarpEditorSelectedDisplay();
+                bool warpShown = false;
+                for (int i = 0; i < 10 && !warpShown; ++i)
+                {
+                    glfwPollEvents();
+                    runtime.renderFrame();
+                    warpShown = app.testWarpEditorOpen();
+                }
+                app.testCloseModal("warp");
+                bool warpClosed = false;
+                for (int i = 0; i < 10 && !warpClosed; ++i)
+                {
+                    glfwPollEvents();
+                    runtime.renderFrame();
+                    warpClosed = !app.testModalOpen("warp");
+                }
+                const bool ctxWarpOk = warpPopupSeen && warpActionOk && warpShown && warpClosed;
+                liveReport += std::string(ctxWarpOk ? "PASS " : "FAIL ") +
+                              "show view right-click menu: Warp editor... opens the warp editor\n";
+                liveOk = liveOk && ctxWarpOk;
             }
         }
     }

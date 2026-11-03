@@ -454,6 +454,12 @@ void ControlGuiApp::frame()
         m_PendingLiveDisplayEdit = kInvalidId;
         openDisplayEdit(docId);
     }
+    if (m_PendingLiveWarpEdit != kInvalidId)
+    {
+        const Id docId = m_PendingLiveWarpEdit;
+        m_PendingLiveWarpEdit = kInvalidId;
+        openWarpEdit(docId);
+    }
     renderMenuBar();
     renderDockspace();
     renderSystemsWindow();
@@ -2522,6 +2528,7 @@ void ControlGuiApp::renderShowViewWindow()
     m_ShowViewEditPopupOpen = false;
     m_TestShowViewStripItems.clear();
     m_TestShowViewSceneWindow.clear();
+    m_TestShowViewMenuItems.clear();
     // The scene fills the window content edge to edge (NoBackground); the
     // mode radios, the "Reset view" button and the selection readout are
     // the only widgets over it. They are submitted inside the scene child,
@@ -2714,116 +2721,151 @@ void ControlGuiApp::renderShowViewWindow()
     // The display wall. The selected display is highlighted; its label -
     // name, resolution and the system it is on - shows only while selected.
     const ImU32 selCol = ImGui::ColorConvertFloat4ToU32(ImVec4(0.25f, 0.75f, 1.0f, 1.0f));
-    for (const auto& d : m_ShowScene.displays)
+    // Display mode shows the WALL: the displays are drawn ON TOP of the
+    // layers (their outlines must stay visible over the layer fills) and
+    // the layers are dimmed so the wall reads through them - a show-view
+    // effect only, the rendered output is never affected. Layer/show mode
+    // shows the CONTENT: the old order stands (the layers on top of the
+    // wall), at full opacity.
+    const bool displayMode = m_ShowViewMode == ShowViewMode::Display;
+    const float layerDim = displayMode ? 0.35f : 1.0f;
+
+    auto drawDisplays = [&]()
     {
-        if (d.w <= 0.f || d.h <= 0.f)
+        for (const auto& d : m_ShowScene.displays)
         {
-            continue;
-        }
-        const ImVec2 p1 = project(d.x, d.y);
-        const ImVec2 p2 = project(d.x + d.w, d.y + d.h);
-        const bool selected = d.id == m_ShowViewSelDisplay;
-        const ImU32 col = selected ? selCol
-                                   : d.enabled ? ImGui::GetColorU32(ImGuiCol_Text)
-                                               : ImGui::GetColorU32(ImGuiCol_TextDisabled);
-        dl->AddRect(p1, p2, col, 0.0f, ImDrawFlags_None,
-                    selected ? 3.0f : (d.enabled ? 2.0f : 1.0f));
-        if (selected)
-        {
-            std::string label = d.name + "  \u00b7  " + std::to_string(static_cast<int>(d.w)) +
-                                "x" + std::to_string(static_cast<int>(d.h));
-            const std::string systemName = showViewDisplaySystem(d);
-            if (!systemName.empty())
+            if (d.w <= 0.f || d.h <= 0.f)
             {
-                label += "  \u00b7  " + systemName;
+                continue;
             }
-            dl->AddText(ImVec2(p1.x + 4.f, p1.y + 2.f), selCol, label.c_str());
+            const ImVec2 p1 = project(d.x, d.y);
+            const ImVec2 p2 = project(d.x + d.w, d.y + d.h);
+            const bool selected = d.id == m_ShowViewSelDisplay;
+            const ImU32 col = selected ? selCol
+                                       : d.enabled ? ImGui::GetColorU32(ImGuiCol_Text)
+                                                   : ImGui::GetColorU32(ImGuiCol_TextDisabled);
+            dl->AddRect(p1, p2, col, 0.0f, ImDrawFlags_None,
+                        selected ? 3.0f : (d.enabled ? 2.0f : 1.0f));
+            if (selected)
+            {
+                std::string label = d.name + "  \u00b7  " + std::to_string(static_cast<int>(d.w)) +
+                                    "x" + std::to_string(static_cast<int>(d.h));
+                const std::string systemName = showViewDisplaySystem(d);
+                if (!systemName.empty())
+                {
+                    label += "  \u00b7  " + systemName;
+                }
+                dl->AddText(ImVec2(p1.x + 4.f, p1.y + 2.f), selCol, label.c_str());
+            }
         }
-    }
+    };
 
     // The visible layers (in draw order). The selected layer gets the
-    // highlight outline; its label shows only while selected.
-    for (const auto& layer : m_ShowScene.layers)
+    // highlight outline; its label shows only while selected. In display
+    // mode the fills are additionally scaled by layerDim (see above).
+    auto drawLayers = [&]()
     {
-        ImVec2 c[4];
-        for (int i = 0; i < 4; ++i)
+        for (const auto& layer : m_ShowScene.layers)
         {
-            c[i] = project(layer.corners[static_cast<size_t>(2 * i)],
-                           layer.corners[static_cast<size_t>(2 * i + 1)]);
-        }
-        const bool selected = layer.id == m_ShowViewSelLayer;
-        const ImU32 outline = selected ? selCol : ImGui::GetColorU32(ImGuiCol_TextDisabled);
-        if (layer.content == "color")
-        {
-            const ImU32 fill = ImGui::ColorConvertFloat4ToU32(ImVec4(
-                layer.color[0], layer.color[1], layer.color[2],
-                layer.color[3] * layer.opacity));
-            dl->AddQuadFilled(c[0], c[1], c[2], c[3], fill);
-            dl->AddQuad(c[0], c[1], c[2], c[3], outline, selected ? 2.5f : 1.0f);
-        }
-        else if (m_ShowTexPool.ready())
-        {
-            // Media: the thumbnail texture (a white fallback until it
-            // arrives). The pool replaces the texture on a path/size change
-            // and re-uploads on new pixels.
-            ImTextureRef tex = m_ShowTexPool.whiteTexture();
-            int tw = 0;
-            int th = 0;
-            std::vector<std::uint8_t> rgba;
-            if (active && active->thumbnailFor(layer.mediaId, tw, th, rgba))
+            ImVec2 c[4];
+            for (int i = 0; i < 4; ++i)
             {
-                std::string path;
-                if (snap.status.contains("media") && snap.status["media"].is_array())
+                c[i] = project(layer.corners[static_cast<size_t>(2 * i)],
+                               layer.corners[static_cast<size_t>(2 * i + 1)]);
+            }
+            const bool selected = layer.id == m_ShowViewSelLayer;
+            const ImU32 outline = selected ? selCol : ImGui::GetColorU32(ImGuiCol_TextDisabled);
+            if (layer.content == "color")
+            {
+                const ImU32 fill = ImGui::ColorConvertFloat4ToU32(ImVec4(
+                    layer.color[0], layer.color[1], layer.color[2],
+                    layer.color[3] * layer.opacity * layerDim));
+                dl->AddQuadFilled(c[0], c[1], c[2], c[3], fill);
+                dl->AddQuad(c[0], c[1], c[2], c[3], outline, selected ? 2.5f : 1.0f);
+            }
+            else if (m_ShowTexPool.ready())
+            {
+                // Media: the thumbnail texture (a white fallback until it
+                // arrives). The pool replaces the texture on a path/size change
+                // and re-uploads on new pixels.
+                ImTextureRef tex = m_ShowTexPool.whiteTexture();
+                int tw = 0;
+                int th = 0;
+                std::vector<std::uint8_t> rgba;
+                if (active && active->thumbnailFor(layer.mediaId, tw, th, rgba))
                 {
-                    for (const auto& m : snap.status["media"])
+                    std::string path;
+                    if (snap.status.contains("media") && snap.status["media"].is_array())
                     {
-                        if (m.value("id", 0u) == layer.mediaId)
+                        for (const auto& m : snap.status["media"])
                         {
-                            path = m.value("path", std::string());
-                            break;
+                            if (m.value("id", 0u) == layer.mediaId)
+                            {
+                                path = m.value("path", std::string());
+                                break;
+                            }
                         }
                     }
+                    tex = m_ShowTexPool.textureFor(layer.mediaId, path, rgba, tw, th);
                 }
-                tex = m_ShowTexPool.textureFor(layer.mediaId, path, rgba, tw, th);
+                const ImU32 tint =
+                    ImGui::ColorConvertFloat4ToU32(ImVec4(1.f, 1.f, 1.f,
+                                                        layer.opacity * layerDim));
+                // Textured quad with the per-corner UVs. Use the high-level
+                // AddImageQuad, not a raw PrimQuadUV: in this ImGui version the
+                // low-level Prim* helpers assume the caller reserved vertices
+                // and indices (PrimReserve) first. An unreserved call leaves the
+                // draw command's element count at zero (the quad never renders)
+                // and writes past the committed vertex/index buffers, leaving
+                // stray geometry behind - the "streaks and lines" in the
+                // thumbnails. AddImageQuad does the reservation plus the texture
+                // push/pop itself.
+                dl->AddImageQuad(tex, c[0], c[1], c[2], c[3], ImVec2(0.f, 0.f), ImVec2(1.f, 0.f),
+                                 ImVec2(1.f, 1.f), ImVec2(0.f, 1.f), tint);
+                dl->AddQuad(c[0], c[1], c[2], c[3], outline, selected ? 2.5f : 1.0f);
+                if (layer.content == "video")
+                {
+                    // Play badge: screen-constant (a world-space size would
+                    // zoom with the camera), at the projected top-left corner.
+                    const ImVec2 b(c[0].x + 5.f, c[0].y + 5.f);
+                    dl->AddTriangleFilled(b, ImVec2(b.x + 11.f, b.y + 7.f),
+                                          ImVec2(b.x + 5.f, b.y + 14.f),
+                                          ImGui::GetColorU32(ImGuiCol_Text));
+                }
             }
-            const ImU32 tint =
-                ImGui::ColorConvertFloat4ToU32(ImVec4(1.f, 1.f, 1.f, layer.opacity));
-            // Textured quad with the per-corner UVs. Use the high-level
-            // AddImageQuad, not a raw PrimQuadUV: in this ImGui version the
-            // low-level Prim* helpers assume the caller reserved vertices
-            // and indices (PrimReserve) first. An unreserved call leaves the
-            // draw command's element count at zero (the quad never renders)
-            // and writes past the committed vertex/index buffers, leaving
-            // stray geometry behind - the "streaks and lines" in the
-            // thumbnails. AddImageQuad does the reservation plus the texture
-            // push/pop itself.
-            dl->AddImageQuad(tex, c[0], c[1], c[2], c[3], ImVec2(0.f, 0.f), ImVec2(1.f, 0.f),
-                             ImVec2(1.f, 1.f), ImVec2(0.f, 1.f), tint);
-            dl->AddQuad(c[0], c[1], c[2], c[3], outline, selected ? 2.5f : 1.0f);
-            if (layer.content == "video")
+            else
             {
-                // Play badge: screen-constant (a world-space size would
-                // zoom with the camera), at the projected top-left corner.
-                const ImVec2 b(c[0].x + 5.f, c[0].y + 5.f);
-                dl->AddTriangleFilled(b, ImVec2(b.x + 11.f, b.y + 7.f),
-                                      ImVec2(b.x + 5.f, b.y + 14.f),
-                                      ImGui::GetColorU32(ImGuiCol_Text));
+                // The pool is not ready (init failure): a neutral quad keeps the
+                // layer visible.
+                dl->AddQuadFilled(c[0], c[1], c[2], c[3],
+                                  ImGui::ColorConvertFloat4ToU32(
+                                      ImVec4(0.5f, 0.5f, 0.5f, layer.opacity * layerDim)));
+                dl->AddQuad(c[0], c[1], c[2], c[3], outline, selected ? 2.5f : 1.0f);
+            }
+            if (selected && !layer.name.empty())
+            {
+                dl->AddText(ImVec2(c[0].x + 3.f, c[0].y + 2.f), selCol, layer.name.c_str());
             }
         }
-        else
-        {
-            // The pool is not ready (init failure): a neutral quad keeps the
-            // layer visible.
-            dl->AddQuadFilled(c[0], c[1], c[2], c[3],
-                              ImGui::ColorConvertFloat4ToU32(
-                                  ImVec4(0.5f, 0.5f, 0.5f, layer.opacity)));
-            dl->AddQuad(c[0], c[1], c[2], c[3], outline, selected ? 2.5f : 1.0f);
-        }
-        if (selected && !layer.name.empty())
-        {
-            dl->AddText(ImVec2(c[0].x + 3.f, c[0].y + 2.f), selCol, layer.name.c_str());
-        }
+    };
+
+    // Display mode: the wall on top of the (dimmed) layers; otherwise the
+    // old order (the layers on top of the wall).
+    if (displayMode)
+    {
+        drawLayers();
+        drawDisplays();
     }
+    else
+    {
+        drawDisplays();
+        drawLayers();
+    }
+    // Test hooks: the self-test checks the per-mode draw order and the
+    // view-only dim factor (the rendered output is never affected).
+    m_TestShowViewDrawOrder = displayMode ? "layers,displays" : "displays,layers";
+    m_TestShowViewLayerDim = layerDim;
+
     // The top-right control strip: the view-mode radios + Reset view.
     // Submitted in the scene child after the scene's draw commands, so the
     // strip renders on top of the visualisation (a window renders after its
@@ -3164,6 +3206,7 @@ void ControlGuiApp::renderShowViewWindow()
     if (ImGui::BeginPopup("Show view display"))
     {
         m_ShowViewEditPopupOpen = true;
+        m_TestShowViewMenuItems.push_back("Edit...");
         if (ImGui::MenuItem("Edit...") && m_ShowViewSelDisplay != kInvalidId)
         {
             const ShowViewDisplay* sel =
@@ -3171,6 +3214,22 @@ void ControlGuiApp::renderShowViewWindow()
             if (sel != nullptr)
             {
                 openDisplayEditForLiveDisplay(*sel);
+            }
+        }
+        m_TestShowViewMenuItems.push_back("Warp editor...");
+        if (ImGui::MenuItem("Warp editor...") && m_ShowViewSelDisplay != kInvalidId)
+        {
+            const ShowViewDisplay* sel =
+                findShowViewDisplay(m_ShowScene, m_ShowViewSelDisplay);
+            if (sel != nullptr)
+            {
+                // The warp editor edits the show-document entry (added from
+                // the live display when the document does not define it).
+                const Id docId = ensureShowDisplayEntryForLive(*sel);
+                if (docId != kInvalidId)
+                {
+                    openWarpEdit(docId);
+                }
             }
         }
         ImGui::EndPopup();
@@ -6400,6 +6459,39 @@ bool ControlGuiApp::testShowViewEditSelectedDisplay()
     // which needs a current window (g.CurrentWindow is NULL between frames).
     m_PendingLiveDisplayEdit = ensureShowDisplayEntryForLive(*sel);
     return m_PendingLiveDisplayEdit != kInvalidId;
+}
+
+bool ControlGuiApp::testShowViewWarpEditorSelectedDisplay()
+{
+    if (m_ShowViewSelDisplay == kInvalidId)
+    {
+        return false;
+    }
+    const ShowViewDisplay* sel = findShowViewDisplay(m_ShowScene, m_ShowViewSelDisplay);
+    if (sel == nullptr)
+    {
+        return false;
+    }
+    // The document part is safe between frames; the editor itself is
+    // deferred to the next frame() (openWarpEdit's OpenPopup needs a
+    // current window, which does not exist between frames).
+    m_PendingLiveWarpEdit = ensureShowDisplayEntryForLive(*sel);
+    return m_PendingLiveWarpEdit != kInvalidId;
+}
+
+const std::vector<std::string>& ControlGuiApp::testShowViewMenuItems() const
+{
+    return m_TestShowViewMenuItems;
+}
+
+std::string ControlGuiApp::testShowViewDrawOrder() const
+{
+    return m_TestShowViewDrawOrder;
+}
+
+float ControlGuiApp::testShowViewLayerDim() const
+{
+    return m_TestShowViewLayerDim;
 }
 
 bool ControlGuiApp::testShowTextureUploaded(std::uint32_t mediaId) const

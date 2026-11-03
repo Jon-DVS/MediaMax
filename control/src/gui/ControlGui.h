@@ -246,6 +246,23 @@ public:
     // entry of the live display opens the settings dialog, added from the
     // live record when missing).
     bool testShowViewEditSelectedDisplay();
+    // Runs the show view's context menu "Warp editor..." action on the
+    // currently selected display (the exact action the menu item runs: the
+    // document entry of the live display opens the warp editor, added from
+    // the live record when missing).
+    bool testShowViewWarpEditorSelectedDisplay();
+    // The labels of the items the right-click context menu over the
+    // selected display drew on the last rendered frame (empty when the menu
+    // did not render): the self-test checks the menu carries the
+    // "Warp editor..." item.
+    const std::vector<std::string>& testShowViewMenuItems() const;
+    // The show view's draw order of the last rendered frame ("displays,
+    // layers" / "layers,displays") and the view-only layer dim factor:
+    // display mode draws the display wall ON TOP of dimmed layers so the
+    // outlines stay visible (a show-view effect only - the rendered output
+    // is never affected).
+    std::string testShowViewDrawOrder() const;
+    float testShowViewLayerDim() const;
     // The show view's display wall as "name@live" / "name@doc" entries (in
     // scene order; "@doc" = the entry came from the show document because
     // no running system shows it). The self-test checks the document's
@@ -668,6 +685,9 @@ private:
     // opened in the settings dialog by the next frame() (OpenPopup() needs
     // a current window, which does not exist between frames).
     Id m_PendingLiveDisplayEdit = kInvalidId;
+    // Test hook: warp editor queued by testShowViewWarpEditorSelectedDisplay(),
+    // opened by the next frame() (the same OpenPopup() window constraint).
+    Id m_PendingLiveWarpEdit = kInvalidId;
 
     // Console.
     std::string m_ConsoleInput;
@@ -793,6 +813,14 @@ private:
     // ("" when the show view did not render): the z-order check compares it
     // with a strip item's window.
     std::string m_TestShowViewSceneWindow;
+    // The show view's draw order ("displays,layers" / "layers,displays")
+    // and the view-only layer dim factor of the last rendered frame.
+    std::string m_TestShowViewDrawOrder;
+    float m_TestShowViewLayerDim = 1.0f;
+    // The labels of the context menu items the last frame drew (cleared
+    // every frame in renderShowViewWindow; empty when the menu did not
+    // render).
+    std::vector<std::string> m_TestShowViewMenuItems;
 
     // Show editor selection (scenes tab).
     int m_SelectedSceneIdx = 0;
