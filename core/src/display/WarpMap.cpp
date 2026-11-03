@@ -112,6 +112,37 @@ bool newtonSolveInverse(const WarpMap& map, float pu, float pv, float& qu, float
     return dx * dx + dy * dy < 16.f * kTol * kTol;
 }
 
+// Seed for newtonSolveInverse on a candidate cell: project p onto the
+// cell's corner parallelogram (a cheap stand-in for the bilinear weights of
+// p) and map the local cell coordinates to global content UV.
+void seedCellNewton(const InverseCell& cell, float pu, float pv, float duStep, float dvStep,
+                    float& qu, float& qv)
+{
+    const float px = pu - cell.aU;
+    const float py = pv - cell.aV;
+    const float e11 = cell.bU * cell.bU + cell.bV * cell.bV;
+    const float e12 = cell.bU * cell.cU + cell.bV * cell.cV;
+    const float e22 = cell.cU * cell.cU + cell.cV * cell.cV;
+    const float det = e11 * e22 - e12 * e12;
+    float lu, lv;
+    if (det > 1e-12f)
+    {
+        const float puE = px * cell.bU + py * cell.bV;
+        const float pvE = px * cell.cU + py * cell.cV;
+        lu = (e22 * puE - e12 * pvE) / det;
+        lv = (e11 * pvE - e12 * puE) / det;
+        lu = std::clamp(lu, 0.f, 1.f);
+        lv = std::clamp(lv, 0.f, 1.f);
+    }
+    else
+    {
+        lu = 0.5f;
+        lv = 0.5f;
+    }
+    qu = cell.iu + lu * duStep;
+    qv = cell.iv + lv * dvStep;
+}
+
 } // namespace
 
 WarpMap::WarpMap(int rows, int cols, WarpInterpolation interpolation)
@@ -251,21 +282,21 @@ bool WarpMap::isIdentity() const
     return true;
 }
 
-void WarpMap::buildDenseTexture(std::vector<unsigned char>& outData, int size) const
+void WarpMap::buildDenseTexture(std::vector<unsigned char>& outData, int width, int height) const
 {
-    if (size < 2)
+    if (width < 2 || height < 2)
     {
-        throw std::invalid_argument("WarpMap::buildDenseTexture: size must be >= 2");
+        throw std::invalid_argument("WarpMap::buildDenseTexture: width and height must be >= 2");
     }
-    outData.assign(static_cast<size_t>(size) * size * 2, 0);
+    outData.assign(static_cast<size_t>(width) * height * 2, 0);
 
-    for (int y = 0; y < size; ++y)
+    for (int y = 0; y < height; ++y)
     {
         // v = 0 at the top row (matches the shader's texture orientation).
-        const float v = (static_cast<float>(y) + 0.5f) / static_cast<float>(size);
-        for (int x = 0; x < size; ++x)
+        const float v = (static_cast<float>(y) + 0.5f) / static_cast<float>(height);
+        for (int x = 0; x < width; ++x)
         {
-            const float u = (static_cast<float>(x) + 0.5f) / static_cast<float>(size);
+            const float u = (static_cast<float>(x) + 0.5f) / static_cast<float>(width);
             const auto [wu, wv] = sample(u, v);
 
             const unsigned char ru = static_cast<unsigned char>(
@@ -273,43 +304,43 @@ void WarpMap::buildDenseTexture(std::vector<unsigned char>& outData, int size) c
             const unsigned char gv = static_cast<unsigned char>(
                 std::clamp(static_cast<int>(std::lround(wv * 255.f)), 0, 255));
 
-            const size_t idx = (static_cast<size_t>(y) * size + x) * 2;
+            const size_t idx = (static_cast<size_t>(y) * width + x) * 2;
             outData[idx] = ru;
             outData[idx + 1] = gv;
         }
     }
 }
 
-void WarpMap::buildInverseDenseTexture(std::vector<unsigned char>& outData, int size) const
+void WarpMap::buildInverseDenseTexture(std::vector<unsigned char>& outData, int width, int height) const
 {
-    if (size < 2)
+    if (width < 2 || height < 2)
     {
-        throw std::invalid_argument("WarpMap::buildInverseDenseTexture: size must be >= 2");
+        throw std::invalid_argument(
+            "WarpMap::buildInverseDenseTexture: width and height must be >= 2");
     }
-    outData.assign(static_cast<size_t>(size) * size * 4, 0);
-    // Uncovered texels are black; the alpha channel is always 255.
-    for (size_t i = 3; i < outData.size(); i += 4)
-    {
-        outData[i] = 255;
-    }
+    // RGB32_FLOAT, 12 bytes per texel: R = inverse u, G = inverse v,
+    // B = coverage. Float precision keeps the stored content UV exact at
+    // display resolution - 8-bit storage quantized each texel to 1/255 of
+    // the output size, a multi-pixel wobble at HD/4K. Uncovered texels stay
+    // (0, 0, 0); the display pass renders them black.
+    outData.assign(static_cast<size_t>(width) * height * 12, 0);
+    float* texels = reinterpret_cast<float*>(outData.data());
+    const auto store = [&](int x, int y, float u, float v) {
+        float* px = texels + (static_cast<size_t>(y) * width + x) * 3;
+        px[0] = u;
+        px[1] = v;
+        px[2] = 1.f;
+    };
 
     // The identity fast path: the inverse is the identity, fully covered.
     if (isIdentity())
     {
-        for (int y = 0; y < size; ++y)
+        for (int y = 0; y < height; ++y)
         {
-            const float v = (static_cast<float>(y) + 0.5f) / static_cast<float>(size);
-            const unsigned char gv = static_cast<unsigned char>(std::lround(v * 255.f));
-            for (int x = 0; x < size; ++x)
+            const float v = (static_cast<float>(y) + 0.5f) / static_cast<float>(height);
+            for (int x = 0; x < width; ++x)
             {
-                const float u = (static_cast<float>(x) + 0.5f) / static_cast<float>(size);
-                const unsigned char ru =
-                    static_cast<unsigned char>(std::lround(u * 255.f));
-                unsigned char* px =
-                    outData.data() + (static_cast<size_t>(y) * size + x) * 4;
-                px[0] = ru;
-                px[1] = gv;
-                px[2] = 255;
+                store(x, y, (static_cast<float>(x) + 0.5f) / static_cast<float>(width), v);
             }
         }
         return;
@@ -335,8 +366,10 @@ void WarpMap::buildInverseDenseTexture(std::vector<unsigned char>& outData, int 
     // Per lattice cell: the corner frame + the bounding box of its image
     // (the cell quadrilateral for bilinear; the 3x3 control neighbourhood
     // for spline - the B-spline convex-hull property keeps the cell's image
-    // inside it). The box is the cheap candidate test: a point outside it
-    // cannot be covered by the cell.
+    // inside it). The box drives the inverse build: the bilinear mode
+    // rasterizes each cell's box in pixels, the spline mode uses it as the
+    // cheap candidate test (a point outside it cannot be covered by the
+    // cell).
     std::vector<InverseCell> cells;
     cells.reserve(static_cast<size_t>(cellsX) * cellsY);
     for (int y = 0; y < cellsY; ++y)
@@ -392,50 +425,41 @@ void WarpMap::buildInverseDenseTexture(std::vector<unsigned char>& outData, int 
     const float dvStep = 1.f / static_cast<float>(cellsY);
     constexpr float kBoxMargin = 1e-6f; // float slack for boundary texels
 
-    for (int y = 0; y < size; ++y)
+    if (m_Interpolation == WarpInterpolation::Bilinear)
     {
-        const float pv = (static_cast<float>(y) + 0.5f) / static_cast<float>(size);
-        for (int x = 0; x < size; ++x)
+        // Per-cell rasterization: instead of scanning every lattice cell for
+        // every output texel (one bbox test per cell, per texel), visit only
+        // the pixels in each cell's image bounding box and solve that cell
+        // there. The exact algebraic solve is a handful of flops, so this is
+        // ~15x cheaper than the per-texel cell scan at display resolution.
+        // Cells are processed in scan order and a texel keeps the first cell
+        // that accepts it - the same convention as the per-texel scan.
+        for (const InverseCell& cell : cells)
         {
-            const float pu = (static_cast<float>(x) + 0.5f) / static_cast<float>(size);
-
-            for (const InverseCell& cell : cells)
+            // Pixel bounds of the cell's image box. Nodes may sit outside
+            // [0, 1] (the user can drag them off the surface), so clamp.
+            const int x0 = std::max(0,
+                                    static_cast<int>(std::floor((cell.minU - kBoxMargin) * width)));
+            const int x1 = std::min(width - 1,
+                                    static_cast<int>(std::ceil((cell.maxU + kBoxMargin) * width)));
+            const int y0 = std::max(
+                0, static_cast<int>(std::floor((cell.minV - kBoxMargin) * height)));
+            const int y1 = std::min(height - 1,
+                                    static_cast<int>(std::ceil((cell.maxV + kBoxMargin) * height)));
+            for (int y = y0; y <= y1; ++y)
             {
-                if (pu < cell.minU - kBoxMargin || pu > cell.maxU + kBoxMargin ||
-                    pv < cell.minV - kBoxMargin || pv > cell.maxV + kBoxMargin)
+                const float pv = (static_cast<float>(y) + 0.5f) / static_cast<float>(height);
+                for (int x = x0; x <= x1; ++x)
                 {
-                    continue;
-                }
+                    const float pu = (static_cast<float>(x) + 0.5f) / static_cast<float>(width);
+                    float* pxl = texels + (static_cast<size_t>(y) * width + x) * 3;
+                    if (pxl[2] != 0.f)
+                    {
+                        continue; // first cell wins
+                    }
 
-                // Seed: project p onto the cell's corner parallelogram (a
-                // cheap stand-in for the bilinear weights of p).
-                const float px = pu - cell.aU;
-                const float py = pv - cell.aV;
-                const float e11 = cell.bU * cell.bU + cell.bV * cell.bV;
-                const float e12 = cell.bU * cell.cU + cell.bV * cell.cV;
-                const float e22 = cell.cU * cell.cU + cell.cV * cell.cV;
-                const float det = e11 * e22 - e12 * e12;
-                float lu, lv;
-                if (det > 1e-12f)
-                {
-                    const float puE = px * cell.bU + py * cell.bV;
-                    const float pvE = px * cell.cU + py * cell.cV;
-                    lu = (e22 * puE - e12 * pvE) / det;
-                    lv = (e11 * pvE - e12 * puE) / det;
-                    lu = std::clamp(lu, 0.f, 1.f);
-                    lv = std::clamp(lv, 0.f, 1.f);
-                }
-                else
-                {
-                    lu = 0.5f;
-                    lv = 0.5f;
-                }
-                float qu = cell.iu + lu * duStep;
-                float qv = cell.iv + lv * dvStep;
-
-                bool ok = false;
-                if (m_Interpolation == WarpInterpolation::Bilinear)
-                {
+                    float qu, qv;
+                    bool ok = false;
                     // Exact algebraic solve of the cell's bilinear map.
                     float luS, lvS;
                     if (solveBilinearCell(cell, pu, pv, luS, lvS) &&
@@ -456,23 +480,47 @@ void WarpMap::buildInverseDenseTexture(std::vector<unsigned char>& outData, int 
                             ok = true;
                         }
                     }
+                    if (!ok)
+                    {
+                        // Newton for the (rare) near-degenerate cell the
+                        // algebraic solve rejected.
+                        seedCellNewton(cell, pu, pv, duStep, dvStep, qu, qv);
+                        ok = newtonSolveInverse(*this, pu, pv, qu, qv);
+                    }
+                    if (ok)
+                    {
+                        store(x, y, qu, qv);
+                    }
                 }
-                if (!ok)
+            }
+        }
+    }
+    else
+    {
+        // Spline mode: the cell maps have no closed form, so solve per texel
+        // (Newton from the parallelogram seed). Slower than the bilinear
+        // rasterization at display resolution - spline is the smoothing
+        // mode; bilinear is the interactive one.
+        for (int y = 0; y < height; ++y)
+        {
+            const float pv = (static_cast<float>(y) + 0.5f) / static_cast<float>(height);
+            for (int x = 0; x < width; ++x)
+            {
+                const float pu = (static_cast<float>(x) + 0.5f) / static_cast<float>(width);
+                for (const InverseCell& cell : cells)
                 {
-                    // Newton (spline mode, or a near-degenerate bilinear
-                    // cell the algebraic solve rejected).
-                    ok = newtonSolveInverse(*this, pu, pv, qu, qv);
-                }
-                if (ok)
-                {
-                    unsigned char* pxl =
-                        outData.data() + (static_cast<size_t>(y) * size + x) * 4;
-                    pxl[0] = static_cast<unsigned char>(
-                        std::clamp(static_cast<int>(std::lround(qu * 255.f)), 0, 255));
-                    pxl[1] = static_cast<unsigned char>(
-                        std::clamp(static_cast<int>(std::lround(qv * 255.f)), 0, 255));
-                    pxl[2] = 255;
-                    break; // a valid lattice assigns the point to one cell
+                    if (pu < cell.minU - kBoxMargin || pu > cell.maxU + kBoxMargin ||
+                        pv < cell.minV - kBoxMargin || pv > cell.maxV + kBoxMargin)
+                    {
+                        continue;
+                    }
+                    float qu, qv;
+                    seedCellNewton(cell, pu, pv, duStep, dvStep, qu, qv);
+                    if (newtonSolveInverse(*this, pu, pv, qu, qv))
+                    {
+                        store(x, y, qu, qv);
+                        break; // a valid lattice assigns the point to one cell
+                    }
                 }
             }
         }

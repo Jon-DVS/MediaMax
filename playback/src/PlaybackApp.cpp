@@ -37,7 +37,9 @@ constexpr std::uint32_t kAcquireTimeoutMs = 100;
 // pacing.
 constexpr double kFrameLoopWaitSeconds = 0.002;
 
-// Dense warp texture size (display pass).
+// Fallback dense warp texture size for displays whose pixel size is not
+// known yet (undefined scene size). Normally the warp textures are built at
+// the display's own resolution - see updateWarpTexture.
 constexpr std::uint32_t kWarpTextureSize = 512;
 
 // Frames to wait after applying record geometry to the window before the
@@ -1287,16 +1289,30 @@ void PlaybackApp::updateWarpTexture(DisplaySurface& ds, const Display& display)
     }
     ds.lastWarpOffsets = offsets;
     ds.lastWarpMode = mode;
+    // Build the warp textures at the display's pixel resolution (at least):
+    // at 1:1 texel:pixel the display pass reads each texel exactly (a linear
+    // sample at a texel center returns the stored value), so the content
+    // mapping is limited only by the solver tolerance - no interpolation
+    // error on top. The display size is deliberately NOT part of the change
+    // detection above: the inverse field is UV-parameterized (0..1), so a
+    // resize keeps the last-built texture a valid (coarser) approximation
+    // until the next warp change rebuilds it at the new size - rebuilding
+    // at every intermediate size of a resize drag would stall the render
+    // thread far longer than the transient quality loss.
+    const std::uint32_t tw = ds.width > 0 ? static_cast<std::uint32_t>(ds.width)
+                                          : kWarpTextureSize;
+    const std::uint32_t th = ds.height > 0 ? static_cast<std::uint32_t>(ds.height)
+                                           : kWarpTextureSize;
     // The forward texture (preview node markers) and the inverse texture
     // (the content map) are rebuilt together - the change-detection above
     // guards both.
-    m_Scene.ensureWarpTexture(display.id, kWarpTextureSize);
-    m_Scene.ensureWarpInvTexture(display.id, kWarpTextureSize);
+    m_Scene.ensureWarpTexture(display.id, tw, th);
+    m_Scene.ensureWarpInvTexture(display.id, tw, th);
     std::vector<unsigned char> data;
-    display.warp.buildDenseTexture(data, static_cast<int>(kWarpTextureSize));
+    display.warp.buildDenseTexture(data, static_cast<int>(tw), static_cast<int>(th));
     m_Scene.updateWarpTexture(display.id, data);
     std::vector<unsigned char> invData;
-    display.warp.buildInverseDenseTexture(invData, static_cast<int>(kWarpTextureSize));
+    display.warp.buildInverseDenseTexture(invData, static_cast<int>(tw), static_cast<int>(th));
     m_Scene.updateWarpInvTexture(display.id, invData);
 }
 

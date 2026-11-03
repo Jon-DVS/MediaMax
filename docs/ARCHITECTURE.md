@@ -171,12 +171,13 @@ textures the GPU display pass samples (see below). The content is warped to
 fit the lattice region the nodes span; surface area outside it is uncovered
 (black). The interpolation between the nodes is either bilinear (the classic
 grid warp) or a tensor-product Catmull-Rom cubic B-spline that passes
-exactly through every node. Two textures, both built CPU-side (the GPU only
-samples): the inverse map (RGBA8: per output texel, the content UV that
-lands there + a coverage flag — the content path, solved exactly per cell
-for the bilinear mode and by Newton iteration for the spline) and the
-forward map (RG8: per output texel, where the ideal point ends up — the
-warp-preview node markers).
+exactly through every node. Two textures, both built CPU-side at the
+display's pixel resolution (so the display pass reads one texel per output
+pixel; the GPU only samples): the inverse map (RGB32_FLOAT: per output
+texel, the content UV that lands there, in 32-bit float, + a coverage flag
+— the content path, solved exactly per cell for the bilinear mode and by
+Newton iteration for the spline) and the forward map (RG8: per output
+texel, where the ideal point ends up — the warp-preview node markers).
 
 ### `overlay/` — status overlay text
 

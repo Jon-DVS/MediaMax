@@ -33,17 +33,24 @@
 // warped to, and surface area outside that region is uncovered (black).
 //
 // Two dense textures serve the GPU display pass (the interpolation scheme is
-// entirely CPU-side; the GPU only samples textures, one fetch per use):
+// entirely CPU-side; the GPU only samples textures, one fetch per use). Both
+// are built at a caller-chosen width x height (non-square): the playback app
+// uses the display's own pixel resolution, so the display pass reads one
+// texel per output pixel (at 1:1, a linear sample lands exactly on the
+// stored texel value):
 //
 //   buildDenseTexture - the FORWARD map, RG8: per output texel, where the
 //     ideal point at that position ends up. The display pass uses it for the
 //     warp-preview node markers (a node's marker sits at the texture sampled
 //     at the node's ideal UV - the surface passes through its nodes).
 //
-//   buildInverseDenseTexture - the INVERSE map, RGBA8: per output texel, the
-//     CONTENT uv that lands there (rg) plus a coverage flag (b = 1 when the
-//     texel is inside the warped lattice region, 0 otherwise). The display
-//     pass samples the scene with it; uncovered texels render black.
+//   buildInverseDenseTexture - the INVERSE map, RGB32_FLOAT (12 bytes per
+//     texel): per output texel, the CONTENT uv that lands there (R, G,
+//     float - 32-bit precision keeps the map exact at display resolution;
+//     8-bit storage quantized each texel to 1/255 of the output size, a
+//     multi-pixel wobble) plus a coverage flag (B = 1 when the texel is
+//     inside the warped lattice region, 0 otherwise). The display pass
+//     samples the scene with it; uncovered texels render black.
 
 #include <array>
 #include <cstdint>
@@ -93,21 +100,26 @@ public:
     void setIdentity();
     bool isIdentity() const;
 
-    // Renders the dense forward warp texture (RG8, row-major, size x size)
-    // where each texel stores the final warped UV for that output point
-    // (see the class comment). The GPU display pass samples it for the
-    // warp-preview node markers.
-    void buildDenseTexture(std::vector<unsigned char>& outData, int size) const;
+    // Renders the dense forward warp texture (RG8, row-major, width x
+    // height) where each texel stores the final warped UV for that output
+    // point (see the class comment). The GPU display pass samples it for
+    // the warp-preview node markers.
+    void buildDenseTexture(std::vector<unsigned char>& outData, int width, int height) const;
 
-    // Renders the dense INVERSE warp texture (RGBA8, row-major, size x size)
-    // where each texel stores the content UV (rg) that lands on that output
-    // point, plus a coverage flag in the blue channel: 255 when the output
-    // point lies inside the warped lattice region, 0 when it is uncovered
-    // (the display pass renders uncovered texels black). The content UV is
-    // the solution q of sample(q) = output point (Newton iteration for the
-    // spline mode; an exact algebraic solve of the bilinear cell map for the
-    // bilinear mode).
-    void buildInverseDenseTexture(std::vector<unsigned char>& outData, int size) const;
+    // Renders the dense INVERSE warp texture (RGB32_FLOAT, row-major, width
+    // x height; 12 bytes per texel) where each texel stores the content UV
+    // (float R, G) that lands on that output point, plus a coverage flag in
+    // the blue channel: 1.f when the output point lies inside the warped
+    // lattice region, 0.f when it is uncovered (the display pass renders
+    // uncovered texels black). The content UV is the solution q of
+    // sample(q) = output point (Newton iteration for the spline mode; an
+    // exact algebraic solve of the bilinear cell map for the bilinear mode).
+    //
+    // Cost scales with the texel count: the bilinear mode rasterizes each
+    // cell's image box (fast - tens of ms at HD, ~0.2 s at 4K); the spline
+    // mode solves per texel (seconds at 4K - use bilinear for interactive
+    // edits).
+    void buildInverseDenseTexture(std::vector<unsigned char>& outData, int width, int height) const;
 
     // Serialization (JSON compatible plain values).
     std::vector<std::array<float, 2>> pointOffsets() const;

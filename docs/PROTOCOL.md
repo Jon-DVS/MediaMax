@@ -661,8 +661,9 @@ Pulling a corner node inward therefore shrinks the content toward the rest of
 the lattice and opens a black corner; this is the behavior projection
 mapping needs for lens correction and wall geometry.
 
-Rendering is CPU-side: MediaMax builds two dense textures from the grid and
-the display pass samples them — the inverse map (per output pixel, the
+Rendering is CPU-side: MediaMax builds two dense textures from the grid,
+at the display's pixel resolution (the display pass reads one texel per
+output pixel), and samples them — the inverse map (per output pixel, the
 content UV that lands there plus a coverage flag; the content is drawn
 through it, uncovered pixels black) and the forward map (per output pixel,
 where the ideal point there ends up; the warp preview samples it for the

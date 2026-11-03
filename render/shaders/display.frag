@@ -6,11 +6,13 @@
 // (white text, straight alpha - see core overlay/StatusOverlay) is blended
 // screen-aligned on top (no warp: it is display UI, not scene content).
 //
-// The warp uses two dense textures (see WarpMap):
-//   warpInvTex (RGBA8) - the INVERSE map, the content path: per output
-//     texel, the CONTENT uv that lands there (rg) plus a coverage flag (b).
-//     The lattice defines the region of the final surface the content is
-//     warped to; uncovered texels (b < 0.5) render black.
+// The warp uses two dense textures (see WarpMap), built at the display's
+// pixel resolution:
+//   warpInvTex (RGB32_FLOAT) - the INVERSE map, the content path: per
+//     output texel, the CONTENT uv that lands there (rg, float) plus a
+//     coverage flag (b). The lattice defines the region of the final
+//     surface the content is warped to; uncovered texels (b < 0.5) render
+//     black.
 //   warpTex (RG8) - the FORWARD map, used only for the warp-preview node
 //     markers (a node's marker sits where its ideal UV lands).
 

@@ -96,18 +96,19 @@ public:
     void removeMediaTexture(Id layerId);
     nvrhi::TextureHandle mediaTexture(Id layerId) const;
 
-    // Same pool for per-display projection warp textures (RG8, square): the
-    // forward map, sampled by the display pass for the warp-preview node
-    // markers (see WarpMap::buildDenseTexture).
-    void ensureWarpTexture(Id displayId, std::uint32_t size);
+    // Same pool for per-display projection warp textures (RG8, sized to the
+    // display; see PlaybackApp): the forward map, sampled by the display
+    // pass for the warp-preview node markers (see
+    // WarpMap::buildDenseTexture).
+    void ensureWarpTexture(Id displayId, std::uint32_t width, std::uint32_t height);
     void updateWarpTexture(Id displayId, const std::vector<unsigned char>& rgData);
     nvrhi::TextureHandle warpTexture(Id displayId) const;
 
-    // Same pool for the per-display dense INVERSE warp textures (RGBA8,
-    // square: rg = content UV, b = coverage; see
+    // Same pool for the per-display dense INVERSE warp textures (RGB32_FLOAT,
+    // sized to the display: R = content u, G = content v, B = coverage; see
     // WarpMap::buildInverseDenseTexture) - the display pass's content map.
-    void ensureWarpInvTexture(Id displayId, std::uint32_t size);
-    void updateWarpInvTexture(Id displayId, const std::vector<unsigned char>& rgbaData);
+    void ensureWarpInvTexture(Id displayId, std::uint32_t width, std::uint32_t height);
+    void updateWarpInvTexture(Id displayId, const std::vector<unsigned char>& rgbData);
     nvrhi::TextureHandle warpInvTexture(Id displayId) const;
 
     // Removes both warp textures (forward + inverse) and their queued
@@ -156,8 +157,8 @@ public:
         // Warp textures for this output; null = no warp (the app also keeps
         // them null when the display's warp is switched off or still the
         // identity). `warp` is the forward map (preview node markers);
-        // `warpInv` is the inverse content map (RGBA8: rg = content UV,
-        // b = coverage) the scene is sampled through.
+        // `warpInv` is the inverse content map (RGB32_FLOAT: R = content u,
+        // G = content v, B = coverage) the scene is sampled through.
         nvrhi::ITexture* warp = nullptr;
         // Status overlay texture (straight-alpha RGBA8); null = no overlay.
         // Drawn screen-aligned on top of the unwarped scene output.

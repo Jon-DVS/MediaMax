@@ -646,12 +646,12 @@ TEST_CASE("Display pass with identity warp texture")
         // and the identity-with-coverage (inverse).
         const WarpMap warp(11, 11);
         std::vector<unsigned char> warpData, invData;
-        warp.buildDenseTexture(warpData, 64);
-        warp.buildInverseDenseTexture(invData, 64);
+        warp.buildDenseTexture(warpData, 64, 64);
+        warp.buildInverseDenseTexture(invData, 64, 64);
         const Id displayId = 7;
-        g.renderer.ensureWarpTexture(displayId, 64);
+        g.renderer.ensureWarpTexture(displayId, 64, 64);
         g.renderer.updateWarpTexture(displayId, warpData);
-        g.renderer.ensureWarpInvTexture(displayId, 64);
+        g.renderer.ensureWarpInvTexture(displayId, 64, 64);
         g.renderer.updateWarpInvTexture(displayId, invData);
         auto warpTex = g.renderer.warpTexture(displayId);
         auto warpInvTex = g.renderer.warpInvTexture(displayId);
@@ -694,12 +694,12 @@ TEST_CASE("Display pass warps the content into the lattice region (inverse map)"
         WarpMap warp(2, 2);
         warp.setPointPosition(0, 0, 0.2f, 0.2f);
         std::vector<unsigned char> warpData, invData;
-        warp.buildDenseTexture(warpData, 64);
-        warp.buildInverseDenseTexture(invData, 64);
+        warp.buildDenseTexture(warpData, 64, 64);
+        warp.buildInverseDenseTexture(invData, 64, 64);
         const Id displayId = 71;
-        g.renderer.ensureWarpTexture(displayId, 64);
+        g.renderer.ensureWarpTexture(displayId, 64, 64);
         g.renderer.updateWarpTexture(displayId, warpData);
-        g.renderer.ensureWarpInvTexture(displayId, 64);
+        g.renderer.ensureWarpInvTexture(displayId, 64, 64);
         g.renderer.updateWarpInvTexture(displayId, invData);
         auto warpTex = g.renderer.warpTexture(displayId);
         auto warpInvTex = g.renderer.warpInvTexture(displayId);

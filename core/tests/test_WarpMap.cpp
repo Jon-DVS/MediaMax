@@ -84,7 +84,7 @@ TEST_CASE("Dense texture encodes the warp")
 
     std::vector<unsigned char> tex;
     const int size = 64;
-    warp.buildDenseTexture(tex, size);
+    warp.buildDenseTexture(tex, size, size);
     CHECK(tex.size() == static_cast<size_t>(size) * size * 2);
 
     // Center texel of the identity-ish region is close to its own uv.
@@ -98,7 +98,7 @@ TEST_CASE("Dense texture encodes the warp")
     // Identity warp texture is the diagonal ramp.
     const WarpMap identity(11, 11);
     std::vector<unsigned char> idTex;
-    identity.buildDenseTexture(idTex, 4);
+    identity.buildDenseTexture(idTex, 4, 4);
     // corner (0,0) texel stores ~ (0.5/4, 0.5/4) = 0.125 -> ~32
     CHECK(idTex[0] == doctest::Approx(32).epsilon(1));
     CHECK(idTex[1] == doctest::Approx(32).epsilon(1));
@@ -217,7 +217,7 @@ TEST_CASE("Spline dense texture follows the spline mode")
 
     std::vector<unsigned char> tex;
     const int size = 64;
-    warp.buildDenseTexture(tex, size);
+    warp.buildDenseTexture(tex, size, size);
     CHECK(tex.size() == static_cast<size_t>(size) * size * 2);
 
     // A texel must store what the spline samples at that point.
@@ -234,24 +234,20 @@ TEST_CASE("Inverse dense texture: identity maps every texel to itself, fully cov
 {
     const WarpMap identity(11, 11);
     std::vector<unsigned char> tex;
-    const int size = 4;
-    identity.buildInverseDenseTexture(tex, size);
-    CHECK(tex.size() == static_cast<size_t>(size) * size * 4);
+    const int w = 4, h = 5; // non-square: u must follow width, v height
+    identity.buildInverseDenseTexture(tex, w, h);
+    CHECK(tex.size() == static_cast<size_t>(w) * h * 12);
 
-    // Each texel stores its own uv, the coverage flag set, alpha 255.
-    for (int y = 0; y < size; ++y)
+    // Each texel stores its own uv exactly (float storage) and coverage 1.
+    const float* f = reinterpret_cast<const float*>(tex.data());
+    for (int y = 0; y < h; ++y)
     {
-        for (int x = 0; x < size; ++x)
+        for (int x = 0; x < w; ++x)
         {
-            const size_t idx = (static_cast<size_t>(y) * size + x) * 4;
-            CHECK(tex[idx] ==
-                  doctest::Approx(static_cast<int>(std::lround(((x + 0.5f) / size) * 255.f)))
-                      .epsilon(1e-3));
-            CHECK(tex[idx + 1] ==
-                  doctest::Approx(static_cast<int>(std::lround(((y + 0.5f) / size) * 255.f)))
-                      .epsilon(1e-3));
-            CHECK(tex[idx + 2] == 255); // covered
-            CHECK(tex[idx + 3] == 255); // alpha
+            const size_t idx = (static_cast<size_t>(y) * w + x) * 3;
+            CHECK(f[idx] == doctest::Approx((x + 0.5f) / w).epsilon(1e-7));
+            CHECK(f[idx + 1] == doctest::Approx((y + 0.5f) / h).epsilon(1e-7));
+            CHECK(f[idx + 2] == 1.0f); // covered
         }
     }
 }
@@ -264,37 +260,39 @@ TEST_CASE("Inverse dense texture: a moved corner shrinks coverage (pockets are u
     warp.setPointPosition(0, 0, 0.15f, 0.15f);
 
     std::vector<unsigned char> tex;
-    const int size = 64;
-    warp.buildInverseDenseTexture(tex, size);
-    CHECK(tex.size() == static_cast<size_t>(size) * size * 4);
+    const int w = 64, h = 64;
+    warp.buildInverseDenseTexture(tex, w, h);
+    CHECK(tex.size() == static_cast<size_t>(w) * h * 12);
 
+    const float* f = reinterpret_cast<const float*>(tex.data());
     const auto texel = [&](int x, int y) {
-        return (static_cast<size_t>(y) * size + x) * 4;
+        return (static_cast<size_t>(y) * w + x) * 3;
     };
 
     // Texels deep in the top-left pocket are uncovered.
-    CHECK(tex[texel(0, 0) + 2] == 0);
-    CHECK(tex[texel(1, 1) + 2] == 0);
+    CHECK(f[texel(0, 0) + 2] == 0.0f);
+    CHECK(f[texel(1, 1) + 2] == 0.0f);
 
     // The moved corner's position (0.15, 0.15) itself is covered and maps
-    // back to the content's top-left corner (the texel just inside the
+    // back toward the content's top-left corner (the texel just inside the
     // lattice is a fraction of a texel away from the corner, so the stored
     // uv is near - not exactly - (0, 0)).
     const size_t cornerIdx = texel(10, 10); // center (10.5/64) ~ (0.164, 0.164)
-    CHECK(tex[cornerIdx + 2] == 255);
-    CHECK(tex[cornerIdx] <= 13);
-    CHECK(tex[cornerIdx + 1] <= 13);
+    CHECK(f[cornerIdx + 2] == 1.0f);
+    CHECK(f[cornerIdx] <= 0.05f);
+    CHECK(f[cornerIdx + 1] <= 0.05f);
 
     // Round trip: a content point q, its warped position p = sample(q), and
-    // the texel at p must store q back (within the texel quantization).
+    // the texel at p must store q back (within the texel quantization -
+    // the stored uv is exact, only the texel-center offset remains).
     const float qu = 0.25f, qv = 0.25f;
     const auto [pu, pv] = warp.sample(qu, qv); // (0.2875, 0.2875) for this lattice
-    const int x = static_cast<int>(pu * size);
-    const int y = static_cast<int>(pv * size);
+    const int x = static_cast<int>(pu * w);
+    const int y = static_cast<int>(pv * h);
     const size_t idx = texel(x, y);
-    CHECK(tex[idx + 2] == 255);
-    CHECK(std::abs(tex[idx] / 255.f - qu) <= 0.02f);
-    CHECK(std::abs(tex[idx + 1] / 255.f - qv) <= 0.02f);
+    CHECK(f[idx + 2] == 1.0f);
+    CHECK(std::abs(f[idx] - qu) <= 0.01f);
+    CHECK(std::abs(f[idx + 1] - qv) <= 0.01f);
 }
 
 TEST_CASE("Inverse dense texture: spline round trip and coverage")
@@ -304,36 +302,39 @@ TEST_CASE("Inverse dense texture: spline round trip and coverage")
     warp.setPointPosition(2, 2, 0.85f, 0.9f);
 
     std::vector<unsigned char> tex;
-    const int size = 64;
-    warp.buildInverseDenseTexture(tex, size);
-    CHECK(tex.size() == static_cast<size_t>(size) * size * 4);
+    const int w = 64, h = 64;
+    warp.buildInverseDenseTexture(tex, w, h);
+    CHECK(tex.size() == static_cast<size_t>(w) * h * 12);
+
+    const float* f = reinterpret_cast<const float*>(tex.data());
 
     // With the top-left node pulled inward, the warped lattice region is a
     // strict subset of the surface: most texels are covered, some are not.
     int covered = 0;
-    for (int y = 0; y < size; ++y)
+    for (int y = 0; y < h; ++y)
     {
-        for (int x = 0; x < size; ++x)
+        for (int x = 0; x < w; ++x)
         {
-            if (tex[(static_cast<size_t>(y) * size + x) * 4 + 2] == 255)
+            if (f[(static_cast<size_t>(y) * w + x) * 3 + 2] == 1.0f)
             {
                 ++covered;
             }
         }
     }
     CHECK(covered > 0);
-    CHECK(covered < size * size);
+    CHECK(covered < w * h);
 
     // Round trip at an interior content point: the texel at p = sample(q)
-    // must store q back (within the texel quantization).
+    // must store q back (within the texel quantization - the stored uv is
+    // exact, only the texel-center offset remains).
     const float qu = 0.3f, qv = 0.3f;
     const auto [pu, pv] = warp.sample(qu, qv);
-    const int x = static_cast<int>(pu * size);
-    const int y = static_cast<int>(pv * size);
-    const size_t idx = (static_cast<size_t>(y) * size + x) * 4;
-    CHECK(tex[idx + 2] == 255);
-    CHECK(std::abs(tex[idx] / 255.f - qu) <= 0.02f);
-    CHECK(std::abs(tex[idx + 1] / 255.f - qv) <= 0.02f);
+    const int x = static_cast<int>(pu * w);
+    const int y = static_cast<int>(pv * h);
+    const size_t idx = (static_cast<size_t>(y) * w + x) * 3;
+    CHECK(f[idx + 2] == 1.0f);
+    CHECK(std::abs(f[idx] - qu) <= 0.01f);
+    CHECK(std::abs(f[idx + 1] - qv) <= 0.01f);
 }
 
 TEST_CASE("The interpolation mode is part of equality")

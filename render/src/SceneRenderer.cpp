@@ -385,7 +385,7 @@ nvrhi::TextureHandle SceneRenderer::mediaTexture(Id layerId) const
     return it == m_MediaTextures.end() ? nullptr : it->second.texture;
 }
 
-void SceneRenderer::ensureWarpTexture(Id displayId, std::uint32_t size)
+void SceneRenderer::ensureWarpTexture(Id displayId, std::uint32_t width, std::uint32_t height)
 {
     std::lock_guard lock(m_UploadMutex);
     if (!m_Device)
@@ -393,7 +393,8 @@ void SceneRenderer::ensureWarpTexture(Id displayId, std::uint32_t size)
         return; // uncreated (or mid device-switch)
     }
     auto it = m_WarpTextures.find(displayId);
-    if (it != m_WarpTextures.end() && it->second.texture && it->second.width == size)
+    if (it != m_WarpTextures.end() && it->second.texture && it->second.width == width &&
+        it->second.height == height)
     {
         return;
     }
@@ -402,11 +403,11 @@ void SceneRenderer::ensureWarpTexture(Id displayId, std::uint32_t size)
         m_WarpTextures.erase(it);
     }
     nvrhi::TextureDesc td;
-    td.setWidth(size).setHeight(size).setFormat(nvrhi::Format::RG8_UNORM)
+    td.setWidth(width).setHeight(height).setFormat(nvrhi::Format::RG8_UNORM)
         .setDimension(nvrhi::TextureDimension::Texture2D)
         .enableAutomaticStateTracking(ResourceStates::ShaderResource)
         .setDebugName("warp " + std::to_string(displayId));
-    m_WarpTextures[displayId] = PooledTexture{m_Device->createTexture(td), size, size};
+    m_WarpTextures[displayId] = PooledTexture{m_Device->createTexture(td), width, height};
 }
 
 void SceneRenderer::updateWarpTexture(Id displayId, const std::vector<unsigned char>& rgData)
@@ -443,7 +444,7 @@ nvrhi::TextureHandle SceneRenderer::warpTexture(Id displayId) const
     return it == m_WarpTextures.end() ? nullptr : it->second.texture;
 }
 
-void SceneRenderer::ensureWarpInvTexture(Id displayId, std::uint32_t size)
+void SceneRenderer::ensureWarpInvTexture(Id displayId, std::uint32_t width, std::uint32_t height)
 {
     std::lock_guard lock(m_UploadMutex);
     if (!m_Device)
@@ -451,7 +452,8 @@ void SceneRenderer::ensureWarpInvTexture(Id displayId, std::uint32_t size)
         return; // uncreated (or mid device-switch)
     }
     auto it = m_WarpInvTextures.find(displayId);
-    if (it != m_WarpInvTextures.end() && it->second.texture && it->second.width == size)
+    if (it != m_WarpInvTextures.end() && it->second.texture && it->second.width == width &&
+        it->second.height == height)
     {
         return;
     }
@@ -459,15 +461,19 @@ void SceneRenderer::ensureWarpInvTexture(Id displayId, std::uint32_t size)
     {
         m_WarpInvTextures.erase(it);
     }
+    // RGB32_FLOAT (12 bytes per texel): R = content u, G = content v,
+    // B = coverage. Float precision keeps the inverse map exact at display
+    // resolution (8-bit storage quantized each texel to 1/255 of the output
+    // size, a multi-pixel wobble at HD/4K).
     nvrhi::TextureDesc td;
-    td.setWidth(size).setHeight(size).setFormat(nvrhi::Format::RGBA8_UNORM)
+    td.setWidth(width).setHeight(height).setFormat(nvrhi::Format::RGB32_FLOAT)
         .setDimension(nvrhi::TextureDimension::Texture2D)
         .enableAutomaticStateTracking(ResourceStates::ShaderResource)
         .setDebugName("warpInv " + std::to_string(displayId));
-    m_WarpInvTextures[displayId] = PooledTexture{m_Device->createTexture(td), size, size};
+    m_WarpInvTextures[displayId] = PooledTexture{m_Device->createTexture(td), width, height};
 }
 
-void SceneRenderer::updateWarpInvTexture(Id displayId, const std::vector<unsigned char>& rgbaData)
+void SceneRenderer::updateWarpInvTexture(Id displayId, const std::vector<unsigned char>& rgbData)
 {
     std::lock_guard lock(m_UploadMutex);
     if (!m_WarpInvTextures.count(displayId))
@@ -476,7 +482,7 @@ void SceneRenderer::updateWarpInvTexture(Id displayId, const std::vector<unsigne
     }
     m_PendingUploads.push_back(PendingUpload{
         displayId, PendingUpload::Kind::WarpInv,
-        std::vector<std::uint8_t>(rgbaData.begin(), rgbaData.end())});
+        std::vector<std::uint8_t>(rgbData.begin(), rgbData.end())});
 }
 
 nvrhi::TextureHandle SceneRenderer::warpInvTexture(Id displayId) const
@@ -607,9 +613,12 @@ void SceneRenderer::recordFrame(nvrhi::ICommandList* cmd, const FrameInput& fram
             {
                 continue;
             }
-            const size_t expected = up.kind == PendingUpload::Kind::Warp
-                ? static_cast<size_t>(it->second.width) * it->second.height * 2 // RG8
-                : static_cast<size_t>(it->second.width) * it->second.height * 4; // everything else: RGBA8
+            const size_t expected =
+                up.kind == PendingUpload::Kind::Warp
+                    ? static_cast<size_t>(it->second.width) * it->second.height * 2 // RG8
+                    : up.kind == PendingUpload::Kind::WarpInv
+                          ? static_cast<size_t>(it->second.width) * it->second.height * 12 // RGB32_FLOAT
+                          : static_cast<size_t>(it->second.width) * it->second.height * 4; // everything else: RGBA8
             if (up.data.size() != expected)
             {
                 continue; // size mismatch (texture was re-created); drop
