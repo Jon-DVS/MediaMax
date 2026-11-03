@@ -5,6 +5,7 @@
 #include <cstddef>
 
 #include "mediamax/math/Rect.h"
+#include "mediamax/media/VideoConversion.h"
 
 namespace mediamax::media
 {
@@ -144,9 +145,31 @@ bool makeThumbnail(const MediaSourceFactory& factory, const std::string& path,
         error = "could not decode a frame";
         return false;
     }
+    // YUV frames (a source that did not honor the size hint) go through the
+    // CPU reference converter - the thumbnail wants RGBA pixels either way
+    // (the hinted FFmpeg path already produces RGBA; this covers any
+    // source that ignores the hint).
+    std::vector<std::uint8_t> rgba;
+    if (frame.format != VideoPixelFormat::RGBA)
+    {
+        if (!convertYuvFrameToRgba(frame, rgba))
+        {
+            error = "could not convert the decoded frame to RGBA";
+            return false;
+        }
+    }
+    else if (frame.planes.empty())
+    {
+        error = "decoded frame is empty";
+        return false;
+    }
+    else
+    {
+        rgba = std::move(frame.planes[0]);
+    }
     const std::size_t expectedBytes =
         static_cast<std::size_t>(frame.width) * frame.height * 4;
-    if (frame.width == 0 || frame.height == 0 || frame.rgba.size() < expectedBytes)
+    if (frame.width == 0 || frame.height == 0 || rgba.size() < expectedBytes)
     {
         error = "decoded frame is empty";
         return false;
@@ -155,12 +178,12 @@ bool makeThumbnail(const MediaSourceFactory& factory, const std::string& path,
     if (static_cast<int>(frame.width) == target.width &&
         static_cast<int>(frame.height) == target.height)
     {
-        outRgba = std::move(frame.rgba);
+        outRgba = std::move(rgba);
     }
     else
     {
         outRgba.assign(static_cast<std::size_t>(target.width) * target.height * 4, 0);
-        bilinearScaleRgba(frame.rgba.data(), static_cast<int>(frame.width),
+        bilinearScaleRgba(rgba.data(), static_cast<int>(frame.width),
                           static_cast<int>(frame.height), outRgba.data(), target.width,
                           target.height);
     }

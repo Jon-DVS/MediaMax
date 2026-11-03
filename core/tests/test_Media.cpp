@@ -457,8 +457,9 @@ TEST_CASE("FFmpeg: probe and decode a generated BMP (image media)")
 
     // Verify a few decoded pixels (BGR in the file -> RGBA after decode).
     auto pixelAt = [&frame](int x, int y) -> std::array<std::uint8_t, 4> {
+        const std::vector<std::uint8_t>& rgba = frame.planes[0];
         const size_t i = (static_cast<size_t>(y) * frame.width + x) * 4;
-        return {frame.rgba[i], frame.rgba[i + 1], frame.rgba[i + 2], frame.rgba[i + 3]};
+        return {rgba[i], rgba[i + 1], rgba[i + 2], rgba[i + 3]};
     };
     const auto p00 = pixelAt(0, 0);
     CHECK(p00[0] == 0);     // r = 0*32
@@ -891,19 +892,23 @@ void checkHapFile(const char* name, const char* path)
     REQUIRE(source != nullptr);
 
     // Decode the first few frames: rgb0 must come out as straight, fully
-    // opaque RGBA. (The clip fades in from black, so the opening frames are
-    // legitimately black - the non-black check happens after the seek.)
+    // opaque RGBA (the HAP decoder outputs rgb0, which takes the swscale
+    // path - not the YUV plane fast path). (The clip fades in from black,
+    // so the opening frames are legitimately black - the non-black check
+    // happens after the seek.)
     VideoFrame frame;
     for (int i = 0; i < 3; ++i)
     {
         REQUIRE(source->nextVideoFrame(frame, 10000));
         CHECK(frame.width == 3840);
         CHECK(frame.height == 2160);
-        CHECK(frame.rgba.size() == static_cast<std::size_t>(3840) * 2160 * 4);
+        CHECK(frame.format == VideoPixelFormat::RGBA);
+        CHECK(frame.planes.size() == 1);
+        CHECK(frame.planes[0].size() == static_cast<std::size_t>(3840) * 2160 * 4);
         bool opaque = true;
-        for (std::size_t p = 3; p < frame.rgba.size(); p += 4)
+        for (std::size_t p = 3; p < frame.planes[0].size(); p += 4)
         {
-            if (frame.rgba[p] != 255)
+            if (frame.planes[0][p] != 255)
             {
                 opaque = false;
             }
@@ -921,9 +926,9 @@ void checkHapFile(const char* name, const char* path)
     CHECK(frame.time >= Time::fromSeconds(9.0));
     CHECK(frame.time < Time::fromSeconds(30.0));
     std::uint64_t luma = 0;
-    for (std::size_t p = 0; p < frame.rgba.size(); p += 4)
+    for (std::size_t p = 0; p < frame.planes[0].size(); p += 4)
     {
-        luma += frame.rgba[p] + frame.rgba[p + 1] + frame.rgba[p + 2];
+        luma += frame.planes[0][p] + frame.planes[0][p + 1] + frame.planes[0][p + 2];
     }
     CHECK(luma > 0);
 

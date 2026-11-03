@@ -1,14 +1,17 @@
 // FFmpeg implementation of IMediaSource and file probing.
 //
-// One AVFormatContext per source. Video is decoded and scaled to RGBA8;
-// audio is decoded and resampled to interleaved float32. Decoded frames are
-// buffered in small in-memory queues so the consumer (media pump) can pull
-// with a timeout without blocking on file IO.
+// Video is decoded; common YUV 4:2:0 content (8/10-bit, even sizes) is
+// emitted as unconverted planes (the YUV -> RGB conversion happens
+// downstream - see VideoConversion.h and setupVideo), everything else is
+// scaled to RGBA8 by swscale. Audio is decoded and resampled to interleaved
+// float32. Decoded frames are buffered in small in-memory queues so the
+// consumer (media pump) can pull with a timeout without blocking on file IO.
 
 #include "mediamax/media/FFmpegSupport.h"
 
 #include <algorithm>
 #include <chrono>
+#include <cstring>
 #include <deque>
 #include <thread>
 #include <vector>
@@ -86,6 +89,40 @@ FrameRate frameRateFromRational(const AVRational& r)
         return FrameRate::of(r.num, r.den);
     }
     return FrameRate::fps30();
+}
+
+// Copies one decoded video plane (row pitch `srcStride` bytes) into a
+// tightly packed buffer (top-left origin). For 10-bit (little-endian)
+// sources each sample is scaled to 16-bit UNORM storage in the same pass -
+// sample * 65535 / 1023, so 1023 maps to 65535 exactly (the same mapping as
+// VideoConversion.h's scalePlane10To16; the one-pass form here avoids a
+// second memory round-trip per plane at 4K).
+void copyVideoPlane(const uint8_t* src, int srcStride, int width, int height, bool is10Bit,
+                    std::vector<std::uint8_t>& out)
+{
+    const std::size_t rowBytes = static_cast<std::size_t>(width) * (is10Bit ? 2u : 1u);
+    out.resize(static_cast<std::size_t>(height) * rowBytes);
+    for (int y = 0; y < height; ++y)
+    {
+        const uint8_t* row = src + static_cast<std::size_t>(y) * srcStride;
+        std::uint8_t* dst = out.data() + static_cast<std::size_t>(y) * rowBytes;
+        if (!is10Bit)
+        {
+            std::memcpy(dst, row, rowBytes);
+            continue;
+        }
+        const std::size_t samples = static_cast<std::size_t>(width);
+        for (std::size_t x = 0; x < samples; ++x)
+        {
+            // Explicit little-endian load (p10le semantics), no pointer
+            // casts.
+            const std::uint16_t v =
+                static_cast<std::uint16_t>(row[2 * x] | (row[2 * x + 1] << 8));
+            const std::uint32_t scaled = static_cast<std::uint32_t>(v) * 65535u / 1023u;
+            dst[2 * x] = static_cast<std::uint8_t>(scaled & 0xFFu);
+            dst[2 * x + 1] = static_cast<std::uint8_t>((scaled >> 8) & 0xFFu);
+        }
+    }
 }
 
 bool isImageCodec(int codecId)
@@ -230,6 +267,10 @@ private:
     void flushDecoders();
     void decodeVideoFrame(const AVFrame& frame);
     void decodeAudioFrame(const AVFrame& frame);
+    // The YUV color metadata of a frame (frame-level first, stream-level
+    // second, then the height-based default - see the body).
+    YuvColorSpace resolveColorSpace(const AVFrame* frame) const;
+    bool resolveFullRange(const AVFrame* frame) const;
 
     MediaMetadata m_Metadata;
 
@@ -268,8 +309,17 @@ private:
     int m_VideoInFlightCap = 32;
     int m_AudioInFlightCap = 32;
 
+    // The YUV plane fast path's format for native decoding (see
+    // setupVideo): RGBA = the generic swscale-to-RGBA path (and always the
+    // thumbnail hint path), YUV420P / YUV420P10LE = the decoded planes are
+    // copied through unconverted and the YUV -> RGB conversion happens
+    // downstream (VideoConversion.h is the CPU reference of the GPU layer
+    // pass's math).
+    VideoPixelFormat m_PlaneFormat = VideoPixelFormat::RGBA;
+
     // Current sws output size (the decode resolution); see
-    // setVideoOutputSizeHint.
+    // setVideoOutputSizeHint. Zero while the YUV plane fast path is active
+    // (no scaler exists then).
     int m_SwsOutWidth = 0;
     int m_SwsOutHeight = 0;
 
@@ -464,6 +514,33 @@ bool FFmpegSource::setupVideo(std::string& error)
     // The resolved (auto) thread count drives the in-flight cap; see
     // kInFlightReorderMargin.
     m_VideoInFlightCap = m_VideoCodec->thread_count + kInFlightReorderMargin;
+
+    // Output path decision. Common YUV 4:2:0 content (H.264/HEVC/AV1, 8- or
+    // 10-bit, even sizes) takes the plane fast path: the decoded planes are
+    // copied through unconverted (see decodeVideoFrame) and the YUV -> RGB
+    // conversion happens downstream - this skips a full-resolution swscale
+    // conversion per frame on the decode thread (measured ~2-5 ms/frame at
+    // 4K, the pipeline bottleneck for HEVC). Everything else (RGB0, 4:2:2,
+    // 4:4:4, odd sizes, ...) keeps the swscale-to-RGBA path.
+    const bool evenSize = (m_VideoCodec->width & 1) == 0 && (m_VideoCodec->height & 1) == 0;
+    m_PlaneFormat = VideoPixelFormat::RGBA;
+    if (evenSize)
+    {
+        if (m_VideoCodec->pix_fmt == AV_PIX_FMT_YUV420P)
+        {
+            m_PlaneFormat = VideoPixelFormat::YUV420P;
+        }
+        else if (m_VideoCodec->pix_fmt == AV_PIX_FMT_YUV420P10LE)
+        {
+            m_PlaneFormat = VideoPixelFormat::YUV420P10LE;
+        }
+    }
+    if (m_PlaneFormat != VideoPixelFormat::RGBA)
+    {
+        // No scaler needed: m_Sws stays null and m_SwsOutWidth/Height stay
+        // 0 (setVideoOutputSizeHint switches back to the sws path).
+        return true;
+    }
 
     // Output-format choice (the RGB0 no-op fast path for RGB0 sources):
     // the playback pump decodes at the native size, so this initial
@@ -983,12 +1060,11 @@ bool FFmpegSource::nextAudioFrame(AudioFrame& out, std::uint32_t timeoutMs)
     return true;
 }
 
-// Helper: decode one video AVFrame into an RGBA VideoFrame and queue it.
 void FFmpegSource::setVideoOutputSizeHint(Size2i onScreenSize)
 {
-    if (!m_VideoCodec || !m_Sws || !onScreenSize.valid())
+    if (!m_VideoCodec || !onScreenSize.valid())
     {
-        return; // no scalable path (yet), or no hint
+        return; // no video, or no hint
     }
     // Decode at min(native, on-screen) per axis: the display never shows
     // more pixels than the layer's on-screen size, so decoding the rest
@@ -1010,6 +1086,11 @@ void FFmpegSource::setVideoOutputSizeHint(Size2i onScreenSize)
     {
         return; // idempotent while the hint matches the current output
     }
+    // The hint always means "swscale to RGBA at this size" (the thumbnail
+    // path): it switches the source off the YUV plane fast path if that is
+    // active (the scaler is created then; sws_freeContext(nullptr) is a
+    // no-op).
+    m_PlaneFormat = VideoPixelFormat::RGBA;
     // Scaler output format: RGBA, except when the decoder already outputs
     // RGB0 (the HAP decoder). RGB0 and RGBA have an identical byte layout
     // (packed RGBA, A=0xFF), so for those sources the "conversion" is a
@@ -1037,30 +1118,61 @@ void FFmpegSource::setVideoOutputSizeHint(Size2i onScreenSize)
     m_VideoQueue.clear();
 }
 
+// Helper: decode one video AVFrame into a VideoFrame and queue it (YUV
+// planes through the fast path, RGBA through swscale - see m_PlaneFormat).
 void FFmpegSource::decodeVideoFrame(const AVFrame& frame)
 {
-    // The scaler may output below the native resolution (the size hint,
-    // see setVideoOutputSizeHint - the thumbnail path); the frame is sized
-    // to the scaler's output, not the decoder's. The playback path never
-    // hints, so this is the native size there.
-    const int outW = m_SwsOutWidth > 0 ? m_SwsOutWidth : frame.width;
-    const int outH = m_SwsOutHeight > 0 ? m_SwsOutHeight : frame.height;
-
     VideoFrame vf;
-    vf.width = static_cast<std::uint32_t>(outW);
-    vf.height = static_cast<std::uint32_t>(outH);
     vf.time = toTime(frame.pts, m_VideoStream->time_base);
-    vf.rgba.resize(static_cast<size_t>(outW) * outH * 4);
 
-    uint8_t* dst[4] = {vf.rgba.data(), nullptr, nullptr, nullptr};
-    int dstStride[4] = {outW * 4, 0, 0, 0};
-    // sws_scale returns the number of OUTPUT lines scaled (dst height);
-    // the input height is frame.height, which differs when the scaler
-    // downscales (the size hint).
-    if (sws_scale(m_Sws, frame.data, frame.linesize, 0, frame.height, dst, dstStride) != outH)
+    if (m_PlaneFormat == VideoPixelFormat::YUV420P ||
+        m_PlaneFormat == VideoPixelFormat::YUV420P10LE)
     {
-        Logger::instance().debug("sws_scale failed for video frame");
-        return;
+        // The YUV plane fast path: copy the decoded planes through
+        // unconverted (10-bit samples scaled to 16-bit UNORM storage, see
+        // copyVideoPlane) and attach the color metadata. The YUV -> RGB
+        // conversion happens downstream - the media pump converts on the
+        // CPU for now; the GPU layer pass takes over once plane textures
+        // land (see VideoConversion.h).
+        const bool is10Bit = m_PlaneFormat == VideoPixelFormat::YUV420P10LE;
+        vf.width = static_cast<std::uint32_t>(frame.width);
+        vf.height = static_cast<std::uint32_t>(frame.height);
+        vf.format = m_PlaneFormat;
+        vf.colorSpace = resolveColorSpace(&frame);
+        vf.fullRange = resolveFullRange(&frame);
+        vf.planes.resize(3);
+        copyVideoPlane(frame.data[0], frame.linesize[0], frame.width, frame.height, is10Bit,
+                       vf.planes[0]);
+        copyVideoPlane(frame.data[1], frame.linesize[1], frame.width / 2, frame.height / 2,
+                       is10Bit, vf.planes[1]);
+        copyVideoPlane(frame.data[2], frame.linesize[2], frame.width / 2, frame.height / 2,
+                       is10Bit, vf.planes[2]);
+    }
+    else
+    {
+        // The swscale path (RGBA output): the scaler may output below the
+        // native resolution (the size hint, see setVideoOutputSizeHint -
+        // the thumbnail path); the frame is sized to the scaler's output,
+        // not the decoder's.
+        const int outW = m_SwsOutWidth > 0 ? m_SwsOutWidth : frame.width;
+        const int outH = m_SwsOutHeight > 0 ? m_SwsOutHeight : frame.height;
+
+        vf.width = static_cast<std::uint32_t>(outW);
+        vf.height = static_cast<std::uint32_t>(outH);
+        vf.format = VideoPixelFormat::RGBA;
+        vf.planes.resize(1);
+        vf.planes[0].resize(static_cast<size_t>(outW) * outH * 4);
+
+        uint8_t* dst[4] = {vf.planes[0].data(), nullptr, nullptr, nullptr};
+        int dstStride[4] = {outW * 4, 0, 0, 0};
+        // sws_scale returns the number of OUTPUT lines scaled (dst height);
+        // the input height is frame.height, which differs when the scaler
+        // downscales (the size hint).
+        if (sws_scale(m_Sws, frame.data, frame.linesize, 0, frame.height, dst, dstStride) != outH)
+        {
+            Logger::instance().debug("sws_scale failed for video frame");
+            return;
+        }
     }
 
     if (m_VideoQueue.size() >= kMaxQueuedVideoFrames && !m_VideoFinished)
@@ -1079,6 +1191,44 @@ void FFmpegSource::decodeVideoFrame(const AVFrame& frame)
         ++m_VideoQueueDropped;
     }
     m_VideoQueue.push_back(std::move(vf));
+}
+
+YuvColorSpace FFmpegSource::resolveColorSpace(const AVFrame* frame) const
+{
+    // Frame-level metadata first, then the stream-level, then the standard
+    // default (BT.709 at 720 lines or more, BT.601 below - the HD/SD
+    // convention the container usually implies).
+    AVColorSpace space = frame ? frame->colorspace : AVCOL_SPC_UNSPECIFIED;
+    if (space == AVCOL_SPC_UNSPECIFIED && m_VideoStream)
+    {
+        space = m_VideoStream->codecpar->color_space;
+    }
+    switch (space)
+    {
+        case AVCOL_SPC_BT709:
+            return YuvColorSpace::BT709;
+        case AVCOL_SPC_SMPTE170M:
+        case AVCOL_SPC_BT470BG:
+            return YuvColorSpace::BT601;
+        case AVCOL_SPC_BT2020_NCL:
+            return YuvColorSpace::BT2020;
+        default:
+            break;
+    }
+    const int height = m_VideoCodec ? m_VideoCodec->height : 0;
+    return height >= 720 ? YuvColorSpace::BT709 : YuvColorSpace::BT601;
+}
+
+bool FFmpegSource::resolveFullRange(const AVFrame* frame) const
+{
+    // JPEG (0-255) range if the frame or the stream says so; the video
+    // default is limited (16-235).
+    AVColorRange range = frame ? frame->color_range : AVCOL_RANGE_UNSPECIFIED;
+    if (range == AVCOL_RANGE_UNSPECIFIED && m_VideoStream)
+    {
+        range = m_VideoStream->codecpar->color_range;
+    }
+    return range == AVCOL_RANGE_JPEG;
 }
 
 // Helper: decode one audio AVFrame, resample to interleaved float32, and

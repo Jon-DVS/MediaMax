@@ -38,6 +38,7 @@
 
 #ifdef MEDIAMAX_HAS_FFMPEG
 #include "mediamax/media/FFmpegSupport.h"
+#include "mediamax/media/VideoConversion.h"
 #endif
 
 using namespace mediamax;
@@ -959,6 +960,9 @@ TEST_CASE("Final render: decoded video and image media reach the display")
         std::string error;
 
         // --- Decode (the same source factory the playback engine installs).
+        // The libx264 file decodes through the YUV plane fast path (even
+        // 4:2:0), so convert it to RGBA with the CPU reference - exactly
+        // what the media pump does before the GPU conversion path lands.
         auto videoSource = ffmpeg::createSource(videoPath.string(), error);
         REQUIRE(videoSource != nullptr);
         VideoFrame videoFrame;
@@ -966,6 +970,9 @@ TEST_CASE("Final render: decoded video and image media reach the display")
         REQUIRE(videoSource->nextVideoFrame(videoFrame, 2000));
         CHECK(videoFrame.width == 64);
         CHECK(videoFrame.height == 64);
+        CHECK(videoFrame.format == VideoPixelFormat::YUV420P);
+        std::vector<std::uint8_t> videoRgba;
+        REQUIRE(convertYuvFrameToRgba(videoFrame, videoRgba));
         videoSource.reset(); // release the file handle (Windows keeps it open)
 
         auto imageSource = ffmpeg::createSource(imagePath.string(), error);
@@ -974,6 +981,7 @@ TEST_CASE("Final render: decoded video and image media reach the display")
         REQUIRE(imageSource->nextVideoFrame(imageFrame, 2000));
         CHECK(imageFrame.width == 64);
         CHECK(imageFrame.height == 64);
+        CHECK(imageFrame.format == VideoPixelFormat::RGBA);
         imageSource.reset();
         std::filesystem::remove(videoPath, ec);
         std::filesystem::remove(imagePath, ec);
@@ -982,9 +990,9 @@ TEST_CASE("Final render: decoded video and image media reach the display")
         const Id videoLayerId = 100;
         const Id imageLayerId = 101;
         g.renderer.ensureMediaTexture(videoLayerId, 64, 64);
-        g.renderer.updateMediaTexture(videoLayerId, videoFrame.rgba);
+        g.renderer.updateMediaTexture(videoLayerId, std::move(videoRgba));
         g.renderer.ensureMediaTexture(imageLayerId, 64, 64);
-        g.renderer.updateMediaTexture(imageLayerId, imageFrame.rgba);
+        g.renderer.updateMediaTexture(imageLayerId, std::move(imageFrame.planes[0]));
 
         // --- Compose: background color, the video quad (left half of the
         //     scene), the image quad (right half); read back the display

@@ -63,7 +63,9 @@ bool TestPatternSource::nextVideoFrame(VideoFrame& out, std::uint32_t /*timeoutM
     out.width = m_Metadata.width;
     out.height = m_Metadata.height;
     out.time = m_Current;
-    renderFrameTo(m_Current, out.rgba);
+    out.format = VideoPixelFormat::RGBA;
+    out.planes.resize(1);
+    renderFrameTo(m_Current, out.planes[0]);
 
     m_Current = m_Current + Time::fromFrames(1, m_Metadata.frameRate);
     return true;
