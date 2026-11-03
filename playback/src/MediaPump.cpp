@@ -4,7 +4,6 @@
 #include <chrono>
 #include <thread>
 
-#include "mediamax/media/VideoConversion.h"
 #include "mediamax/util/Logger.h"
 
 namespace mediamax
@@ -44,34 +43,6 @@ std::int64_t nanosSince(std::chrono::steady_clock::time_point from)
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
                std::chrono::steady_clock::now() - from)
         .count();
-}
-
-// The YUV plane fast path (FFmpegSource) emits unconverted YUV420P(10LE)
-// frames. The render path still consumes RGBA8, so the decode worker
-// converts them here, on the decode thread (the same place swscale used to
-// run) - the downstream queue/upload/texture pipeline is untouched. Once
-// the layer pass converts on the GPU (plane textures), this step goes away
-// and the worker passes the planes through. Returns false for an
-// unexpected format the converter cannot handle (the frame is dropped).
-bool convertFrameToRgba(VideoFrame& frame)
-{
-    if (frame.format == VideoPixelFormat::RGBA)
-    {
-        return true;
-    }
-    std::vector<std::uint8_t> rgba;
-    if (!convertYuvFrameToRgba(frame, rgba))
-    {
-        return false;
-    }
-    VideoFrame out;
-    out.width = frame.width;
-    out.height = frame.height;
-    out.format = VideoPixelFormat::RGBA;
-    out.time = frame.time;
-    out.planes.push_back(std::move(rgba));
-    frame = std::move(out);
-    return true;
 }
 
 } // namespace
@@ -592,10 +563,7 @@ void MediaPump::decodeChannel(Worker& worker, Channel& ch, const LayerTarget& ta
                     {
                         break; // EOF or decoder not ready yet
                     }
-                    if (convertFrameToRgba(frame))
-                    {
-                        decoded.push_back(std::move(frame));
-                    }
+                    decoded.push_back(std::move(frame));
                 }
                 lock.lock();
                 ch.decodeCalls += calls;
@@ -771,10 +739,7 @@ MediaPump::preDecodeUnlocked(IMediaSource& source, const LayerTarget& target,
             {
                 break; // EOF
             }
-            if (convertFrameToRgba(frame))
-            {
-                result.tailVideo.push_back(std::move(frame));
-            }
+            result.tailVideo.push_back(std::move(frame));
         }
     }
 
@@ -832,11 +797,8 @@ MediaPump::preDecodeUnlocked(IMediaSource& source, const LayerTarget& target,
         }
         // Staged, not yet merged: a delivery before the wrap must not be
         // able to select these (they are far behind the pre-wrap target).
-        if (convertFrameToRgba(frame))
-        {
-            result.startVideo.push_back(std::move(frame));
-            ++frames;
-        }
+        result.startVideo.push_back(std::move(frame));
+        ++frames;
     }
     Logger::instance().debug(
         "predecode: staged {} start frames, drained {} tail video / {} tail audio blocks",
@@ -909,15 +871,17 @@ nvrhi::TextureHandle MediaPump::deliverVideo(const LayerTarget& target)
             if (!channel->hasDelivered || chosen->time != channel->lastDeliveredTime)
             {
                 const auto u0 = std::chrono::steady_clock::now();
-                m_Renderer.ensureMediaTexture(target.layerId, chosen->width, chosen->height);
+                m_Renderer.ensureMediaTexture(target.layerId, chosen->width, chosen->height,
+                                              chosen->format);
                 const auto u1 = std::chrono::steady_clock::now();
                 // The pixels move into the upload queue (no 33 MB copy): the
                 // frame stays in the channel queue for time bookkeeping only,
                 // and the same time is never uploaded twice (the guard above).
-                // The worker already normalized the frame to RGBA (the YUV
-                // fast path converts on the decode thread), so plane 0 is the
-                // RGBA buffer the renderer uploads.
-                m_Renderer.updateMediaTexture(target.layerId, std::move(chosen->planes[0]));
+                // The planes go to the GPU unconverted - the layer pass
+                // converts YUV -> RGB in the shader (the CPU reference is
+                // core/src/media/VideoConversion.cpp; the math is in
+                // render/shaders/layer.frag).
+                m_Renderer.updateMediaTexture(target.layerId, std::move(*chosen));
                 const std::int64_t un = nanosSince(u0);
                 const std::int64_t ue =
                     std::chrono::duration_cast<std::chrono::nanoseconds>(u1 - u0).count();

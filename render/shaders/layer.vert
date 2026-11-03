@@ -13,6 +13,11 @@ layout(push_constant) uniform LayerPush
     int blendMode;  // mediamax::BlendMode ordinal
     vec4 layerColor; // solid color of color layers
     int useColor;   // 1 => color layer, 0 => media texture
+    float mediaSizeX; // YUV: media (luma) texture size in pixels
+    float mediaSizeY;
+    int mediaFormat; // mediamax::VideoPixelFormat ordinal (0 = RGBA)
+    int colorSpace;  // mediamax::YuvColorSpace ordinal (0 = BT601, 1 = BT709, 2 = BT2020)
+    int fullRange;   // 0 = limited (video), 1 = full (JPEG)
 } pc;
 
 layout(location = 0) in vec2 a_pos; // output-space pixels

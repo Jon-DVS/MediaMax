@@ -49,10 +49,14 @@ nvrhi::BindingLayoutHandle makeLayerLayout(nvrhi::DeviceHandle device)
     // leave the shader's binding 2 unbound (undefined, zero samples).
     // Override the sampler offset to 0 so slot N maps to binding N.
     desc.setBindingOffsets(nvrhi::VulkanBindingOffsets().setSamplerOffset(0));
-    desc.addItem(nvrhi::BindingLayoutItem::Texture_SRV(0));
-    desc.addItem(nvrhi::BindingLayoutItem::Texture_SRV(1));
+    desc.addItem(nvrhi::BindingLayoutItem::Texture_SRV(0)); // media (RGBA or YUV luma)
+    desc.addItem(nvrhi::BindingLayoutItem::Texture_SRV(1)); // scene
     desc.addItem(nvrhi::BindingLayoutItem::Sampler(2));
-    desc.addItem(nvrhi::BindingLayoutItem::PushConstants(3, sizeof(SceneRenderer::LayerPush)));
+    desc.addItem(nvrhi::BindingLayoutItem::Texture_SRV(3)); // YUV U/Cb plane
+    desc.addItem(nvrhi::BindingLayoutItem::Texture_SRV(4)); // YUV V/Cr plane
+    // Push constants live in the (single) Vulkan push-constant range; the
+    // slot number does not map to a GLSL binding.
+    desc.addItem(nvrhi::BindingLayoutItem::PushConstants(5, sizeof(SceneRenderer::LayerPush)));
     return device->createBindingLayout(desc);
 }
 
@@ -329,7 +333,8 @@ void SceneRenderer::reset()
 
 // --- Texture pool ---------------------------------------------------------------
 
-void SceneRenderer::ensureMediaTexture(Id layerId, std::uint32_t width, std::uint32_t height)
+void SceneRenderer::ensureMediaTexture(Id layerId, std::uint32_t width, std::uint32_t height,
+                                       VideoPixelFormat format)
 {
     std::lock_guard lock(m_UploadMutex);
     if (!m_Device)
@@ -339,31 +344,92 @@ void SceneRenderer::ensureMediaTexture(Id layerId, std::uint32_t width, std::uin
     }
     auto it = m_MediaTextures.find(layerId);
     if (it != m_MediaTextures.end() && it->second.texture && it->second.width == width &&
-        it->second.height == height)
+        it->second.height == height && it->second.format == format)
     {
         return;
     }
     if (it != m_MediaTextures.end())
     {
-        m_MediaTextures.erase(it); // size changed; the GPU keeps the old resource alive
+        m_MediaTextures.erase(it); // size/format changed; the GPU keeps the old resource alive
     }
-    nvrhi::TextureDesc td;
-    td.setWidth(width).setHeight(height).setFormat(nvrhi::Format::RGBA8_UNORM)
-        .setDimension(nvrhi::TextureDimension::Texture2D)
-        .enableAutomaticStateTracking(ResourceStates::ShaderResource)
-        .setDebugName("media " + std::to_string(layerId));
-    m_MediaTextures[layerId] = PooledTexture{m_Device->createTexture(td), width, height};
+    const bool isYuv = format == VideoPixelFormat::YUV420P ||
+                       format == VideoPixelFormat::YUV420P10LE;
+    // 8-bit YUV planes are R8, 10-bit R16_UNORM (the samples are scaled to
+    // 16-bit storage at copy time, see MediaTypes.h); the shader samples
+    // both through the same float pipeline.
+    const nvrhi::Format planeFormat =
+        isYuv ? (format == VideoPixelFormat::YUV420P10LE ? nvrhi::Format::R16_UNORM
+                                                         : nvrhi::Format::R8_UNORM)
+              : nvrhi::Format::RGBA8_UNORM;
+    auto makeTex = [this, layerId, planeFormat](std::uint32_t w, std::uint32_t h,
+                                                const char* name) {
+        nvrhi::TextureDesc td;
+        td.setWidth(w).setHeight(h).setFormat(planeFormat)
+            .setDimension(nvrhi::TextureDimension::Texture2D)
+            .enableAutomaticStateTracking(ResourceStates::ShaderResource)
+            .setDebugName("media " + std::to_string(layerId) + " " + name);
+        return m_Device->createTexture(td);
+    };
+    PooledTexture entry;
+    entry.width = width;
+    entry.height = height;
+    entry.format = format;
+    entry.texture = makeTex(width, height, isYuv ? "y" : "rgba");
+    if (isYuv)
+    {
+        // The 4:2:0 contract: even luma size, half-resolution chroma.
+        entry.plane1 = makeTex(width / 2, height / 2, "u");
+        entry.plane2 = makeTex(width / 2, height / 2, "v");
+    }
+    m_MediaTextures[layerId] = std::move(entry);
+}
+
+void SceneRenderer::updateMediaTexture(Id layerId, VideoFrame frame)
+{
+    std::lock_guard lock(m_UploadMutex);
+    auto poolIt = m_MediaTextures.find(layerId);
+    if (poolIt == m_MediaTextures.end())
+    {
+        return;
+    }
+    // The color metadata of the queued frame goes into the pool now (not
+    // when the flush applies the pixels): consumers read it through
+    // mediaTextureSet before the flush runs (the app builds its layer draws
+    // before recordFrame). A frame's matrix/range is a constant of its
+    // asset, so this always describes the frame that lands in the texture.
+    poolIt->second.colorSpace = frame.colorSpace;
+    poolIt->second.fullRange = frame.fullRange;
+    PendingUpload up;
+    up.id = layerId;
+    up.kind = PendingUpload::Kind::Media;
+    up.format = frame.format;
+    if (frame.format == VideoPixelFormat::RGBA)
+    {
+        if (frame.planes.empty())
+        {
+            return;
+        }
+        up.data = std::move(frame.planes[0]);
+    }
+    else
+    {
+        if (frame.planes.size() < 3)
+        {
+            return;
+        }
+        up.data = std::move(frame.planes[0]);
+        up.data1 = std::move(frame.planes[1]);
+        up.data2 = std::move(frame.planes[2]);
+    }
+    m_PendingUploads.push_back(std::move(up));
 }
 
 void SceneRenderer::updateMediaTexture(Id layerId, std::vector<std::uint8_t> rgbaData)
 {
-    std::lock_guard lock(m_UploadMutex);
-    if (!m_MediaTextures.count(layerId))
-    {
-        return;
-    }
-    m_PendingUploads.push_back(
-        PendingUpload{layerId, PendingUpload::Kind::Media, std::move(rgbaData)});
+    VideoFrame frame;
+    frame.format = VideoPixelFormat::RGBA;
+    frame.planes.push_back(std::move(rgbaData));
+    updateMediaTexture(layerId, std::move(frame));
 }
 
 void SceneRenderer::removeMediaTexture(Id layerId)
@@ -383,6 +449,27 @@ nvrhi::TextureHandle SceneRenderer::mediaTexture(Id layerId) const
     std::lock_guard lock(m_UploadMutex);
     auto it = m_MediaTextures.find(layerId);
     return it == m_MediaTextures.end() ? nullptr : it->second.texture;
+}
+
+SceneRenderer::MediaTextureSet SceneRenderer::mediaTextureSet(Id layerId) const
+{
+    std::lock_guard lock(m_UploadMutex);
+    MediaTextureSet set;
+    auto it = m_MediaTextures.find(layerId);
+    if (it == m_MediaTextures.end())
+    {
+        return set;
+    }
+    const PooledTexture& t = it->second;
+    set.texture = t.texture;
+    set.plane1 = t.plane1;
+    set.plane2 = t.plane2;
+    set.format = t.format;
+    set.colorSpace = t.colorSpace;
+    set.fullRange = t.fullRange;
+    set.width = t.width;
+    set.height = t.height;
+    return set;
 }
 
 void SceneRenderer::ensureWarpTexture(Id displayId, std::uint32_t width, std::uint32_t height)
@@ -407,7 +494,11 @@ void SceneRenderer::ensureWarpTexture(Id displayId, std::uint32_t width, std::ui
         .setDimension(nvrhi::TextureDimension::Texture2D)
         .enableAutomaticStateTracking(ResourceStates::ShaderResource)
         .setDebugName("warp " + std::to_string(displayId));
-    m_WarpTextures[displayId] = PooledTexture{m_Device->createTexture(td), width, height};
+    PooledTexture entry;
+    entry.texture = m_Device->createTexture(td);
+    entry.width = width;
+    entry.height = height;
+    m_WarpTextures[displayId] = entry;
 }
 
 void SceneRenderer::updateWarpTexture(Id displayId, const std::vector<unsigned char>& rgData)
@@ -470,7 +561,11 @@ void SceneRenderer::ensureWarpInvTexture(Id displayId, std::uint32_t width, std:
         .setDimension(nvrhi::TextureDimension::Texture2D)
         .enableAutomaticStateTracking(ResourceStates::ShaderResource)
         .setDebugName("warpInv " + std::to_string(displayId));
-    m_WarpInvTextures[displayId] = PooledTexture{m_Device->createTexture(td), width, height};
+    PooledTexture entry;
+    entry.texture = m_Device->createTexture(td);
+    entry.width = width;
+    entry.height = height;
+    m_WarpInvTextures[displayId] = entry;
 }
 
 void SceneRenderer::updateWarpInvTexture(Id displayId, const std::vector<unsigned char>& rgbData)
@@ -514,7 +609,11 @@ void SceneRenderer::ensureOverlayTexture(Id displayId, std::uint32_t width, std:
         .setDimension(nvrhi::TextureDimension::Texture2D)
         .enableAutomaticStateTracking(ResourceStates::ShaderResource)
         .setDebugName("overlay " + std::to_string(displayId));
-    m_OverlayTextures[displayId] = PooledTexture{m_Device->createTexture(td), width, height};
+    PooledTexture entry;
+    entry.texture = m_Device->createTexture(td);
+    entry.width = width;
+    entry.height = height;
+    m_OverlayTextures[displayId] = entry;
 }
 
 void SceneRenderer::updateOverlayTexture(Id displayId, const std::vector<std::uint8_t>& rgbaData)
@@ -613,6 +712,29 @@ void SceneRenderer::recordFrame(nvrhi::ICommandList* cmd, const FrameInput& fram
             {
                 continue;
             }
+            // YUV 4:2:0: three planes (luma at full size, U/V at half).
+            // rowPitch 0 = tightly packed (the planes are stored packed).
+            if (up.kind == PendingUpload::Kind::Media &&
+                (up.format == VideoPixelFormat::YUV420P ||
+                 up.format == VideoPixelFormat::YUV420P10LE))
+            {
+                const PooledTexture& tex = it->second;
+                const size_t sampleBytes =
+                    up.format == VideoPixelFormat::YUV420P10LE ? 2 : 1;
+                const size_t lumaBytes =
+                    static_cast<size_t>(tex.width) * tex.height * sampleBytes;
+                const size_t chromaBytes =
+                    static_cast<size_t>(tex.width / 2) * (tex.height / 2) * sampleBytes;
+                if (!tex.plane1 || !tex.plane2 || up.data.size() != lumaBytes ||
+                    up.data1.size() != chromaBytes || up.data2.size() != chromaBytes)
+                {
+                    continue; // size mismatch (texture was re-created); drop
+                }
+                cmd->writeTexture(tex.texture.Get(), 0, 0, up.data.data(), 0, 0);
+                cmd->writeTexture(tex.plane1.Get(), 0, 0, up.data1.data(), 0, 0);
+                cmd->writeTexture(tex.plane2.Get(), 0, 0, up.data2.data(), 0, 0);
+                continue;
+            }
             const size_t expected =
                 up.kind == PendingUpload::Kind::Warp
                     ? static_cast<size_t>(it->second.width) * it->second.height * 2 // RG8
@@ -701,6 +823,13 @@ void SceneRenderer::recordFrame(nvrhi::ICommandList* cmd, const FrameInput& fram
 
         nvrhi::ITexture* mediaTex =
             layer.texture.Get() != nullptr ? layer.texture.Get() : m_WhiteTexture.Get();
+        // The YUV plane textures; unbound (RGBA) or missing layers fall back
+        // to the transparent texture, which the shader never samples for
+        // them (the mediaFormat push constant selects the path).
+        nvrhi::ITexture* planeU =
+            layer.textureU.Get() != nullptr ? layer.textureU.Get() : m_TransparentTexture.Get();
+        nvrhi::ITexture* planeV =
+            layer.textureV.Get() != nullptr ? layer.textureV.Get() : m_TransparentTexture.Get();
 
         // Per-draw binding set: NVRHI tracks its resources and places the
         // automatic barriers (e.g. scene RT: render target -> shader resource
@@ -709,6 +838,8 @@ void SceneRenderer::recordFrame(nvrhi::ICommandList* cmd, const FrameInput& fram
         bindingDesc.addItem(nvrhi::BindingSetItem::Texture_SRV(0, mediaTex));
         bindingDesc.addItem(nvrhi::BindingSetItem::Texture_SRV(1, prev));
         bindingDesc.addItem(nvrhi::BindingSetItem::Sampler(2, m_LinearSampler.Get()));
+        bindingDesc.addItem(nvrhi::BindingSetItem::Texture_SRV(3, planeU));
+        bindingDesc.addItem(nvrhi::BindingSetItem::Texture_SRV(4, planeV));
         auto bindings = m_Device->createBindingSet(bindingDesc, m_LayerLayout.Get());
         if (!bindings)
         {
@@ -726,6 +857,11 @@ void SceneRenderer::recordFrame(nvrhi::ICommandList* cmd, const FrameInput& fram
         pc.color[2] = layer.color.b;
         pc.color[3] = layer.color.a;
         pc.useColor = layer.texture ? 0 : 1;
+        pc.mediaSizeX = static_cast<float>(layer.mediaSize.width);
+        pc.mediaSizeY = static_cast<float>(layer.mediaSize.height);
+        pc.mediaFormat = static_cast<int>(layer.mediaFormat);
+        pc.colorSpace = static_cast<int>(layer.mediaColorSpace);
+        pc.fullRange = layer.mediaFullRange ? 1 : 0;
 
         nvrhi::GraphicsState gs;
         gs.setPipeline(m_LayerPipeline.Get())

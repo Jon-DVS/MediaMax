@@ -588,6 +588,282 @@ TEST_CASE("Media texture upload and sampling round-trip")
     });
 }
 
+TEST_CASE("Layer pass: YUV 4:2:0 media is converted on the GPU")
+{
+    runGpuTest("yuv layer", [](Gpu& g) {
+        // Synthetic YUV 4:2:0 frames are uploaded as three plane textures
+        // and converted YUV -> RGB by the layer shader (the float32 form of
+        // core/src/media/VideoConversion.cpp). The expectation is a
+        // double-precision reference that samples the planes at exactly the
+        // coordinates the shader does - luma bilinear at v_uv, U/V bilinear
+        // at the co-sited chroma coordinate (v_uv + 0.5 / mediaSize) - and
+        // applies the ITU matrix, so the two must agree within float32 +
+        // 8-bit rounding.
+        const int tw = 256, th = 256; // target (scene) size
+
+        // The normalized sample values (what the texture sampler returns).
+        auto normalized = [](const VideoFrame& f, int plane) {
+            const bool is10Bit = f.format == VideoPixelFormat::YUV420P10LE;
+            const auto& p = f.planes[plane];
+            std::vector<double> out(p.size() / (is10Bit ? 2 : 1));
+            for (std::size_t i = 0; i < out.size(); ++i)
+            {
+                out[i] = is10Bit ? double(p[2 * i] | (p[2 * i + 1] << 8)) / 65535.0
+                                 : double(p[i]) / 255.0;
+            }
+            return out;
+        };
+
+        // Bilinear at texel coordinates (texel i centered at i), clamped at
+        // the edges like the sampler.
+        auto bilinear = [](const std::vector<double>& plane, int w, int h, double u, double v) {
+            auto axis = [&](int row, double t) {
+                if (t < 0.0)
+                {
+                    return plane[static_cast<std::size_t>(row) * w];
+                }
+                if (t > w - 1.0)
+                {
+                    return plane[static_cast<std::size_t>(row) * w + (w - 1)];
+                }
+                const int i0 = static_cast<int>(t);
+                const double f = t - i0;
+                const int i1 = std::min(i0 + 1, w - 1);
+                const std::size_t base = static_cast<std::size_t>(row) * w;
+                return plane[base + i0] + (plane[base + i1] - plane[base + i0]) * f;
+            };
+            if (v < 0.0)
+            {
+                return axis(0, u);
+            }
+            if (v > h - 1.0)
+            {
+                return axis(h - 1, u);
+            }
+            const int r0 = static_cast<int>(v);
+            const double f = v - r0;
+            const int r1 = std::min(r0 + 1, h - 1);
+            return axis(r0, u) + (axis(r1, u) - axis(r0, u)) * f;
+        };
+
+        // The reference matrix (double, independent of the production code).
+        auto referenceRgb = [](double y, double cb, double cr, int space, bool fullRange) {
+            double yn, cbn, crn;
+            if (fullRange)
+            {
+                yn = y;
+                cbn = cb - 0.5;
+                crn = cr - 0.5;
+            }
+            else
+            {
+                yn = (y - 16.0 / 255.0) * (255.0 / 219.0);
+                cbn = (cb - 128.0 / 255.0) * (255.0 / 224.0);
+                crn = (cr - 128.0 / 255.0) * (255.0 / 224.0);
+            }
+            double a, b, c, d;
+            if (space == 0) // BT601
+            {
+                a = 1.402;
+                b = 0.34414;
+                c = 0.71414;
+                d = 1.772;
+            }
+            else if (space == 2) // BT2020
+            {
+                a = 1.8814;
+                b = 0.1197;
+                c = 0.6812;
+                d = 2.1145;
+            }
+            else // BT709 (1) / Unknown (3)
+            {
+                a = 1.5748;
+                b = 0.1873;
+                c = 0.4681;
+                d = 1.8556;
+            }
+            const auto cl = [](double v) { return std::max(0.0, std::min(1.0, v)); };
+            return std::array<double, 3>{cl(yn + a * crn), cl(yn - b * cbn - c * crn),
+                                         cl(yn + d * cbn)};
+        };
+
+        // Renders the layer's texture full-bleed into the 256x256 scene
+        // (the same wiring as PlaybackApp::buildLayerDraws) and reads it
+        // back.
+        auto renderFullBleed = [&](Id layerId, int w, int h) {
+            SceneRenderer::FrameInput frame;
+            auto d = colorLayer(Color4{});
+            d.texture = g.renderer.mediaTexture(layerId);
+            REQUIRE(d.texture != nullptr);
+            const auto set = g.renderer.mediaTextureSet(layerId);
+            d.textureU = set.plane1;
+            d.textureV = set.plane2;
+            d.mediaFormat = set.format;
+            d.mediaColorSpace = set.colorSpace;
+            d.mediaFullRange = set.fullRange;
+            d.mediaSize = Size2i{w, h};
+            d.transform = Transform2D{};
+            d.transform.anchorX = 0.5f;
+            d.transform.anchorY = 0.5f;
+            d.transform.x = 128.f;
+            d.transform.y = 128.f;
+            d.transform.scaleX = 256.f / static_cast<float>(w);
+            d.transform.scaleY = 256.f / static_cast<float>(h);
+            frame.layers.push_back(d);
+            renderOneFrame(g.renderer, frame);
+            std::vector<std::uint8_t> rgba;
+            REQUIRE(g.renderer.readBackScene(rgba));
+            return rgba;
+        };
+
+        // Compares every target pixel against the double reference.
+        auto checkCase = [&](Id layerId, const VideoFrame& f, int space, int tol) {
+            const int w = static_cast<int>(f.width), h = static_cast<int>(f.height);
+            const auto yv = normalized(f, 0);
+            const auto uPlane = normalized(f, 1);
+            const auto vPlane = normalized(f, 2);
+            const int chw = w / 2, chh = h / 2;
+            const auto rgba = renderFullBleed(layerId, w, h);
+            int maxDelta = 0, wx = -1, wy = -1;
+            for (int Y = 0; Y < th; ++Y)
+            {
+                for (int X = 0; X < tw; ++X)
+                {
+                    // The media UV of the fragment center (the quad is
+                    // full-bleed and the UV is linear over it).
+                    const double uvx = (X + 0.5) / 256.0;
+                    const double uvy = (Y + 0.5) / 256.0;
+                    // The shader samples luma at v_uv and the chroma planes
+                    // at v_uv + 0.5 / mediaSize (the co-sited 4:2:0
+                    // mapping); in texel coordinates (texel i at i).
+                    const auto rgb = referenceRgb(
+                        bilinear(yv, w, h, uvx * w - 0.5, uvy * h - 0.5),
+                        bilinear(uPlane, chw, chh, (uvx + 0.5 / w) * chw - 0.5,
+                                 (uvy + 0.5 / h) * chh - 0.5),
+                        bilinear(vPlane, chw, chh, (uvx + 0.5 / w) * chw - 0.5,
+                                 (uvy + 0.5 / h) * chh - 0.5),
+                        space, f.fullRange);
+                    const std::size_t i = (static_cast<std::size_t>(Y) * tw + X) * 4;
+                    for (int ch = 0; ch < 3; ++ch)
+                    {
+                        const int delta = std::abs(
+                            static_cast<int>(rgba[i + ch]) -
+                            static_cast<int>(std::lround(rgb[ch] * 255.0)));
+                        if (delta > maxDelta)
+                        {
+                            maxDelta = delta;
+                            wx = X;
+                            wy = Y;
+                        }
+                    }
+                }
+            }
+            CHECK_MESSAGE(maxDelta <= tol,
+                          "YUV max delta " << maxDelta << " (tolerance " << tol
+                          << ") at (" << wx << ", " << wy << ")");
+        };
+
+        // --- Case 1: 8-bit, limited range, BT.709 (64x36) -------------------
+        // Luma ramps across x (71..180 -> Y' in [0.25, 0.75]), U ramps
+        // across rows at half resolution (113..143), V is neutral: every
+        // channel stays inside [0, 1] (no clamping), so the GPU result must
+        // be pure linear math.
+        {
+            const int w = 64, h = 36;
+            VideoFrame f;
+            f.width = w;
+            f.height = h;
+            f.format = VideoPixelFormat::YUV420P;
+            f.colorSpace = YuvColorSpace::BT709;
+            f.fullRange = false;
+            f.planes.resize(3);
+            f.planes[0].resize(static_cast<std::size_t>(w) * h);
+            f.planes[1].resize(static_cast<std::size_t>(w / 2) * (h / 2));
+            f.planes[2].assign(static_cast<std::size_t>(w / 2) * (h / 2), 128);
+            for (int y = 0; y < h; ++y)
+            {
+                for (int x = 0; x < w; ++x)
+                {
+                    f.planes[0][static_cast<std::size_t>(y) * w + x] =
+                        static_cast<std::uint8_t>(std::lround(71.0 + 109.0 * x / (w - 1)));
+                }
+                for (int cx = 0; cx < w / 2; ++cx)
+                {
+                    f.planes[1][static_cast<std::size_t>(y / 2) * (w / 2) + cx] =
+                        static_cast<std::uint8_t>(
+                            std::lround(113.0 + 30.0 * (y / 2) / (h / 2 - 1)));
+                }
+            }
+            const Id layerId = 300;
+            g.renderer.ensureMediaTexture(layerId, w, h, VideoPixelFormat::YUV420P);
+            g.renderer.updateMediaTexture(layerId, f); // copied (f is reused below)
+            checkCase(layerId, f, static_cast<int>(YuvColorSpace::BT709), 2);
+        }
+
+        // --- Case 2: 10-bit, limited range, BT.709 (32x16, R16 planes) ------
+        // Luma ramps across x (256..768 of 1023), U/V neutral 512. The
+        // 10-bit samples use the scaled 16-bit UNORM storage (the same
+        // mapping copyVideoPlane applies at decode time).
+        {
+            const int w = 32, h = 16;
+            VideoFrame f;
+            f.width = w;
+            f.height = h;
+            f.format = VideoPixelFormat::YUV420P10LE;
+            f.colorSpace = YuvColorSpace::BT709;
+            f.fullRange = false;
+            f.planes.resize(3);
+            f.planes[0].resize(static_cast<std::size_t>(w) * h * 2);
+            f.planes[1].resize(static_cast<std::size_t>(w / 2) * (h / 2) * 2);
+            f.planes[2].resize(static_cast<std::size_t>(w / 2) * (h / 2) * 2);
+            auto put10 = [&f](int plane, std::size_t i, std::uint32_t v10) {
+                const std::uint32_t v16 = v10 * 65535u / 1023u;
+                f.planes[plane][2 * i] = static_cast<std::uint8_t>(v16 & 0xFFu);
+                f.planes[plane][2 * i + 1] = static_cast<std::uint8_t>((v16 >> 8) & 0xFFu);
+            };
+            for (int y = 0; y < h; ++y)
+            {
+                for (int x = 0; x < w; ++x)
+                {
+                    put10(0, static_cast<std::size_t>(y) * w + x,
+                          static_cast<std::uint32_t>(std::lround(256.0 + 512.0 * x / (w - 1))));
+                }
+                for (int cx = 0; cx < w / 2; ++cx)
+                {
+                    put10(1, static_cast<std::size_t>(y / 2) * (w / 2) + cx, 512);
+                    put10(2, static_cast<std::size_t>(y / 2) * (w / 2) + cx, 512);
+                }
+            }
+            const Id layerId = 301;
+            g.renderer.ensureMediaTexture(layerId, w, h, VideoPixelFormat::YUV420P10LE);
+            g.renderer.updateMediaTexture(layerId, f);
+            checkCase(layerId, f, static_cast<int>(YuvColorSpace::BT709), 2);
+        }
+
+        // --- Case 3: 8-bit, FULL range, BT.601 (16x16, constant) ------------
+        // Wires the matrix/range push constants differently; R clamps at
+        // 1.0 (both implementations clamp identically on a constant frame).
+        {
+            const int w = 16, h = 16;
+            VideoFrame f;
+            f.width = w;
+            f.height = h;
+            f.format = VideoPixelFormat::YUV420P;
+            f.colorSpace = YuvColorSpace::BT601;
+            f.fullRange = true;
+            f.planes.resize(3);
+            f.planes[0].assign(static_cast<std::size_t>(w) * h, 200);
+            f.planes[1].assign(static_cast<std::size_t>(w / 2) * (h / 2), 100);
+            f.planes[2].assign(static_cast<std::size_t>(w / 2) * (h / 2), 200);
+            const Id layerId = 302;
+            g.renderer.ensureMediaTexture(layerId, w, h, VideoPixelFormat::YUV420P);
+            g.renderer.updateMediaTexture(layerId, f);
+            checkCase(layerId, f, static_cast<int>(YuvColorSpace::BT601), 2);
+        }
+    });
+}
+
 TEST_CASE("Display pass copies the scene to a target")
 {
     runGpuTest("display", [](Gpu& g) {

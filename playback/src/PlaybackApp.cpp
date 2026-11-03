@@ -1001,6 +1001,20 @@ std::vector<render::SceneRenderer::LayerDraw> PlaybackApp::buildLayerDraws(const
             }
             draw.texture = target != nullptr ? m_Pump.deliverVideo(*target) : nullptr;
             draw.mediaSize = target != nullptr ? target->mediaSize : Size2i{1, 1};
+            if (draw.texture != nullptr)
+            {
+                // The plane set + color metadata of the frame in the
+                // texture. RGBA frames carry null planes and the defaults
+                // (the layer pass then samples the texture directly); YUV
+                // frames carry the U/V plane textures and the matrix/range
+                // the shader converts with.
+                const auto set = m_Scene.mediaTextureSet(lf.layerId);
+                draw.textureU = set.plane1;
+                draw.textureV = set.plane2;
+                draw.mediaFormat = set.format;
+                draw.mediaColorSpace = set.colorSpace;
+                draw.mediaFullRange = set.fullRange;
+            }
         }
         else
         {

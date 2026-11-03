@@ -47,6 +47,7 @@
 #include "mediamax/blend/Blend.h"
 #include "mediamax/math/Rect.h"
 #include "mediamax/math/Transform2D.h"
+#include "mediamax/media/MediaTypes.h"
 #include "mediamax/util/Id.h"
 
 namespace mediamax::render
@@ -80,21 +81,46 @@ public:
 
     // --- Texture pool (thread-safe) ----------------------------------------
 
-    // Creates (or re-creates, when the size changed) the texture used for a
-    // media layer. Key: the layer id (a layer owns its texture even when two
-    // layers share one media asset).
-    void ensureMediaTexture(Id layerId, std::uint32_t width, std::uint32_t height);
+    // Creates (or re-creates, when the size or format changed) the texture
+    // used for a media layer. Key: the layer id (a layer owns its texture
+    // even when two layers share one media asset). RGBA frames are one
+    // RGBA8 texture; YUV 4:2:0 frames are three textures - luma at full
+    // size (R8 for 8-bit, R16_UNORM for 10-bit) and U/V at half size -
+    // which the layer pass converts to RGB in the shader (see layer.frag;
+    // core/src/media/VideoConversion.cpp is the CPU reference of the
+    // conversion).
+    void ensureMediaTexture(Id layerId, std::uint32_t width, std::uint32_t height,
+                            VideoPixelFormat format = VideoPixelFormat::RGBA);
 
-    // Queues a new frame for the texture (tightly packed RGBA8). The pixel
-    // buffer is moved into the upload queue (no copy - a 4K frame is 33 MB,
-    // copied once per frame by the caller at most). Applied to the GPU inside
-    // the next recordFrame(); no GPU work happens here.
+    // Queues a new frame for the texture. The pixel buffers are moved into
+    // the upload queue (no copy - a 4K frame is 33 MB, copied once per
+    // frame by the caller at most). Applied to the GPU inside the next
+    // recordFrame(); no GPU work happens here.
+    void updateMediaTexture(Id layerId, VideoFrame frame);
+    // The RGBA convenience form (a single tightly packed plane).
     void updateMediaTexture(Id layerId, std::vector<std::uint8_t> rgbaData);
 
     // Removes the texture from the pool. Safe while the GPU is using it:
     // NVRHI keeps the resource alive until all submitted work is done.
     void removeMediaTexture(Id layerId);
     nvrhi::TextureHandle mediaTexture(Id layerId) const;
+
+    // The full texture set of a media layer: the primary texture (RGBA, or
+    // the YUV luma plane), the U/V plane textures (null for RGBA frames) and
+    // the color metadata of the frame queued into the textures (set when an
+    // upload is queued). Default values when the layer has no texture.
+    struct MediaTextureSet
+    {
+        nvrhi::TextureHandle texture = nullptr;
+        nvrhi::TextureHandle plane1 = nullptr; // U/Cb (YUV 4:2:0)
+        nvrhi::TextureHandle plane2 = nullptr; // V/Cr (YUV 4:2:0)
+        VideoPixelFormat format = VideoPixelFormat::RGBA;
+        YuvColorSpace colorSpace = YuvColorSpace::BT709;
+        bool fullRange = false;
+        std::uint32_t width = 0;
+        std::uint32_t height = 0;
+    };
+    MediaTextureSet mediaTextureSet(Id layerId) const;
 
     // Same pool for per-display projection warp textures (RG8, sized to the
     // display; see PlaybackApp): the forward map, sampled by the display
@@ -148,6 +174,15 @@ public:
         float opacity = 1.f;
         BlendMode blend = BlendMode::Normal;
         Size2i mediaSize{0, 0}; // media display size in px (Transform2D input)
+        // YUV 4:2:0 media (mediaFormat != RGBA): the U/V plane textures
+        // (created with the luma texture, half its size); null for RGBA
+        // layers. The layer pass converts YUV -> RGB in the shader with the
+        // push constants' mediaFormat/colorSpace/fullRange (see layer.frag).
+        nvrhi::TextureHandle textureU;
+        nvrhi::TextureHandle textureV;
+        VideoPixelFormat mediaFormat = VideoPixelFormat::RGBA;
+        YuvColorSpace mediaColorSpace = YuvColorSpace::BT709;
+        bool mediaFullRange = false;
     };
 
     struct DisplayTarget
@@ -209,8 +244,17 @@ public:
         int blendMode;
         float color[4];
         int useColor;
+        // YUV 4:2:0 conversion (mediaFormat != RGBA): the media texture
+        // size in pixels (the co-sited chroma offset in the shader) and the
+        // color metadata of the frame in the textures. Declared as two
+        // floats (not a vec2 in the GLSL) so the C++ natural layout (all
+        // 4-byte aligned) matches the std140 offsets byte for byte.
+        float mediaSizeX, mediaSizeY;
+        int mediaFormat; // mediamax::VideoPixelFormat ordinal
+        int colorSpace; // mediamax::YuvColorSpace ordinal
+        int fullRange; // 0 = limited (video), 1 = full (JPEG)
     };
-    static_assert(sizeof(LayerPush) == 36);
+    static_assert(sizeof(LayerPush) == 56);
 
     struct DisplayPush
     {
@@ -271,9 +315,17 @@ private:
     // Texture pool.
     struct PooledTexture
     {
-        nvrhi::TextureHandle texture;
+        nvrhi::TextureHandle texture; // RGBA, or the YUV luma plane
+        nvrhi::TextureHandle plane1; // YUV U/Cb plane (null for single-plane)
+        nvrhi::TextureHandle plane2; // YUV V/Cr plane (null for single-plane)
         std::uint32_t width = 0;
         std::uint32_t height = 0;
+        // What the texture(s) hold, and the color metadata of the frame
+        // queued into them (the media pool only; the other pools keep the
+        // defaults). colorSpace/fullRange update when an upload is queued.
+        VideoPixelFormat format = VideoPixelFormat::RGBA;
+        YuvColorSpace colorSpace = YuvColorSpace::BT709;
+        bool fullRange = false;
     };
     std::map<Id, PooledTexture> m_MediaTextures;
     std::map<Id, PooledTexture> m_WarpTextures;
@@ -296,7 +348,14 @@ private:
         };
         Id id;
         Kind kind = Kind::Media;
-        std::vector<std::uint8_t> data;
+        std::vector<std::uint8_t> data; // primary (RGBA, or YUV luma)
+        std::vector<std::uint8_t> data1; // YUV U/Cb plane
+        std::vector<std::uint8_t> data2; // YUV V/Cr plane
+        // The pixel layout of `data`/`data1`/`data2` (the flush validates
+        // the plane sizes against the pool entry's dimensions). The color
+        // metadata (matrix/range) is set on the pool at queue time, not
+        // carried here.
+        VideoPixelFormat format = VideoPixelFormat::RGBA;
     };
     mutable std::mutex m_UploadMutex;
     std::vector<PendingUpload> m_PendingUploads;
