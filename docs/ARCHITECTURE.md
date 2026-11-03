@@ -165,11 +165,18 @@ clamped to its in/out points, with loop/hold-at-end semantics.
 (`x, y, width, height`) in the shared **output space** (pixels, origin
 top-left) plus brightness, enabled flag and the `statusOverlay` toggle. The
 union of display rectangles is the scene size the renderer targets.
-`WarpMap` converts a user grid of points into the dense RG8 warp texture the
-GPU display pass samples (see below). The interpolation between the nodes is
-either bilinear (the classic grid warp) or a tensor-product Catmull-Rom
-cubic B-spline that passes exactly through every node (both are CPU-side;
-the GPU always samples the dense texture).
+`WarpMap` converts a user grid of points — the absolute positions of the
+ideal lattice nodes on the final display surface — into the dense warp
+textures the GPU display pass samples (see below). The content is warped to
+fit the lattice region the nodes span; surface area outside it is uncovered
+(black). The interpolation between the nodes is either bilinear (the classic
+grid warp) or a tensor-product Catmull-Rom cubic B-spline that passes
+exactly through every node. Two textures, both built CPU-side (the GPU only
+samples): the inverse map (RGBA8: per output texel, the content UV that
+lands there + a coverage flag — the content path, solved exactly per cell
+for the bilinear mode and by Newton iteration for the spline) and the
+forward map (RG8: per output texel, where the ideal point ends up — the
+warp-preview node markers).
 
 ### `overlay/` — status overlay text
 
@@ -231,9 +238,13 @@ owns the queue). Per frame:
    useColor). Per-draw binding set: media SRV, scene SRV, linear sampler.
 5. **Display pass** — one draw per display into the swapchain image (or an
    offscreen target for the self-test): samples the final scene at the
-   display's output-space rectangle, applies the dense warp texture when
-   present (`useWarp`), brightness, and **unpremultiplies** for the window
-   (`display.frag`, push constants `DisplayPush`). When the display has a
+   display's output-space rectangle, applies the projection warp when
+   present (`useWarp`) through the dense inverse warp texture (rg = the
+   content UV for the pixel, b = coverage: pixels outside the warped
+   lattice region render black), brightness, and **unpremultiplies** for
+   the window (`display.frag`, push constants `DisplayPush`; the warp
+   preview's node markers sample the dense forward texture). When the
+   display has a
    status overlay texture (`useOverlay`), the same draw also src-over
    blends it screen-aligned on top (display-local UV, no warp: it is display
    UI, not scene content). Swapchain images are transitioned back to

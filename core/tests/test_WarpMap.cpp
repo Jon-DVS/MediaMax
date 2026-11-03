@@ -230,6 +230,112 @@ TEST_CASE("Spline dense texture follows the spline mode")
           doctest::Approx(static_cast<int>(std::lround(wv * 255.f))).epsilon(1));
 }
 
+TEST_CASE("Inverse dense texture: identity maps every texel to itself, fully covered")
+{
+    const WarpMap identity(11, 11);
+    std::vector<unsigned char> tex;
+    const int size = 4;
+    identity.buildInverseDenseTexture(tex, size);
+    CHECK(tex.size() == static_cast<size_t>(size) * size * 4);
+
+    // Each texel stores its own uv, the coverage flag set, alpha 255.
+    for (int y = 0; y < size; ++y)
+    {
+        for (int x = 0; x < size; ++x)
+        {
+            const size_t idx = (static_cast<size_t>(y) * size + x) * 4;
+            CHECK(tex[idx] ==
+                  doctest::Approx(static_cast<int>(std::lround(((x + 0.5f) / size) * 255.f)))
+                      .epsilon(1e-3));
+            CHECK(tex[idx + 1] ==
+                  doctest::Approx(static_cast<int>(std::lround(((y + 0.5f) / size) * 255.f)))
+                      .epsilon(1e-3));
+            CHECK(tex[idx + 2] == 255); // covered
+            CHECK(tex[idx + 3] == 255); // alpha
+        }
+    }
+}
+
+TEST_CASE("Inverse dense texture: a moved corner shrinks coverage (pockets are uncovered)")
+{
+    WarpMap warp(3, 3);
+    // Pull the top-left node inward: the lattice region no longer reaches
+    // the surface's top-left corner, so that corner is uncovered (black).
+    warp.setPointPosition(0, 0, 0.15f, 0.15f);
+
+    std::vector<unsigned char> tex;
+    const int size = 64;
+    warp.buildInverseDenseTexture(tex, size);
+    CHECK(tex.size() == static_cast<size_t>(size) * size * 4);
+
+    const auto texel = [&](int x, int y) {
+        return (static_cast<size_t>(y) * size + x) * 4;
+    };
+
+    // Texels deep in the top-left pocket are uncovered.
+    CHECK(tex[texel(0, 0) + 2] == 0);
+    CHECK(tex[texel(1, 1) + 2] == 0);
+
+    // The moved corner's position (0.15, 0.15) itself is covered and maps
+    // back to the content's top-left corner (the texel just inside the
+    // lattice is a fraction of a texel away from the corner, so the stored
+    // uv is near - not exactly - (0, 0)).
+    const size_t cornerIdx = texel(10, 10); // center (10.5/64) ~ (0.164, 0.164)
+    CHECK(tex[cornerIdx + 2] == 255);
+    CHECK(tex[cornerIdx] <= 13);
+    CHECK(tex[cornerIdx + 1] <= 13);
+
+    // Round trip: a content point q, its warped position p = sample(q), and
+    // the texel at p must store q back (within the texel quantization).
+    const float qu = 0.25f, qv = 0.25f;
+    const auto [pu, pv] = warp.sample(qu, qv); // (0.2875, 0.2875) for this lattice
+    const int x = static_cast<int>(pu * size);
+    const int y = static_cast<int>(pv * size);
+    const size_t idx = texel(x, y);
+    CHECK(tex[idx + 2] == 255);
+    CHECK(std::abs(tex[idx] / 255.f - qu) <= 0.02f);
+    CHECK(std::abs(tex[idx + 1] / 255.f - qv) <= 0.02f);
+}
+
+TEST_CASE("Inverse dense texture: spline round trip and coverage")
+{
+    WarpMap warp(3, 3, WarpInterpolation::Spline);
+    warp.setPointPosition(0, 0, 0.1f, 0.05f);
+    warp.setPointPosition(2, 2, 0.85f, 0.9f);
+
+    std::vector<unsigned char> tex;
+    const int size = 64;
+    warp.buildInverseDenseTexture(tex, size);
+    CHECK(tex.size() == static_cast<size_t>(size) * size * 4);
+
+    // With the top-left node pulled inward, the warped lattice region is a
+    // strict subset of the surface: most texels are covered, some are not.
+    int covered = 0;
+    for (int y = 0; y < size; ++y)
+    {
+        for (int x = 0; x < size; ++x)
+        {
+            if (tex[(static_cast<size_t>(y) * size + x) * 4 + 2] == 255)
+            {
+                ++covered;
+            }
+        }
+    }
+    CHECK(covered > 0);
+    CHECK(covered < size * size);
+
+    // Round trip at an interior content point: the texel at p = sample(q)
+    // must store q back (within the texel quantization).
+    const float qu = 0.3f, qv = 0.3f;
+    const auto [pu, pv] = warp.sample(qu, qv);
+    const int x = static_cast<int>(pu * size);
+    const int y = static_cast<int>(pv * size);
+    const size_t idx = (static_cast<size_t>(y) * size + x) * 4;
+    CHECK(tex[idx + 2] == 255);
+    CHECK(std::abs(tex[idx] / 255.f - qu) <= 0.02f);
+    CHECK(std::abs(tex[idx + 1] / 255.f - qv) <= 0.02f);
+}
+
 TEST_CASE("The interpolation mode is part of equality")
 {
     WarpMap a(3, 3, WarpInterpolation::Bilinear);

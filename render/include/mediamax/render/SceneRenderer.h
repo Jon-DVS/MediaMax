@@ -13,10 +13,15 @@
 //     (premultiplied space, all five blend modes, selected per draw).
 //   - The display pass draws one full-window quad per display: it samples
 //     the final scene at the display's output-space rectangle, applies the
-//     projection warp (dense RG8 warp texture) and brightness, and
-//     unpremultiplies for the window. When the display carries a status
-//     overlay texture (straight-alpha RGBA8, see core overlay/StatusOverlay),
-//     the pass src-over blends it screen-aligned on top (no warp).
+//     projection warp and brightness, and unpremultiplies for the window.
+//     The warp is the display's dense INVERSE warp texture (RGBA8: rg = the
+//     content UV that lands on the texel, b = coverage; see
+//     WarpMap::buildInverseDenseTexture) - the lattice defines the region of
+//     the final surface the content is warped to, and uncovered texels
+//     render black. A second (forward, RG8) warp texture supplies the
+//     warp-preview node markers. When the display carries a status overlay
+//     texture (straight-alpha RGBA8, see core overlay/StatusOverlay), the
+//     pass src-over blends it screen-aligned on top (no warp).
 //
 // The renderer is a pure recorder: it only records commands into a command
 // list owned by the host (and flushes queued texture uploads into it). The
@@ -91,11 +96,24 @@ public:
     void removeMediaTexture(Id layerId);
     nvrhi::TextureHandle mediaTexture(Id layerId) const;
 
-    // Same pool for per-display projection warp textures (RG8, square).
+    // Same pool for per-display projection warp textures (RG8, square): the
+    // forward map, sampled by the display pass for the warp-preview node
+    // markers (see WarpMap::buildDenseTexture).
     void ensureWarpTexture(Id displayId, std::uint32_t size);
     void updateWarpTexture(Id displayId, const std::vector<unsigned char>& rgData);
-    void removeWarpTexture(Id displayId);
     nvrhi::TextureHandle warpTexture(Id displayId) const;
+
+    // Same pool for the per-display dense INVERSE warp textures (RGBA8,
+    // square: rg = content UV, b = coverage; see
+    // WarpMap::buildInverseDenseTexture) - the display pass's content map.
+    void ensureWarpInvTexture(Id displayId, std::uint32_t size);
+    void updateWarpInvTexture(Id displayId, const std::vector<unsigned char>& rgbaData);
+    nvrhi::TextureHandle warpInvTexture(Id displayId) const;
+
+    // Removes both warp textures (forward + inverse) and their queued
+    // uploads from the pool. Safe while the GPU is using them: NVRHI keeps
+    // the resources alive until all submitted work is done.
+    void removeWarpTexture(Id displayId);
 
     // Same pool for per-display status overlay textures (RGBA8, straight
     // alpha; the text is rasterized by core/src/overlay/StatusOverlay.cpp).
@@ -135,8 +153,11 @@ public:
     {
         nvrhi::ITexture* image = nullptr; // swapchain image (or offscreen RT)
         Rect2i rect; // the display's rectangle in output space
-        // Warp texture for this output; null = identity (the app also keeps
-        // it null when the display's warp is switched off).
+        // Warp textures for this output; null = no warp (the app also keeps
+        // them null when the display's warp is switched off or still the
+        // identity). `warp` is the forward map (preview node markers);
+        // `warpInv` is the inverse content map (RGBA8: rg = content UV,
+        // b = coverage) the scene is sampled through.
         nvrhi::ITexture* warp = nullptr;
         // Status overlay texture (straight-alpha RGBA8); null = no overlay.
         // Drawn screen-aligned on top of the unwarped scene output.
@@ -155,6 +176,9 @@ public:
         bool warpPreview = false;
         int warpRows = 0;
         int warpCols = 0;
+        // Inverse warp texture (see `warp`); appended after warpCols on
+        // purpose (the positional-aggregate note above).
+        nvrhi::ITexture* warpInv = nullptr;
     };
 
     struct FrameInput
@@ -252,6 +276,7 @@ private:
     };
     std::map<Id, PooledTexture> m_MediaTextures;
     std::map<Id, PooledTexture> m_WarpTextures;
+    std::map<Id, PooledTexture> m_WarpInvTextures;
     std::map<Id, PooledTexture> m_OverlayTextures;
 
     // Queued uploads (applied inside recordFrame on the render thread).
@@ -265,6 +290,7 @@ private:
         {
             Media,
             Warp,
+            WarpInv,
             Overlay,
         };
         Id id;

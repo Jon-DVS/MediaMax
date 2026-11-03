@@ -642,20 +642,31 @@ TEST_CASE("Display pass with identity warp texture")
         std::string error;
         REQUIRE(g.renderer.ensureDisplayPipeline(nvrhi::Format::RGBA8_UNORM, error));
 
-        // Identity warp: the dense texture is the diagonal ramp.
+        // Identity warp: the dense textures are the diagonal ramp (forward)
+        // and the identity-with-coverage (inverse).
         const WarpMap warp(11, 11);
-        std::vector<unsigned char> warpData;
+        std::vector<unsigned char> warpData, invData;
         warp.buildDenseTexture(warpData, 64);
+        warp.buildInverseDenseTexture(invData, 64);
         const Id displayId = 7;
         g.renderer.ensureWarpTexture(displayId, 64);
         g.renderer.updateWarpTexture(displayId, warpData);
+        g.renderer.ensureWarpInvTexture(displayId, 64);
+        g.renderer.updateWarpInvTexture(displayId, invData);
         auto warpTex = g.renderer.warpTexture(displayId);
+        auto warpInvTex = g.renderer.warpInvTexture(displayId);
         REQUIRE(warpTex != nullptr);
+        REQUIRE(warpInvTex != nullptr);
 
         SceneRenderer::FrameInput frame;
         frame.layers.push_back(colorLayer(Color4{0.3f, 0.6f, 0.9f, 1.f}));
-        frame.displays.push_back(SceneRenderer::DisplayTarget{
-            target.Get(), Rect2i{0, 0, 256, 256}, warpTex.Get(), nullptr, 1.f, false});
+        SceneRenderer::DisplayTarget targetDesc;
+        targetDesc.image = target.Get();
+        targetDesc.rect = Rect2i{0, 0, 256, 256};
+        targetDesc.warp = warpTex.Get();
+        targetDesc.warpInv = warpInvTex.Get();
+        targetDesc.isSwapchainImage = false;
+        frame.displays.push_back(targetDesc);
 
         renderOneFrame(g.renderer, frame);
 
@@ -666,6 +677,81 @@ TEST_CASE("Display pass with identity warp texture")
         checkClose("r", p.r, 0.3f, 2);
         checkClose("g", p.g, 0.6f, 2);
         checkClose("b", p.b, 0.9f, 2);
+    });
+}
+
+TEST_CASE("Display pass warps the content into the lattice region (inverse map)")
+{
+    runGpuTest("warp content", [](Gpu& g) {
+        auto target = makeOffscreenTarget(g.context.nvrhiDevice(), 256, 256);
+        std::string error;
+        REQUIRE(g.renderer.ensureDisplayPipeline(nvrhi::Format::RGBA8_UNORM, error));
+
+        // A 2x2 lattice with the top-left node pulled inward to (0.2, 0.2):
+        // F(u, v) = (u, v) + 0.2(1 - u)(1 - v). The content shrinks toward
+        // the bottom-right; the top-left corner of the surface is outside
+        // the lattice region and must render black.
+        WarpMap warp(2, 2);
+        warp.setPointPosition(0, 0, 0.2f, 0.2f);
+        std::vector<unsigned char> warpData, invData;
+        warp.buildDenseTexture(warpData, 64);
+        warp.buildInverseDenseTexture(invData, 64);
+        const Id displayId = 71;
+        g.renderer.ensureWarpTexture(displayId, 64);
+        g.renderer.updateWarpTexture(displayId, warpData);
+        g.renderer.ensureWarpInvTexture(displayId, 64);
+        g.renderer.updateWarpInvTexture(displayId, invData);
+        auto warpTex = g.renderer.warpTexture(displayId);
+        auto warpInvTex = g.renderer.warpInvTexture(displayId);
+        REQUIRE(warpTex != nullptr);
+        REQUIRE(warpInvTex != nullptr);
+
+        // Scene: left half red, right half green (content u < 0.5 = red).
+        const auto halfLayer = [](Color4 c, bool left) {
+            SceneRenderer::LayerDraw d;
+            d.color = c;
+            d.opacity = 1.f;
+            d.transform = Transform2D{};
+            d.transform.anchorX = 0.5f;
+            d.transform.anchorY = 0.5f;
+            d.transform.x = left ? 64.f : 192.f; // center of each half
+            d.transform.y = 128.f;
+            d.transform.scaleX = 0.5f; // 128 px wide (256 px media)
+            d.transform.scaleY = 1.f;
+            d.mediaSize = Size2i{256, 256};
+            return d;
+        };
+        SceneRenderer::FrameInput frame;
+        frame.layers.push_back(halfLayer(Color4{1.f, 0.f, 0.f, 1.f}, true));
+        frame.layers.push_back(halfLayer(Color4{0.f, 1.f, 0.f, 1.f}, false));
+        SceneRenderer::DisplayTarget targetDesc;
+        targetDesc.image = target.Get();
+        targetDesc.rect = Rect2i{0, 0, 256, 256};
+        targetDesc.warp = warpTex.Get();
+        targetDesc.warpInv = warpInvTex.Get();
+        targetDesc.isSwapchainImage = false;
+        frame.displays.push_back(targetDesc);
+
+        renderOneFrame(g.renderer, frame);
+
+        std::vector<std::uint8_t> rgba;
+        REQUIRE(readBackTexture(g.context.nvrhiDevice(), target, rgba));
+
+        // The pocket: deep in the uncovered top-left corner, black.
+        const Pixel pocket = pixelAt(rgba, 256, 8, 8);
+        checkClose("pocket r", pocket.r, 0.f, 2);
+        checkClose("pocket g", pocket.g, 0.f, 2);
+        checkClose("pocket b", pocket.b, 0.f, 2);
+        // Red content at q = (0.25, 0.5) lands at p = F(q) = (0.325, 0.575)
+        // => pixel (83, 147).
+        const Pixel red = pixelAt(rgba, 256, 83, 147);
+        checkClose("red r", red.r, 1.f, 2);
+        checkClose("red g", red.g, 0.f, 2);
+        // Green content at q = (0.75, 0.5) lands at p = F(q) = (0.775, 0.525)
+        // => pixel (198, 134).
+        const Pixel green = pixelAt(rgba, 256, 198, 134);
+        checkClose("green g", green.g, 1.f, 2);
+        checkClose("green r", green.r, 0.f, 2);
     });
 }
 

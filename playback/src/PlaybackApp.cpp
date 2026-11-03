@@ -1211,12 +1211,15 @@ void PlaybackApp::renderFrame(const FrameSnapshot& snap)
         target.isSwapchainImage = true;
         // The warp is skipped entirely (no texture rebuild, no bind, no
         // per-pixel lookup) when it is switched off or still the identity;
-        // the change-detection in updateWarpTexture also keeps the upload
-        // out of steady state when it is on but unchanged.
+        // the change-detection in updateWarpTexture also keeps the uploads
+        // out of steady state when it is on but unchanged. When active, the
+        // display pass gets both dense textures: the inverse map (content)
+        // and the forward map (warp-preview node markers).
         if (display->warpEnabled && !display->warp.isIdentity())
         {
             updateWarpTexture(*ds, *display);
             target.warp = m_Scene.warpTexture(display->id).Get();
+            target.warpInv = m_Scene.warpInvTexture(display->id).Get();
         }
         // Warp preview overlay (the control GUI's warp editor is open on a
         // mapped system): the lattice size is the display's own warp grid.
@@ -1284,10 +1287,17 @@ void PlaybackApp::updateWarpTexture(DisplaySurface& ds, const Display& display)
     }
     ds.lastWarpOffsets = offsets;
     ds.lastWarpMode = mode;
+    // The forward texture (preview node markers) and the inverse texture
+    // (the content map) are rebuilt together - the change-detection above
+    // guards both.
     m_Scene.ensureWarpTexture(display.id, kWarpTextureSize);
+    m_Scene.ensureWarpInvTexture(display.id, kWarpTextureSize);
     std::vector<unsigned char> data;
     display.warp.buildDenseTexture(data, static_cast<int>(kWarpTextureSize));
     m_Scene.updateWarpTexture(display.id, data);
+    std::vector<unsigned char> invData;
+    display.warp.buildInverseDenseTexture(invData, static_cast<int>(kWarpTextureSize));
+    m_Scene.updateWarpInvTexture(display.id, invData);
 }
 
 void PlaybackApp::updateStatusOverlay(DisplaySurface& ds, const Display& display)

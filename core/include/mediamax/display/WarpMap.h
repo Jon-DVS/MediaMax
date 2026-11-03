@@ -26,10 +26,24 @@
 //     which keeps the surface anchored to the grid edges. The smooth
 //     option, for projector lens correction and curved walls.
 //
-// The class can also render the (small) control grid into a dense RG8
-// texture that the GPU samples per-pixel; the texture stores the final warped
-// UV per output texel, so the display shader needs a single texture fetch
-// (the interpolation scheme is entirely CPU-side).
+// Rendering semantics: the lattice points are the absolute positions of the
+// ideal lattice nodes ON THE FINAL DISPLAY SURFACE. The rendered scene is
+// warped so that each content point lands where its lattice position says -
+// the lattice therefore defines the region of the surface the content is
+// warped to, and surface area outside that region is uncovered (black).
+//
+// Two dense textures serve the GPU display pass (the interpolation scheme is
+// entirely CPU-side; the GPU only samples textures, one fetch per use):
+//
+//   buildDenseTexture - the FORWARD map, RG8: per output texel, where the
+//     ideal point at that position ends up. The display pass uses it for the
+//     warp-preview node markers (a node's marker sits at the texture sampled
+//     at the node's ideal UV - the surface passes through its nodes).
+//
+//   buildInverseDenseTexture - the INVERSE map, RGBA8: per output texel, the
+//     CONTENT uv that lands there (rg) plus a coverage flag (b = 1 when the
+//     texel is inside the warped lattice region, 0 otherwise). The display
+//     pass samples the scene with it; uncovered texels render black.
 
 #include <array>
 #include <cstdint>
@@ -79,10 +93,21 @@ public:
     void setIdentity();
     bool isIdentity() const;
 
-    // Renders the dense warp texture (RG8, row-major, size x size) where each
-    // texel stores the final warped UV for that output point. This is what
-    // the GPU samples.
+    // Renders the dense forward warp texture (RG8, row-major, size x size)
+    // where each texel stores the final warped UV for that output point
+    // (see the class comment). The GPU display pass samples it for the
+    // warp-preview node markers.
     void buildDenseTexture(std::vector<unsigned char>& outData, int size) const;
+
+    // Renders the dense INVERSE warp texture (RGBA8, row-major, size x size)
+    // where each texel stores the content UV (rg) that lands on that output
+    // point, plus a coverage flag in the blue channel: 255 when the output
+    // point lies inside the warped lattice region, 0 when it is uncovered
+    // (the display pass renders uncovered texels black). The content UV is
+    // the solution q of sample(q) = output point (Newton iteration for the
+    // spline mode; an exact algebraic solve of the bilinear cell map for the
+    // bilinear mode).
+    void buildInverseDenseTexture(std::vector<unsigned char>& outData, int size) const;
 
     // Serialization (JSON compatible plain values).
     std::vector<std::array<float, 2>> pointOffsets() const;

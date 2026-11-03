@@ -277,7 +277,7 @@ so the selection survives engine restarts on multi-GPU machines).
 | `statusOverlay` | bool | no | Draw the engine's status overlay (default false) |
 | `vsync` | bool | no | FIFO (true) vs MAILBOX (false) present mode (default true) |
 | `warpEnabled` | bool | no | Projection warp on/off — when false the renderer skips the warp lookup entirely (the grid is kept) (default false; the warp is an opt-in correction) |
-| `warp` | object | no | Projection warp: `mode` `"grid"` (bilinear) or `"spline"` (cubic B-spline), `rows`, `cols` (both ≥ 2), `points` — exactly `rows*cols` absolute `[u, v]` positions in display UV, row-major (default: 2x2 identity) |
+| `warp` | object | no | Projection warp: `mode` `"grid"` (bilinear) or `"spline"` (cubic B-spline), `rows`, `cols` (both ≥ 2), `points` — exactly `rows*cols` absolute `[u, v]` positions in display UV, row-major (default: 2x2 identity). The points are the lattice node positions **on the final display surface**: the content is warped to fit the region they span, and surface area outside it renders black |
 
 The show file is where display settings are **persistent**: the control
 GUI edits this list (Displays tab: the per-display tree's Add / Edit

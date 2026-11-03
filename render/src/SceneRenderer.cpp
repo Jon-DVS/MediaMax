@@ -63,10 +63,11 @@ nvrhi::BindingLayoutHandle makeDisplayLayout(nvrhi::DeviceHandle device)
     // See makeLayerLayout for the sampler binding offset rationale.
     desc.setBindingOffsets(nvrhi::VulkanBindingOffsets().setSamplerOffset(0));
     desc.addItem(nvrhi::BindingLayoutItem::Texture_SRV(0)); // scene
-    desc.addItem(nvrhi::BindingLayoutItem::Texture_SRV(1)); // warp
-    desc.addItem(nvrhi::BindingLayoutItem::Texture_SRV(2)); // status overlay
-    desc.addItem(nvrhi::BindingLayoutItem::Sampler(3));
-    desc.addItem(nvrhi::BindingLayoutItem::PushConstants(4, sizeof(SceneRenderer::DisplayPush)));
+    desc.addItem(nvrhi::BindingLayoutItem::Texture_SRV(1)); // warp (forward, node markers)
+    desc.addItem(nvrhi::BindingLayoutItem::Texture_SRV(2)); // warp (inverse, content)
+    desc.addItem(nvrhi::BindingLayoutItem::Texture_SRV(3)); // status overlay
+    desc.addItem(nvrhi::BindingLayoutItem::Sampler(4));
+    desc.addItem(nvrhi::BindingLayoutItem::PushConstants(5, sizeof(SceneRenderer::DisplayPush)));
     return device->createBindingLayout(desc);
 }
 
@@ -301,6 +302,7 @@ void SceneRenderer::reset()
         std::lock_guard lock(m_UploadMutex);
         m_MediaTextures.clear();
         m_WarpTextures.clear();
+        m_WarpInvTextures.clear();
         m_OverlayTextures.clear();
         m_PendingUploads.clear();
     }
@@ -423,10 +425,13 @@ void SceneRenderer::removeWarpTexture(Id displayId)
 {
     std::lock_guard lock(m_UploadMutex);
     m_WarpTextures.erase(displayId);
+    m_WarpInvTextures.erase(displayId);
     m_PendingUploads.erase(
         std::remove_if(m_PendingUploads.begin(), m_PendingUploads.end(),
                        [&](const PendingUpload& u) {
-                           return u.kind == PendingUpload::Kind::Warp && u.id == displayId;
+                           return u.id == displayId &&
+                                  (u.kind == PendingUpload::Kind::Warp ||
+                                   u.kind == PendingUpload::Kind::WarpInv);
                        }),
         m_PendingUploads.end());
 }
@@ -436,6 +441,49 @@ nvrhi::TextureHandle SceneRenderer::warpTexture(Id displayId) const
     std::lock_guard lock(m_UploadMutex);
     auto it = m_WarpTextures.find(displayId);
     return it == m_WarpTextures.end() ? nullptr : it->second.texture;
+}
+
+void SceneRenderer::ensureWarpInvTexture(Id displayId, std::uint32_t size)
+{
+    std::lock_guard lock(m_UploadMutex);
+    if (!m_Device)
+    {
+        return; // uncreated (or mid device-switch)
+    }
+    auto it = m_WarpInvTextures.find(displayId);
+    if (it != m_WarpInvTextures.end() && it->second.texture && it->second.width == size)
+    {
+        return;
+    }
+    if (it != m_WarpInvTextures.end())
+    {
+        m_WarpInvTextures.erase(it);
+    }
+    nvrhi::TextureDesc td;
+    td.setWidth(size).setHeight(size).setFormat(nvrhi::Format::RGBA8_UNORM)
+        .setDimension(nvrhi::TextureDimension::Texture2D)
+        .enableAutomaticStateTracking(ResourceStates::ShaderResource)
+        .setDebugName("warpInv " + std::to_string(displayId));
+    m_WarpInvTextures[displayId] = PooledTexture{m_Device->createTexture(td), size, size};
+}
+
+void SceneRenderer::updateWarpInvTexture(Id displayId, const std::vector<unsigned char>& rgbaData)
+{
+    std::lock_guard lock(m_UploadMutex);
+    if (!m_WarpInvTextures.count(displayId))
+    {
+        return;
+    }
+    m_PendingUploads.push_back(PendingUpload{
+        displayId, PendingUpload::Kind::WarpInv,
+        std::vector<std::uint8_t>(rgbaData.begin(), rgbaData.end())});
+}
+
+nvrhi::TextureHandle SceneRenderer::warpInvTexture(Id displayId) const
+{
+    std::lock_guard lock(m_UploadMutex);
+    auto it = m_WarpInvTextures.find(displayId);
+    return it == m_WarpInvTextures.end() ? nullptr : it->second.texture;
 }
 
 void SceneRenderer::ensureOverlayTexture(Id displayId, std::uint32_t width, std::uint32_t height)
@@ -551,6 +599,7 @@ void SceneRenderer::recordFrame(nvrhi::ICommandList* cmd, const FrameInput& fram
         {
             auto& pool = up.kind == PendingUpload::Kind::Warp
                              ? m_WarpTextures
+                             : up.kind == PendingUpload::Kind::WarpInv ? m_WarpInvTextures
                              : up.kind == PendingUpload::Kind::Overlay ? m_OverlayTextures
                                                                        : m_MediaTextures;
             auto it = pool.find(up.id);
@@ -559,8 +608,8 @@ void SceneRenderer::recordFrame(nvrhi::ICommandList* cmd, const FrameInput& fram
                 continue;
             }
             const size_t expected = up.kind == PendingUpload::Kind::Warp
-                ? static_cast<size_t>(it->second.width) * it->second.height * 2
-                : static_cast<size_t>(it->second.width) * it->second.height * 4; // media + overlay: RGBA8
+                ? static_cast<size_t>(it->second.width) * it->second.height * 2 // RG8
+                : static_cast<size_t>(it->second.width) * it->second.height * 4; // everything else: RGBA8
             if (up.data.size() != expected)
             {
                 continue; // size mismatch (texture was re-created); drop
@@ -735,9 +784,14 @@ void SceneRenderer::recordFrame(nvrhi::ICommandList* cmd, const FrameInput& fram
         bindingDesc.addItem(nvrhi::BindingSetItem::Texture_SRV(0, scene));
         bindingDesc.addItem(nvrhi::BindingSetItem::Texture_SRV(
             1, d.warp != nullptr ? d.warp : m_WhiteTexture.Get()));
+        // The null inverse binds the 1x1 transparent texture: if it were
+        // ever sampled it reads (0,0,0) - uncovered - which the shader
+        // renders black.
         bindingDesc.addItem(nvrhi::BindingSetItem::Texture_SRV(
-            2, d.overlay != nullptr ? d.overlay : m_TransparentTexture.Get()));
-        bindingDesc.addItem(nvrhi::BindingSetItem::Sampler(3, m_LinearSampler.Get()));
+            2, d.warpInv != nullptr ? d.warpInv : m_TransparentTexture.Get()));
+        bindingDesc.addItem(nvrhi::BindingSetItem::Texture_SRV(
+            3, d.overlay != nullptr ? d.overlay : m_TransparentTexture.Get()));
+        bindingDesc.addItem(nvrhi::BindingSetItem::Sampler(4, m_LinearSampler.Get()));
         auto bindings = m_Device->createBindingSet(bindingDesc, m_DisplayLayout.Get());
         if (!bindings)
         {
@@ -891,6 +945,7 @@ SceneRenderer& SceneRenderer::operator=(SceneRenderer&& other) noexcept
         m_DisplayFBs = std::move(other.m_DisplayFBs);
         m_MediaTextures = std::move(other.m_MediaTextures);
         m_WarpTextures = std::move(other.m_WarpTextures);
+        m_WarpInvTextures = std::move(other.m_WarpInvTextures);
         m_OverlayTextures = std::move(other.m_OverlayTextures);
         other.m_SceneSize = {0, 0};
         other.m_FinalSceneIndex = 0;

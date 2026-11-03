@@ -1,11 +1,18 @@
 #version 450
 
 // Display pass fragment shader: samples the composited scene for one
-// display, applies the projection warp (dense RG8 warp texture, see
-// WarpMap::buildDenseTexture) and the display brightness, then
+// display, applies the projection warp and the display brightness, then
 // unpremultiplies for output. When useOverlay is set, a status overlay
 // (white text, straight alpha - see core overlay/StatusOverlay) is blended
 // screen-aligned on top (no warp: it is display UI, not scene content).
+//
+// The warp uses two dense textures (see WarpMap):
+//   warpInvTex (RGBA8) - the INVERSE map, the content path: per output
+//     texel, the CONTENT uv that lands there (rg) plus a coverage flag (b).
+//     The lattice defines the region of the final surface the content is
+//     warped to; uncovered texels (b < 0.5) render black.
+//   warpTex (RG8) - the FORWARD map, used only for the warp-preview node
+//     markers (a node's marker sits where its ideal UV lands).
 
 layout(push_constant) uniform DisplayPush
 {
@@ -26,26 +33,42 @@ layout(location = 0) out vec4 fragColor;
 // + SAMPLER); see layer.frag for the matching GLSL form.
 layout(set = 0, binding = 0) uniform highp texture2D sceneTex;
 layout(set = 0, binding = 1) uniform highp texture2D warpTex;
-layout(set = 0, binding = 2) uniform highp texture2D overlayTex;
-layout(set = 0, binding = 3) uniform sampler linearSampler;
+layout(set = 0, binding = 2) uniform highp texture2D warpInvTex;
+layout(set = 0, binding = 3) uniform highp texture2D overlayTex;
+layout(set = 0, binding = 4) uniform sampler linearSampler;
 
 void main()
 {
     // Scene UV of this fragment without warp.
     vec2 sceneUV = (pc.displayRectPx.xy + v_uv * pc.displayRectPx.zw) / pc.sceneSize;
 
+    vec4 pm;
     if (pc.useWarp != 0)
     {
-        // The dense warp texture stores the warped display-local UV per
-        // texel; remap it into scene space with the display's rectangle.
-        vec2 warpedLocal = texture(sampler2D(warpTex, linearSampler), v_uv).rg;
-        sceneUV = (pc.displayRectPx.xy + warpedLocal * pc.displayRectPx.zw) / pc.sceneSize;
+        // The dense inverse warp texture stores, per output texel, the
+        // content uv that lands there (rg) plus the coverage flag (b).
+        // Covered: remap the content uv into scene space with the
+        // display's rectangle and sample. Uncovered (outside the warped
+        // lattice region): black.
+        vec4 w = texture(sampler2D(warpInvTex, linearSampler), v_uv);
+        if (w.b > 0.5)
+        {
+            pm = texture(sampler2D(sceneTex, linearSampler),
+                         (pc.displayRectPx.xy + w.rg * pc.displayRectPx.zw) / pc.sceneSize);
+        }
+        else
+        {
+            pm = vec4(0.0);
+        }
+    }
+    else
+    {
+        pm = texture(sampler2D(sceneTex, linearSampler), sceneUV);
     }
 
-    vec4 pm = texture(sampler2D(sceneTex, linearSampler), sceneUV);
-
     // Unpremultiply, apply brightness, clamp. The scene is fully opaque
-    // (it is cleared with alpha 1), so the output alpha is always 1.
+    // (it is cleared with alpha 1), so the output alpha is always 1; an
+    // uncovered (black, alpha 0) texel unpremultiplies to the same black.
     float a = max(pm.a, 1e-6);
     vec3 rgb = clamp(pm.rgb / a * pc.brightness, 0.0, 1.0);
 
@@ -55,10 +78,10 @@ void main()
     // control lattice on the physical screen while adjusting the warp.
     // Screen-aligned on purpose (like the status overlay): it is display
     // UI, not scene content, so it is not warped itself. A node's current
-    // position is the dense warp texture sampled at the node's ideal UV -
-    // the surface passes exactly through its nodes, so that sample is the
-    // node's target position (with no warp bound the node sits at its
-    // ideal position).
+    // position is the dense FORWARD warp texture sampled at the node's
+    // ideal UV - the surface passes exactly through its nodes, so that
+    // sample is the node's target position (with no warp bound the node
+    // sits at its ideal position).
     if (pc.useWarpPreview != 0)
     {
         const vec2 gridPx = vec2(float(pc.warpCols - 1), float(pc.warpRows - 1));

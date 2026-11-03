@@ -521,8 +521,10 @@ is active and reconcile after a reconnect.
 `"grid"` (bilinear) or `"spline"` (a cubic B-spline through the nodes), and
 `points` are the absolute node positions in display-local UV (row-major,
 `rows x cols`) — the same layout `display.warp.set` takes, so a client can
-restore its warp editor from the display object. A display that has never
-been warped reports the 2x2 identity grid.
+restore its warp editor from the display object. The nodes are the lattice
+on the final surface the content is warped to (area outside it renders
+black; see `display.warp.set`). A display that has never been warped
+reports the 2x2 identity grid.
 
 The control GUI's Displays tab lists the **show document's display wall**
 (see [SHOW_FORMAT.md](SHOW_FORMAT.md)) as a tree view — it works with no
@@ -649,8 +651,22 @@ record stays the single source of truth in both directions.
 
 Set the projection warp for a display from a grid of points in
 **display-local UV** (0..1). The grid must be square, >= 2x2; the points are
-ordered row-major. MediaMax interpolates the grid into a dense RG8 warp
-texture (CPU-side); the display pass remaps every output pixel through it.
+ordered row-major.
+
+The points are the **absolute positions of the ideal lattice nodes on the
+final display surface**: the rendered content is warped so that it fits the
+lattice region the nodes span (the surface passes exactly through every
+node), and surface area outside that region is uncovered — it renders black.
+Pulling a corner node inward therefore shrinks the content toward the rest of
+the lattice and opens a black corner; this is the behavior projection
+mapping needs for lens correction and wall geometry.
+
+Rendering is CPU-side: MediaMax builds two dense textures from the grid and
+the display pass samples them — the inverse map (per output pixel, the
+content UV that lands there plus a coverage flag; the content is drawn
+through it, uncovered pixels black) and the forward map (per output pixel,
+where the ideal point there ends up; the warp preview samples it for the
+node markers).
 
 - Params: `display` (int id, required), `points` (array of `[u, v]`,
   required), `mode` (string, optional: `"grid"` — the default — or

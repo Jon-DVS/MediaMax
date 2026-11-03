@@ -82,7 +82,11 @@ At 8 s the panels swap.
 
 While it runs, try a projection warp from the control console (display 1,
 a 2x2 grid of display-local UV points — a mild trapezoid). The warp is
-off by default, so enable it on display 1 first:
+off by default, so enable it on display 1 first. The points are the lattice
+node positions on the final surface: the content is warped to fit the
+region they span, so this trapezoid narrows the content slightly at the
+bottom edge and leaves a thin black band there (surface area outside the
+lattice renders black):
 
 ```
 display.set {"display":1,"warpEnabled":true}
