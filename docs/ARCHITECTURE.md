@@ -105,14 +105,31 @@ pixels to this reference for every mode.
   serializes access with its state mutex (the media pump is handed the same
   mutex), which is the synchronization point between the pump's threads and
   everything else.
-- `FFmpegSource` (+ `FFmpegSupport`) — the file-backed source: demux, decode
-  video to RGBA8 and audio to interleaved float32, with a shared packet
+- `VideoFrame` — a decoded video frame as planar pixels: one tightly
+  packed RGBA plane (`VideoPixelFormat::RGBA`), or three YUV 4:2:0 planes
+  (luma at full size, U/V at half; 8-bit `YUV420P` or 10-bit
+  `YUV420P10LE`, the latter stored as 16-bit UNORM with 1023 -> 65535
+  exactly), plus the frame's color metadata (BT.601/709/2020 matrix,
+  limited/full range).
+- `VideoConversion` — the CPU reference of the YUV -> RGB conversion the
+  GPU layer pass re-implements in the shader (the same two-implementations
+  rule as `blend/`): the float32 equations per matrix and range, and the
+  co-sited 4:2:0 chroma upsampling (luma `(x,y)` reads chroma at
+  `((x+1)/w, (y+1)/h)` — even luma hits the U/V texel center, odd blends
+  50/50, exactly what the GPU linear sampler does).
+- `FFmpegSource` (+ `FFmpegSupport`) — the file-backed source: demux,
+  decode video and audio (to interleaved float32), with a shared packet
   parking lot so alternating video/audio pulls never drop the other
   stream's packets. (In/out points, loop and rate are the *engine's* job —
-  the source just produces frames.) Classifies standalone image files
-  (per-format `*_pipe` demuxers report no frame count) as
-  `MediaType::Image` in one shared helper used by both `open()` and
-  `probeFile()`.
+  the source just produces frames.) Common YUV 4:2:0 content (H.264/HEVC/
+  AV1, 8- and 10-bit, even sizes) takes a plane fast path: the decoded
+  planes are copied through **unconverted** (with the frame's color
+  metadata, read from the FFmpeg stream) instead of running a
+  full-resolution YUV->RGBA8 scale on the decode thread; everything else
+  (RGB0 sources such as HAP, 4:2:2, 4:4:4, odd sizes, ...) keeps the
+  swscale-to-RGBA path. Classifies standalone image files (per-format
+  `*_pipe` demuxers report no frame count) as `MediaType::Image` in one
+  shared helper used by both `open()` and `probeFile()`.
 - `TestPatternSource` — synthetic sources (`mediamax:testpattern:colorbars`,
   `checkerboard`) used by the self-test and tests so the pipeline works
   without any media files.
@@ -223,7 +240,11 @@ owns the queue). Per frame:
 1. **Flush queued texture uploads** — the texture pool (media, warp and
    status-overlay textures) is updated by the media pump's decode workers
    and the render thread through a lock-guarded queue; the render thread
-   applies the pending uploads at the start of recording.
+   applies the pending uploads at the start of recording. Media textures
+   are format-aware: one RGBA8 texture, or three YUV 4:2:0 plane textures
+   (R8 / R16_UNORM luma at full size, U/V at half) — the flush validates
+   every plane's size against the pool entry and drops the frame on
+   mismatch.
 2. **Clear both ping-pong scene targets** to premultiplied `(0,0,0,1)`.
    (NVRHI render passes always use `loadOp = LOAD`, so anything a layer quad
    does not cover keeps the previous content — both targets must be
@@ -236,7 +257,15 @@ owns the queue). Per frame:
    (`layer.frag`) implements the exact premultiplied-space equations of
    `core/src/blend/Blend.cpp` for all five modes, selected per draw via push
    constants (`LayerPush`: scene size, opacity, blend mode, color,
-   useColor). Per-draw binding set: media SRV, scene SRV, linear sampler.
+   useColor, and for YUV media the media size + pixel format, color matrix
+   and range). YUV 4:2:0 media is converted YUV -> RGB **in the shader**,
+   the exact float32 form of the CPU reference
+   (`core/src/media/VideoConversion.cpp`): luma is sampled at the media UV,
+   U/V at the co-sited chroma coordinate `v_uv + 0.5/mediaSize` (the linear
+   sampler then hits the U/V texel center for even luma positions and
+   blends 50/50 for odd ones — the CPU reference's co-sited bilinear).
+   Per-draw binding set: media SRV, scene SRV, linear sampler, and the two
+   YUV plane SRVs (a never-sampled transparent texture for non-YUV layers).
 5. **Display pass** — one draw per display into the swapchain image (or an
    offscreen target for the self-test): samples the final scene at the
    display's output-space rectangle, applies the projection warp when
@@ -295,7 +324,13 @@ render thread (main)   media pump                       audio thread         con
   scales the uploaded texture to the layer's on-screen size on the GPU
   (bilinear sampling), which is cheaper than a CPU scale and keeps the
   decode pipeline resolution-independent (the setVideoOutputSizeHint API
-  remains for CPU-side consumers without a GPU, e.g. thumbnails).
+  remains for CPU-side consumers without a GPU, e.g. thumbnails). YUV
+  4:2:0 frames are handed to the pool **unconverted** (planar, with their
+  color metadata): the GPU layer pass converts them to RGB in the shader
+  (CPU reference `core/src/media/VideoConversion.cpp`), which removes the
+  ~2-5 ms/frame full-resolution conversion from the decode thread - a
+  4K60 10-bit HEVC loop went from ~971 dropped frames per 30 s (with the
+  CPU conversion) to ~4 (on the GPU).
   Looping layers get a seamless wrap: the worker pre-decodes the loop
   start before the playhead reaches the end. Decoding never blocks the
   render loop.
@@ -443,8 +478,11 @@ never touch the render pipeline directly.
 ## Design invariants (the ones that make the system correct)
 
 1. **Frame state is a pure function of time** (see `playback/` above).
-2. **One blend implementation in two places, kept byte-equivalent**
-   (`Blend.cpp` reference, `layer.frag` GPU).
+2. **The CPU and GPU color math are one implementation in two places, kept
+   equivalent** — compositing (`Blend.cpp` reference, `layer.frag` GPU) and
+   the YUV 4:2:0 -> RGB conversion (`VideoConversion.cpp` reference,
+   `layer.frag` GPU; same constants, same order of operations, same
+   clamps).
 3. **Premultiplied scene, straight media, unpremultiply at the display
    edge.** Clear = `(0,0,0,1)`.
 4. **Exact time internally; `double` seconds only at the wire/file edges.**

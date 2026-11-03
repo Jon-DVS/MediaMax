@@ -160,12 +160,17 @@ commit in the remote history is individually addressable by its version.
    Cues are evaluated as "the last cue of each kind at or before t". If you
    change cue semantics, update `PlaybackEngine`, the show tests and
    `docs/SHOW_FORMAT.md` together.
-2. **CPU and GPU blend must match exactly.**
-   `core/src/blend/Blend.cpp` is the reference (premultiplied-space
-   equations); `render/shaders/layer.frag` re-implements the same equations
-   for the GPU. Change one, change the other, and extend
-   `render/tests/test_Render.cpp` (it compares GPU pixels to
-   `blend::apply` for every blend mode).
+2. **CPU and GPU color math must match exactly — two pairs.**
+   (a) Blend: `core/src/blend/Blend.cpp` is the reference
+   (premultiplied-space equations); `render/shaders/layer.frag` re-implements
+   the same equations for the GPU. (b) YUV 4:2:0 -> RGB:
+   `core/src/media/VideoConversion.cpp` is the reference (float32 equations,
+   BT.601/709/2020 matrices, limited/full range, co-sited chroma upsampling);
+   `render/shaders/layer.frag` re-implements the same math in the shader.
+   Change one, change the other, and extend `render/tests/test_Render.cpp`
+   (it compares GPU pixels to `blend::apply` for every blend mode, and the
+   layer shader's YUV conversion to a double-precision reference of
+   `VideoConversion.cpp`).
 3. **Scene RTs are premultiplied alpha; media is straight alpha; the display
    pass unpremultiplies.** The clear value is `(0,0,0,1)`. `readBackScene`
    unpremultiplies on read. Don't "normalize" this without updating both
