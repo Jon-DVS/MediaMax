@@ -46,11 +46,15 @@ public:
 
     // Hint: the video is displayed at about this size in px (an invalid
     // size = no hint). Sources that scale at decode time (FFmpegSource)
-    // decode at min(native, hint) so the uploaded texture matches what the
-    // display shows - decoding 4K for a 1080p layer wastes CPU and upload
-    // bandwidth. Sources without a scalable path (or without a video
-    // stream) ignore it. Idempotent: a source no-ops while the hint
-    // matches its current output.
+    // decode at min(native, hint). This is the CPU-side escape hatch for
+    // consumers with no GPU: the thumbnail path hints it so a 4K asset
+    // never decodes (and converts) 4K just to draw a 128px thumbnail.
+    // The playback pump deliberately does NOT hint - it decodes at the
+    // native resolution and the render pass scales the uploaded texture
+    // on the GPU (a bilinear texture sample is cheaper than a CPU scale
+    // and stays resolution-independent). Sources without a scalable path
+    // (or without a video stream) ignore it. Idempotent: a source no-ops
+    // while the hint matches its current output.
     virtual void setVideoOutputSizeHint(Size2i) {}
 
     // Sources without a video stream always return false.

@@ -747,13 +747,15 @@ TEST_CASE("FFmpeg: seek repositions the stream without loss or restart (seek con
     std::filesystem::remove(path);
 }
 
-TEST_CASE("FFmpeg: setVideoOutputSizeHint decodes at min(native, hint)")
+TEST_CASE("FFmpeg: video decodes at native size; setVideoOutputSizeHint decodes at min(native, hint)")
 {
-    // The decode worker hints each source with the layer's on-screen size
-    // so a 4K asset displayed at 1080p does not decode (and upload) 4K.
-    // The source must decode at min(native, hint) with even sizes, drop
-    // the old-size frames it has queued, and stay put while the hint is
-    // repeated.
+    // The playback pump does NOT size-hint: it decodes at the media's
+    // native resolution and the render pass scales the uploaded texture to
+    // the layer's on-screen size on the GPU. The hint remains for
+    // CPU-side consumers with no GPU (the thumbnail path): a 4K asset must
+    // never decode 4K just to draw a small thumbnail. A hinted source must
+    // decode at min(native, hint) with even sizes, drop the old-size frames
+    // it has queued, and stay put while the hint is repeated.
     const auto ffmpeg = findFfmpegCli();
     if (ffmpeg.empty())
     {
@@ -792,7 +794,7 @@ TEST_CASE("FFmpeg: setVideoOutputSizeHint decodes at min(native, hint)")
     REQUIRE(meta.height == 90);
 
     VideoFrame frame;
-    // No hint yet: frames come out at the native size.
+    // No hint (the playback path): frames come out at the native size.
     REQUIRE(source->nextVideoFrame(frame, 5000));
     CHECK(frame.width == 160);
     CHECK(frame.height == 90);

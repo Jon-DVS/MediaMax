@@ -279,7 +279,12 @@ render thread (main)   media pump                       audio thread         con
   single-consumer, and layers sharing a file each need their own decode
   position) and pulls `nextVideoFrame`/`nextAudioFrame` toward the
   published targets, handing frames to the renderer's texture pool / audio
-  sink. Looping layers get a seamless wrap: the worker pre-decodes the loop
+  sink. Decoding runs at the media's native resolution - the render pass
+  scales the uploaded texture to the layer's on-screen size on the GPU
+  (bilinear sampling), which is cheaper than a CPU scale and keeps the
+  decode pipeline resolution-independent (the setVideoOutputSizeHint API
+  remains for CPU-side consumers without a GPU, e.g. thumbnails).
+  Looping layers get a seamless wrap: the worker pre-decodes the loop
   start before the playhead reaches the end. Decoding never blocks the
   render loop.
 - `AudioSink` — miniaudio output; mixes the show's audio (one sink per

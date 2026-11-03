@@ -368,13 +368,10 @@ void MediaPump::decodeChannel(Worker& worker, Channel& ch, const LayerTarget& ta
 
     const MediaMetadata md = source->metadata();
     ch.mediaFrameRate = md.frameRate;
-    // Decode at the on-screen size (see IMediaSource::setVideoOutputSizeHint).
-    // Idempotent per pass: the source no-ops while the hint matches its
-    // current output size.
-    if (md.hasVideo && target.onScreenSize.valid())
-    {
-        source->setVideoOutputSizeHint(target.onScreenSize);
-    }
+    // The decode runs at the media's native resolution (no
+    // IMediaSource::setVideoOutputSizeHint): the render pass scales the
+    // uploaded texture to the layer's on-screen size on the GPU, which is
+    // cheaper than a CPU scale and avoids re-decoding on resize.
 
     // Re-seek when the generation changed, when the target jumped backwards
     // (loop wrap or a seek the generation counter did not catch), or on

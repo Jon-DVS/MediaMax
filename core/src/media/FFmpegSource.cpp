@@ -465,9 +465,11 @@ bool FFmpegSource::setupVideo(std::string& error)
     // kInFlightReorderMargin.
     m_VideoInFlightCap = m_VideoCodec->thread_count + kInFlightReorderMargin;
 
-    // Same output-format choice as setVideoOutputSizeHint (the RGB0 no-op
-    // fast path for RGB0 sources): the initial context may outlive all size
-    // hints when the display shows the media at native size.
+    // Output-format choice (the RGB0 no-op fast path for RGB0 sources):
+    // the playback pump decodes at the native size, so this initial
+    // context serves it (an RGB0 source takes swscale's same-format copy
+    // path). Only the thumbnail path recreates the scaler at a smaller
+    // size via setVideoOutputSizeHint.
     const AVPixelFormat outFmt =
         (m_VideoCodec->pix_fmt == AV_PIX_FMT_RGB0) ? AV_PIX_FMT_RGB0 : AV_PIX_FMT_RGBA;
     m_Sws = sws_getContext(m_VideoCodec->width, m_VideoCodec->height,
@@ -1037,9 +1039,10 @@ void FFmpegSource::setVideoOutputSizeHint(Size2i onScreenSize)
 
 void FFmpegSource::decodeVideoFrame(const AVFrame& frame)
 {
-    // The scaler may output below the native resolution (the on-screen size
-    // hint, see setVideoOutputSizeHint); the frame is sized to the scaler's
-    // output, not the decoder's.
+    // The scaler may output below the native resolution (the size hint,
+    // see setVideoOutputSizeHint - the thumbnail path); the frame is sized
+    // to the scaler's output, not the decoder's. The playback path never
+    // hints, so this is the native size there.
     const int outW = m_SwsOutWidth > 0 ? m_SwsOutWidth : frame.width;
     const int outH = m_SwsOutHeight > 0 ? m_SwsOutHeight : frame.height;
 
@@ -1053,7 +1056,7 @@ void FFmpegSource::decodeVideoFrame(const AVFrame& frame)
     int dstStride[4] = {outW * 4, 0, 0, 0};
     // sws_scale returns the number of OUTPUT lines scaled (dst height);
     // the input height is frame.height, which differs when the scaler
-    // downscales (the on-screen size hint).
+    // downscales (the size hint).
     if (sws_scale(m_Sws, frame.data, frame.linesize, 0, frame.height, dst, dstStride) != outH)
     {
         Logger::instance().debug("sws_scale failed for video frame");

@@ -936,14 +936,9 @@ PlaybackApp::FrameSnapshot PlaybackApp::takeFrameSnapshot(const Time& dt)
             {
                 const MediaMetadata& md = (*asset)->metadata;
                 t.mediaSize = Size2i{static_cast<std::int32_t>(md.width), static_cast<std::int32_t>(md.height)};
-                // The layer's on-screen size in px: its transform scale (a
-                // multiplier, see Transform2D) applied to the media size;
-                // abs() covers mirrored (negative) scales. The decode
-                // worker uses it to scale its decode output down to what
-                // the display shows (min(native, on-screen)).
-                t.onScreenSize =
-                    Size2i{static_cast<std::int32_t>(std::llround(std::abs(lf.scaleX) * static_cast<float>(md.width))),
-                           static_cast<std::int32_t>(std::llround(std::abs(lf.scaleY) * static_cast<float>(md.height)))};
+                // The decode runs at the native media size; the render pass
+                // scales the uploaded texture to the layer's on-screen size
+                // on the GPU, so no on-screen size is passed to the pump.
                 t.hasAudio = md.hasAudio;
                 t.audioChannels = md.audioChannels;
                 t.audioSampleRate = md.audioSampleRate;

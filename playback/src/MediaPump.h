@@ -71,11 +71,9 @@ struct LayerTarget
     Time loopStart;
     Time loopEnd;
     Size2i mediaSize{0, 0}; // media display size in px (texture size)
-    // The layer's on-screen size in px (its transform scale applied to the
-    // media size); {0,0} when unknown. The decode worker hints its source
-    // with it, so frames are decoded at min(native, on-screen) - the
-    // display never shows more pixels than the on-screen size.
-    Size2i onScreenSize{0, 0};
+    // The decode worker decodes at the native media size; the render pass
+    // scales the uploaded texture to the layer's on-screen size on the GPU
+    // (bilinear sampling), so there is no decode-size hint here.
     float gain = 1.f; // layer opacity (audio gain)
 
     // Audio properties (zero when the media has no audio).
