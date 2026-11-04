@@ -106,6 +106,10 @@ bool parseArguments(int argc, char** argv, AppArgs& out, std::string& error)
             {
                 out.deviceName = next("--device");
             }
+            else if (a == "--cache-disk")
+            {
+                out.cacheDisk = next("--cache-disk");
+            }
             else if (a == "--width")
             {
                 out.width = std::stoi(next("--width"));
@@ -173,6 +177,11 @@ std::string applicationUsage()
        << "  --device <name>        Vulkan render device to run on (default:\n"
        << "                         the first eligible device; the device\n"
        << "                         list is reported in the status result)\n"
+       << "  --cache-disk <root>    Media cache disk root (e.g. \"D:\\\"); the\n"
+       << "                         cache lives in <root>\\mediamax-cache\n"
+       << "                         (system.setCacheDisk is the protocol\n"
+       << "                         equivalent; an existing cache is copied\n"
+       << "                         across when the disk changes)\n"
        << "  --width <n>            Startup display width (default 1920)\n"
        << "  --height <n>           Startup display height (default 1080)\n"
        << "  --display WxH@X+Y      One physical output; repeat for a wall\n"

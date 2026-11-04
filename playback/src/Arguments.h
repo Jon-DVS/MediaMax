@@ -47,6 +47,10 @@ struct AppArgs
     // device. A device that exists but cannot present to a window's
     // surface fails startup with a clean error.
     std::string deviceName;
+    // Media cache disk root (--cache-disk, e.g. "D:\"); empty = no media
+    // cache until one is set via the control interface (system.
+    // setCacheDisk) or a show's own systems entry names this system.
+    std::string cacheDisk;
 
     bool selfTest = false;
     std::string selfTestOut = "selftest.ppm";

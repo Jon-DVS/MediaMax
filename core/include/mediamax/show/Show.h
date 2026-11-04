@@ -73,6 +73,12 @@ struct SystemReference
     // setRenderDevice); empty = the engine's default selection. The engine
     // stores but does not act on it - the control interface applies it.
     std::string renderDevice;
+    // The disk this system's media cache lives on (system.setCacheDisk), as
+    // a disk root ("C:\\" or "/"). Empty = no media cache. The playback
+    // engine applies the entry that matches itself when a show loads (the
+    // cache folder is <root>/mediamax-cache, see media/MediaCache.h); the
+    // control interface applies it via the protocol.
+    std::string cacheDisk;
 };
 
 class Show

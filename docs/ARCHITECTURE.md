@@ -105,6 +105,15 @@ pixels to this reference for every mode.
   serializes access with its state mutex (the media pump is handed the same
   mutex), which is the synchronization point between the pump's threads and
   everything else.
+- `MediaCache` — the filesystem half of the per-system media cache (the
+  `<root>/mediamax-cache` folder the control interface fills over the
+  network so playback reads locally, see docs/PROTOCOL.md
+  `system.disks` / `system.setCacheDisk`): disk-root normalization, the
+  cache key for a show media path (relative paths are mirrored as written;
+  absolute paths collapse to the file name — they are machine-specific),
+  and the copy of a cache across disks (streaming, idempotent overwrite,
+  total-first progress callback). Plain filesystem work, no platform API —
+  the app provides the disk enumeration.
 - `VideoFrame` — a decoded video frame as planar pixels: one tightly
   packed RGBA plane (`VideoPixelFormat::RGBA`), or three YUV 4:2:0 planes
   (luma at full size, U/V at half; 8-bit `YUV420P` or 10-bit
@@ -319,6 +328,17 @@ render thread (main)   media pump                       audio thread         con
   30 Hz on a 60 Hz display; a show at or above the refresh rate is left to
   the refresh rate). The engine and the media pump stay in wall-clock time
   while presents are skipped.
+- **Media cache disk** (`--cache-disk` at startup, `system.setCacheDisk`
+  over the protocol, or the show's own `systems` entry, which the engine
+  re-applies on every show load for the entry that names it) — the disk
+  root whose `<root>\mediamax-cache` folder holds the show's media (see
+  `media/MediaCache`). The app enumerates the machine's disks for
+  `system.disks` (WinAPI `GetLogicalDrives` + a directory check), creates
+  the cache folder when a disk is set, and when the disk changes, copies
+  the existing cache across on its own worker thread — a multi-GB copy
+  must not sit under the state mutex inside the command handler; progress
+  reaches the control through `status.cacheCopy`, and `shutdown()` joins
+  the worker before the command server goes away.
 - `MediaPump` — a coordinator thread plus one decode worker thread per
   active media layer. Each worker owns its layer's `IMediaSource` instance
   (opened through the library's source factory - a source is

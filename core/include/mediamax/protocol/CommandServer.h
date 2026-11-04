@@ -70,6 +70,23 @@ struct RenderDeviceInfo
 // engine's default selection (first eligible device).
 using RenderDeviceSwitchFunction = std::function<bool(const std::string& device, std::string& error)>;
 
+// Host callback for system.disks: the app enumerates the disks present on
+// the machine (the core has no platform access). Returns false with
+// `error` when the enumeration itself fails.
+using DisksFunction = std::function<bool(std::vector<std::string>& disks, std::string& error)>;
+
+// Host callback for system.setCacheDisk: the app owns the cache folder
+// (its creation, the copy of an existing cache to the new disk, and the
+// app's own cache-disk state), so applying the request is app work.
+// `diskRoot` is the validated canonical disk root (the empty string clears
+// the cache); `previousRoot` is the current one (the app starts the
+// cache copy when the two differ and the old cache has content). It runs
+// while handle() executes (under the caller's lock) and must not block for
+// long (a cache copy is spawned, not performed, here).
+using CacheDiskRequestFunction =
+    std::function<bool(const std::string& diskRoot, const std::string& previousRoot,
+                       std::string& error)>;
+
 class CommandServer
 {
 public:
@@ -102,6 +119,36 @@ public:
     void setRenderDeviceSwitchFunction(RenderDeviceSwitchFunction fn)
     {
         m_RenderDeviceSwitchFn = std::move(fn);
+    }
+
+    // Sets the disk-enumeration callback (see DisksFunction). system.disks
+    // and the disk validation of system.setCacheDisk fail with a clean
+    // error until one is installed.
+    void setDiskFunction(DisksFunction fn) { m_DisksFn = std::move(fn); }
+
+    // Sets the cache-disk apply callback (see CacheDiskRequestFunction).
+    // system.setCacheDisk fails with a clean error until one is installed.
+    void setCacheDiskRequestFunction(CacheDiskRequestFunction fn)
+    {
+        m_CacheDiskRequestFn = std::move(fn);
+    }
+
+    // The cache disk (a canonical disk root, or empty) reported in
+    // "status". Set by system.setCacheDisk (after the app accepted the
+    // request) and by the app itself when it applies the setting outside
+    // the command path (startup flag, the show's own systems entry).
+    void setCacheDisk(const std::string& diskRoot) { m_CacheDisk = diskRoot; }
+    std::string cacheDisk() const { return m_CacheDisk; }
+
+    // The cache-copy progress reported in "status" as `cacheCopy`
+    // ({"bytesCopied","bytesTotal"}) while a copy across disks runs: the
+    // app's copy worker updates it, the final call passes active = false.
+    void setCacheCopyProgress(bool active, std::uint64_t bytesCopied, std::uint64_t bytesTotal)
+    {
+        std::lock_guard lock(m_CacheCopyMutex);
+        m_CacheCopyActive = active;
+        m_CacheCopyBytes = bytesCopied;
+        m_CacheCopyTotal = bytesTotal;
     }
 
     // The render devices reported in "status" (the "renderDevice" block):
@@ -168,6 +215,8 @@ private:
     nlohmann::json handleFrameState() const;
     nlohmann::json handleSystemSet(const nlohmann::json& params) const;
     nlohmann::json handleSystemSetRenderDevice(const nlohmann::json& params) const;
+    nlohmann::json handleSystemDisks() const;
+    nlohmann::json handleSystemSetCacheDisk(const nlohmann::json& params) const;
     nlohmann::json handleLogTail(const nlohmann::json& params) const;
     nlohmann::json handleShowLoad(const nlohmann::json& params) const;
     nlohmann::json handleShowLoadJson(const nlohmann::json& params) const;
@@ -231,6 +280,7 @@ private:
     MediaLibrary& m_Media;
     DisplayManager& m_Displays;
     mutable std::string m_SystemName; // mutable: system.set mutates it under lock
+    mutable std::string m_CacheDisk;  // mutable: system.setCacheDisk mutates it under lock
     std::string m_HostName;           // machine computer name (status "hostname")
     std::string m_Ip;                 // machine primary IPv4 (status "ip")
     std::atomic<std::uint64_t> m_DroppedVideoFrames{0}; // status "droppedVideoFrames"
@@ -249,6 +299,15 @@ private:
     // lock, like m_SystemName under system.set.
     mutable bool m_RenderDeviceSwitching = false;
     RenderDeviceSwitchFunction m_RenderDeviceSwitchFn;
+    DisksFunction m_DisksFn;
+    CacheDiskRequestFunction m_CacheDiskRequestFn;
+    // Cache-copy progress (status "cacheCopy"): the app's copy worker
+    // writes it from its own thread, the command threads read it for
+    // status - hence its own lock, like m_RenderDeviceMutex.
+    mutable std::mutex m_CacheCopyMutex;
+    bool m_CacheCopyActive = false;
+    std::uint64_t m_CacheCopyBytes = 0;
+    std::uint64_t m_CacheCopyTotal = 0;
 
     // Log ring buffer (log.tail): serious engine messages the control
     // surface reports. Guarded by m_LogMutex: any thread can log through

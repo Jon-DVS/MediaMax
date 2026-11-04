@@ -27,10 +27,16 @@ TEST_CASE("Round trip: full show serializes and parses back")
 
     // Target systems (issue 18): the show file carries the system list.
     // "Main Wall" pins its render device; "Lobby" keeps the engine default
-    // (the field must be omitted from the JSON, not written as empty).
+    // (the field must be omitted from the JSON, not written as empty) but
+    // names its media cache disk.
     original.systems.push_back({"Main Wall", "192.168.1.50", 47600});
     original.systems.back().renderDevice = "AMD Radeon Pro W7800";
     original.systems.push_back({"Lobby", "192.168.1.51", 47601});
+#if defined(_WIN32)
+    original.systems.back().cacheDisk = "D:\\";
+#else
+    original.systems.back().cacheDisk = "/";
+#endif
 
     const nlohmann::json json = original.toJson();
     std::string error;
@@ -77,9 +83,19 @@ TEST_CASE("Round trip: full show serializes and parses back")
     CHECK(s.systems[1].host == "192.168.1.51");
     CHECK(s.systems[1].port == 47601);
     CHECK(s.systems[1].renderDevice.empty());
-    // The unselected entry omits the field from the serialized JSON.
+#if defined(_WIN32)
+    CHECK(s.systems[0].cacheDisk.empty());
+    CHECK(s.systems[1].cacheDisk == "D:\\");
+#else
+    CHECK(s.systems[0].cacheDisk.empty());
+    CHECK(s.systems[1].cacheDisk == "/");
+#endif
+    // The unset entry omits the field from the serialized JSON (additive
+    // - older files without it parse with an empty cache disk).
     CHECK(json.at("systems")[0].contains("renderDevice"));
     CHECK_FALSE(json.at("systems")[1].contains("renderDevice"));
+    CHECK_FALSE(json.at("systems")[0].contains("cacheDisk"));
+    CHECK(json.at("systems")[1].contains("cacheDisk"));
 }
 
 TEST_CASE("Cue round trip: every action type")
@@ -189,6 +205,14 @@ TEST_CASE("fromJson rejects malformed input")
              {{{"name", "a"}, {"host", "b"}, {"renderDevice", 42}}})},
     };
     CHECK_FALSE(Show::fromJson(badSysDevice, error).has_value());
+
+    nlohmann::json badSysCacheDisk = {
+        {"app", "mediamax-show"},
+        {"version", 1},
+        {"systems",
+         nlohmann::json::array({{{"name", "a"}, {"host", "b"}, {"cacheDisk", 42}}})},
+    };
+    CHECK_FALSE(Show::fromJson(badSysCacheDisk, error).has_value());
 
     // A display entry must carry a non-empty name (the name is the wall's
     // identity).

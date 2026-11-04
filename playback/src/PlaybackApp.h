@@ -41,6 +41,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <GLFW/glfw3.h>
@@ -186,6 +187,24 @@ private:
     // itself is frame-loop work - see processPendingDeviceSwitch). An
     // empty `device` means the engine's default selection.
     bool requestDeviceSwitch(const std::string& device, std::string& error);
+    // The disks present on this machine (system.disks callback): the root
+    // of every logical drive that currently is a directory ("C:\").
+    bool listDisks(std::vector<std::string>& disks, std::string& error);
+    // Applies a media cache disk root (empty clears it): normalizes,
+    // ensures the <root>\mediamax-cache folder, records the change in the
+    // command server's status, and - when the disk actually changed and
+    // the old cache has content - starts the cache copy on its worker
+    // thread (the command handler must not perform a multi-GB copy under
+    // the state mutex). Called with m_StateMutex held (the command
+    // handler, the show-load hook) or before any other thread runs (the
+    // startup --cache-disk flag).
+    bool applyCacheDisk(const std::string& root, std::string& error);
+    // After a successful show load: applies the cache disk of the systems
+    // entry that names this system (the show file is where the choice
+    // persists across engine restarts). A no-op when the loaded show has
+    // no matching entry or its entry sets no disk. Called with m_StateMutex
+    // held (or before any other thread runs, at startup).
+    void applyShowCacheDisk();
     // Executes a queued render device switch on the render thread: quiesce
     // the GPU, destroy the swapchains / scene renderer / NVRHI device,
     // recreate everything on the requested physical device (the scene
@@ -245,6 +264,15 @@ private:
     // This machine's computer name (gethostname, computed once in run());
     // reported in the status result's "hostname".
     std::string m_SystemHost;
+    // The media cache disk (a canonical disk root, e.g. "C:\\"; empty = no
+    // cache). Under m_StateMutex: the command handler, the show-load hook
+    // and the startup flag write it; the command server reports it in
+    // "status" (its own copy, kept in sync by applyCacheDisk).
+    std::string m_CacheDisk;
+    // The cache-copy worker (system.setCacheDisk across disks): the copy
+    // runs here so a large cache does not block the command handler;
+    // joined in shutdown() before the command server goes away.
+    std::thread m_CacheCopyThread;
 
     // --- Pump / audio (own locks) -------------------------------------------------
 

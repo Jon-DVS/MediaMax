@@ -273,6 +273,11 @@ nlohmann::json Show::toJson() const
         {
             sysJson["renderDevice"] = sys.renderDevice;
         }
+        // Optional, additive: the media cache disk (system.setCacheDisk).
+        if (!sys.cacheDisk.empty())
+        {
+            sysJson["cacheDisk"] = sys.cacheDisk;
+        }
         systemsArr.push_back(std::move(sysJson));
     }
     j["systems"] = systemsArr;
@@ -521,6 +526,18 @@ std::optional<Show> Show::fromJson(const nlohmann::json& in, std::string& error)
                     return std::nullopt;
                 }
                 sys.renderDevice = sj["renderDevice"].get<std::string>();
+            }
+            // Additive (absent in older files = no media cache). The string
+            // shape (a disk root) is validated by the system that applies
+            // it (system.setCacheDisk), not here.
+            if (sj.contains("cacheDisk"))
+            {
+                if (!sj["cacheDisk"].is_string())
+                {
+                    error = "show file: invalid systems entry";
+                    return std::nullopt;
+                }
+                sys.cacheDisk = sj["cacheDisk"].get<std::string>();
             }
             show.systems.push_back(std::move(sys));
         }

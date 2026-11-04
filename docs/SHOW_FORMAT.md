@@ -225,7 +225,8 @@ times until another cue of the same kind targets the same layer.
 "systems": [
   { "name": "Main Wall", "host": "192.168.1.50", "port": 47600,
     "renderDevice": "NVIDIA RTX 6000 Ada Generation" },
-  { "name": "Lobby",     "host": "192.168.1.51", "port": 47600 }
+  { "name": "Lobby",     "host": "192.168.1.51", "port": 47600,
+    "cacheDisk": "D:\\" }
 ]
 ```
 
@@ -235,15 +236,22 @@ times until another cue of the same kind targets the same layer.
 | `host` | string | yes | IP address (or hostname) of the machine running the playback engine |
 | `port` | int 1..65535 | no | Control-protocol port (default 47600) |
 | `renderDevice` | string | no | The Vulkan device this system should render on (name from the engine's `status.renderDevice.available`); empty/absent = the engine's default selection |
+| `cacheDisk` | string | no | The disk root (e.g. `"D:\"`) of this system's media cache (the `<root>\mediamax-cache` folder, see docs/PROTOCOL.md `system.setCacheDisk`); empty/absent = no media cache |
 
 The show file is where the system list lives: the control GUI loads its
 system list when a show is opened (File > Open) and writes it back in when
 the show is saved or pushed, and the CLI resolves `--system <name|idx>`
 from it (`--show <file>`). This is **client-side targeting info** — the
 playback engine parses and stores the fields but does not use them for
-rendering; `renderDevice` is applied by the control via
-`system.setRenderDevice` (and re-applied whenever the system reconnects,
-so the selection survives engine restarts on multi-GPU machines).
+rendering. Two fields do get applied, and by different parties:
+`renderDevice` by the control via `system.setRenderDevice` (and re-applied
+whenever the system reconnects, so the selection survives engine restarts
+on multi-GPU machines), and `cacheDisk` by the playback engine **itself**
+— when a show loads, the engine finds the entry that names it (by system
+name, or by port for an unnamed engine) and applies the disk through the
+same path as `system.setCacheDisk` (create the cache folder, copy an
+existing cache across when the disk changed), so the choice survives
+engine restarts without the control being online.
 
 ## Displays (the wall)
 

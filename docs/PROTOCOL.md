@@ -71,6 +71,7 @@ Full snapshot of the system.
 | `version` | engine build version (e.g. `"0.1.4"`; the project version, bumped before every commit) |
 | `hostname` | computer name of the machine running the engine (empty when unknown) |
 | `ip` | the machine's primary IPv4 address (`"127.0.0.1"` when it cannot be determined) |
+| `cacheDisk` | the media cache disk root (e.g. `"C:\"`), or empty when no cache disk is set (see `system.setCacheDisk`) |
 | `droppedVideoFrames` | video frames that were due for display but never shown, total since engine start (all layers, high-water mark). `0` when playback keeps up. Reported by the playback app from its media pump; headless engine instances always report `0` |
 | `state` | `stopped` / `playing` / `paused` |
 | `time` | current show time (s) |
@@ -85,6 +86,7 @@ Full snapshot of the system.
 | `displays` | array of display objects (below) |
 | `scenes` | `[{"id","name","layers":<count>}]` |
 | `renderDevice` | the engine's Vulkan render device (below). **Optional**: present only when the app owns a Vulkan context (the playback app); headless engine instances omit the field |
+| `cacheCopy` | the in-flight copy of the media cache to a new disk (`{"bytesCopied","bytesTotal"}`). **Optional**: present only while a copy started by `system.setCacheDisk` runs; absent otherwise |
 
 `time` and `timecode` are sampled when the poll is answered. A client that
 renders a continuous clock between polls (the control GUI's Playback tab)
@@ -158,6 +160,47 @@ Engines that do not support device selection reject the command with a
 clean error; clients should check `status.renderDevice` first. The
 playback app also accepts `--device <name>` at startup (see the
 executable's `--help`).
+
+### `system.disks`
+
+The disks present on the machine the engine runs on, as canonical disk
+roots (`"C:\"`, `"D:\", ...`; the playback app reports every logical drive
+that currently is a directory — fixed, removable and network alike, dead
+entries dropped). The control interface offers them in the media-cache
+disk picker (`system.setCacheDisk`).
+
+- Params: none.
+- Result: `{"disks":["C:\\","D:\\"]}`.
+- Fails with a clean error on engines without disk access (headless test
+  instances; the playback app always provides it).
+
+### `system.setCacheDisk`
+
+Set (or clear) the disk this system's media cache lives on. The cache is
+the `<root>\mediamax-cache` folder the control interface fills with the
+show's media (`media.put`, see Media) so playback reads from the local
+disk instead of a path that only exists on the control machine.
+
+- Params: `disk` (string, required). A disk root in any spelling the
+  picker produces (`"C"`, `"C:"`, `"c:\"`, `"C:\"` — normalized before
+  anything happens), or the empty string to clear the cache disk. A
+  non-empty value must be one of the `system.disks` roots.
+- Result: `{"cacheDisk":"D:\\","cacheDir":"D:\\mediamax-cache","copying":false}`
+  (`cacheDir` omitted when clearing; `copying` true when a cache copy
+  across disks was started by this call). Setting the disk that is already
+  active is a no-op success.
+- Behavior: the engine creates the cache folder on the new disk when it
+  does not exist yet. When the disk changes and the old disk's cache
+  holds content, the engine copies the cache across on a worker thread
+  (idempotent overwrite, progress in `status.cacheCopy`) — a re-apply of
+  the same disk (e.g. every show load) never re-triggers the copy.
+- The setting persists in the show file's `systems` entry
+  (`cacheDisk`, see docs/SHOW_FORMAT.md): the playback engine re-applies
+  its own entry when a show loads, and the control interface re-applies it
+  on (re)connect, so the choice survives engine restarts.
+- Fails with a clean error when the value is not a disk root, the root is
+  not present on this machine, or the engine cannot take disk work
+  (headless test instances).
 
 ### `log.tail`
 

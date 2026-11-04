@@ -11,6 +11,7 @@
 
 #include "mediamax/blend/Blend.h"
 #include "mediamax/math/Transform2D.h"
+#include "mediamax/media/MediaCache.h"
 #include "mediamax/time/FrameRate.h"
 #include "mediamax/util/Base64.h"
 #include "mediamax/util/File.h"
@@ -175,6 +176,8 @@ std::vector<std::string> CommandServer::supportedMethods()
             "frame.state",
             "system.set",
             "system.setRenderDevice",
+            "system.disks",
+            "system.setCacheDisk",
             "log.tail",
             "show.load",
             "show.loadJson",
@@ -225,6 +228,14 @@ Response CommandServer::handle(const Command& cmd) const
         else if (cmd.method == "system.setRenderDevice")
         {
             result = handleSystemSetRenderDevice(cmd.params);
+        }
+        else if (cmd.method == "system.disks")
+        {
+            result = handleSystemDisks();
+        }
+        else if (cmd.method == "system.setCacheDisk")
+        {
+            result = handleSystemSetCacheDisk(cmd.params);
         }
         else if (cmd.method == "log.tail")
         {
@@ -398,11 +409,23 @@ nlohmann::json CommandServer::handleStatus() const
         }
     }
 
+    // The media-cache copy in flight (system.setCacheDisk across disks):
+    // the app's copy worker reports it; omitted when no copy runs.
+    nlohmann::json cacheCopy;
+    {
+        std::lock_guard lock(m_CacheCopyMutex);
+        if (m_CacheCopyActive)
+        {
+            cacheCopy = {{"bytesCopied", m_CacheCopyBytes}, {"bytesTotal", m_CacheCopyTotal}};
+        }
+    }
+
     nlohmann::json result = {
         {"system", m_SystemName},
         {"version", MEDIAMAX_VERSION},
         {"hostname", m_HostName},
         {"ip", m_Ip},
+        {"cacheDisk", m_CacheDisk},
         {"droppedVideoFrames", m_DroppedVideoFrames.load()},
         {"state", PlaybackEngine::stateToString(m_Engine.state())},
         {"time", state.showTime.toSeconds()},
@@ -420,6 +443,10 @@ nlohmann::json CommandServer::handleStatus() const
     if (!renderDevice.is_null())
     {
         result["renderDevice"] = std::move(renderDevice);
+    }
+    if (!cacheCopy.is_null())
+    {
+        result["cacheCopy"] = std::move(cacheCopy);
     }
     return result;
 }
@@ -576,6 +603,102 @@ nlohmann::json CommandServer::handleSystemSetRenderDevice(const nlohmann::json& 
     // result's "renderDevice.switching" tracks it until the app clears it.
     m_RenderDeviceSwitching = true;
     return {{"device", device.empty() ? "(default)" : device}, {"switching", true}};
+}
+
+nlohmann::json CommandServer::handleSystemDisks() const
+{
+    if (!m_DisksFn)
+    {
+        throw ParameterError("disk enumeration is not available on this system");
+    }
+    std::vector<std::string> disks;
+    std::string error;
+    if (!m_DisksFn(disks, error))
+    {
+        throw ParameterError(error.empty() ? "disk enumeration failed" : error);
+    }
+    nlohmann::json arr = nlohmann::json::array();
+    for (const auto& disk : disks)
+    {
+        arr.push_back(disk);
+    }
+    return {{"disks", arr}};
+}
+
+nlohmann::json CommandServer::handleSystemSetCacheDisk(const nlohmann::json& params) const
+{
+    // "disk" is required: a disk root ("C:\\"), or the empty string to
+    // clear the cache (the cache folder is then left in place; media
+    // resolution simply stops consulting it).
+    const std::string disk = requireString(params, "disk");
+
+    std::string root;
+    if (!disk.empty())
+    {
+        const auto normalized = mediamax::media::normalizeDiskRoot(disk);
+        if (!normalized)
+        {
+            throw ParameterError("not a disk root: " + disk + " (expected e.g. \"C:\\\")");
+        }
+        // The root must be a disk the machine actually has (system.disks):
+        // a typo'd letter or a disconnected drive is rejected here, not
+        // discovered mid-copy.
+        if (!m_DisksFn)
+        {
+            throw ParameterError("disk enumeration is not available on this system");
+        }
+        std::vector<std::string> disks;
+        std::string enumError;
+        if (!m_DisksFn(disks, enumError))
+        {
+            throw ParameterError(enumError.empty() ? "disk enumeration failed" : enumError);
+        }
+        const bool known = std::any_of(disks.begin(), disks.end(), [&](const auto& candidate) {
+            return candidate == *normalized;
+        });
+        if (!known)
+        {
+            throw ParameterError("disk not present on this system: " + normalized->string());
+        }
+        root = normalized->string();
+    }
+
+    // Unchanged: a no-op success (re-applying the show's systems entry on
+    // every show load must not re-trigger the copy).
+    if (root == m_CacheDisk)
+    {
+        nlohmann::json result = {{"cacheDisk", root}};
+        if (!root.empty())
+        {
+            result["cacheDir"] =
+                (std::filesystem::path(root) / mediamax::media::kCacheFolder).string();
+        }
+        result["copying"] = false;
+        return result;
+    }
+
+    if (!m_CacheDiskRequestFn)
+    {
+        throw ParameterError("a media cache is not available on this system");
+    }
+    std::string error;
+    if (!m_CacheDiskRequestFn(root, m_CacheDisk, error))
+    {
+        throw ParameterError(error.empty() ? "the engine rejected the cache disk change" : error);
+    }
+    m_CacheDisk = root;
+
+    bool copying = false;
+    {
+        std::lock_guard lock(m_CacheCopyMutex);
+        copying = m_CacheCopyActive;
+    }
+    nlohmann::json result = {{"cacheDisk", root}, {"copying", copying}};
+    if (!root.empty())
+    {
+        result["cacheDir"] = (std::filesystem::path(root) / mediamax::media::kCacheFolder).string();
+    }
+    return result;
 }
 
 void CommandServer::pushLog(LogLevel level, const std::string& message)

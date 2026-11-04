@@ -218,6 +218,200 @@ TEST_CASE("system.set renames the system")
     CHECK(f.run("ping").result.at("system").get<std::string>() == "lobby");
 }
 
+TEST_CASE("system.disks reports the app's disk list")
+{
+    // No enumeration callback (the core fixture has no platform access):
+    // a clean failure, not an empty list.
+    {
+        Fixture f;
+        const Response resp = f.run("system.disks");
+        CHECK_FALSE(resp.ok);
+        CHECK(resp.error.find("not available") != std::string::npos);
+    }
+    {
+        Fixture f;
+        f.server.setDiskFunction(
+            [](std::vector<std::string>& disks, std::string&) {
+#if defined(_WIN32)
+                disks = {"C:\\", "D:\\"};
+#else
+                disks = {"/"};
+#endif
+                return true;
+            });
+        const Response resp = f.run("system.disks");
+        REQUIRE(resp.ok);
+#if defined(_WIN32)
+        CHECK(resp.result.at("disks").size() == 2);
+        CHECK(resp.result.at("disks")[0].get<std::string>() == "C:\\");
+        CHECK(resp.result.at("disks")[1].get<std::string>() == "D:\\");
+#else
+        CHECK(resp.result.at("disks").size() == 1);
+#endif
+    }
+    {
+        Fixture f;
+        f.server.setDiskFunction(
+            [](std::vector<std::string>&, std::string& error) {
+                error = "drive query failed";
+                return false;
+            });
+        const Response resp = f.run("system.disks");
+        CHECK_FALSE(resp.ok);
+        CHECK(resp.error.find("drive query failed") != std::string::npos);
+    }
+}
+
+TEST_CASE("system.setCacheDisk validates the disk and applies it")
+{
+    // No callbacks installed: a clean failure (the disk must normalize
+    // first, so the per-platform root spelling is used).
+    {
+        Fixture f;
+#if defined(_WIN32)
+        const Response resp = f.run("system.setCacheDisk", {{"disk", "C:"}});
+#else
+        const Response resp = f.run("system.setCacheDisk", {{"disk", "/"}});
+#endif
+        CHECK_FALSE(resp.ok);
+        CHECK(resp.error.find("not available") != std::string::npos);
+    }
+    {
+        Fixture f;
+        std::vector<std::string> fakeDisks;
+#if defined(_WIN32)
+        fakeDisks = {"C:\\", "D:\\"};
+#else
+        fakeDisks = {"/"};
+#endif
+        f.server.setDiskFunction(
+            [&fakeDisks](std::vector<std::string>& disks, std::string&) {
+                disks = fakeDisks;
+                return true;
+            });
+        std::string requested, previous;
+        f.server.setCacheDiskRequestFunction([&](const std::string& root,
+                                                 const std::string& previousRoot,
+                                                 std::string&) {
+            requested = root;
+            previous = previousRoot;
+            return true;
+        });
+
+        // The entered spelling is normalized before it reaches the app.
+#if defined(_WIN32)
+        const Response resp = f.run("system.setCacheDisk", {{"disk", "d:"}});
+        const char expectedRoot[] = "D:\\";
+        const char expectedDir[] = "D:\\mediamax-cache";
+#else
+        const Response resp = f.run("system.setCacheDisk", {{"disk", "/"}});
+        const char expectedRoot[] = "/";
+        const char expectedDir[] = "/mediamax-cache";
+#endif
+        REQUIRE(resp.ok);
+        CHECK(requested == expectedRoot);
+        CHECK(previous.empty());
+        CHECK(resp.result.at("cacheDisk").get<std::string>() == expectedRoot);
+        CHECK(resp.result.at("cacheDir").get<std::string>() == expectedDir);
+        CHECK(resp.result.at("copying").get<bool>() == false);
+        CHECK(f.run("status").result.at("cacheDisk").get<std::string>() == expectedRoot);
+
+        // An unchanged re-apply is a no-op (a show load re-applies the
+        // entry on every load).
+        const Response again = f.run("system.setCacheDisk", {{"disk", expectedRoot}});
+        REQUIRE(again.ok);
+        CHECK(again.result.at("copying").get<bool>() == false);
+        CHECK(requested == expectedRoot); // the callback ran once, not twice
+
+        // Clearing: empty disk, no cacheDir in the result.
+        const Response clear = f.run("system.setCacheDisk", {{"disk", ""}});
+        REQUIRE(clear.ok);
+        CHECK(clear.result.at("cacheDisk").get<std::string>().empty());
+        CHECK_FALSE(clear.result.contains("cacheDir"));
+        CHECK(f.run("status").result.at("cacheDisk").get<std::string>().empty());
+        CHECK(previous == expectedRoot); // the app saw the old root
+    }
+}
+
+TEST_CASE("system.setCacheDisk rejects disks that are not on the machine")
+{
+    Fixture f;
+    f.server.setDiskFunction(
+        [](std::vector<std::string>& disks, std::string&) {
+#if defined(_WIN32)
+            disks = {"C:\\"};
+#else
+            disks = {"/"};
+#endif
+            return true;
+        });
+    f.server.setCacheDiskRequestFunction(
+        [](const std::string&, const std::string&, std::string&) { return true; });
+
+    // Not a disk root at all (a directory on a disk).
+    {
+        const Response resp =
+#if defined(_WIN32)
+            f.run("system.setCacheDisk", {{"disk", "C:\\Users\\shows"}});
+#else
+            f.run("system.setCacheDisk", {{"disk", "/home"}});
+#endif
+        CHECK_FALSE(resp.ok);
+        CHECK(resp.error.find("not a disk root") != std::string::npos);
+    }
+    // A root the machine does not have (the apply callback must not run,
+    // and the state must not move).
+    {
+        bool called = false;
+        f.server.setCacheDiskRequestFunction([&](const std::string&, const std::string&,
+                                                 std::string&) {
+            called = true;
+            return true;
+        });
+#if defined(_WIN32)
+        const Response resp = f.run("system.setCacheDisk", {{"disk", "Z:"}});
+        CHECK_FALSE(resp.ok);
+        CHECK(resp.error.find("not present") != std::string::npos);
+        CHECK_FALSE(called);
+        CHECK(f.run("status").result.at("cacheDisk").get<std::string>().empty());
+#else
+        // POSIX has exactly one disk, so the unknown-root case is the
+        // not-a-root branch above; apply the only disk and check the
+        // callback ran.
+        const Response resp = f.run("system.setCacheDisk", {{"disk", "/"}});
+        CHECK(resp.ok);
+        CHECK(called);
+#endif
+    }
+    // The missing parameter names the parameter.
+    CHECK_FALSE(f.run("system.setCacheDisk").ok);
+    CHECK(f.run("system.setCacheDisk").error.find("disk") != std::string::npos);
+}
+
+TEST_CASE("status reports the cache copy progress while a copy runs")
+{
+    Fixture f;
+    // Idle: no cacheCopy block (omitted, not null/zero).
+    const Response idle = f.run("status");
+    REQUIRE(idle.ok);
+    CHECK_FALSE(idle.result.contains("cacheCopy"));
+    CHECK(idle.result.at("cacheDisk").get<std::string>().empty());
+
+    f.server.setCacheDisk("C:"); // as the app would, outside the command
+    f.server.setCacheCopyProgress(true, 12, 50);
+    const Response busy = f.run("status");
+    REQUIRE(busy.ok);
+    REQUIRE(busy.result.contains("cacheCopy"));
+    CHECK(busy.result.at("cacheCopy").at("bytesCopied").get<std::uint64_t>() == 12);
+    CHECK(busy.result.at("cacheCopy").at("bytesTotal").get<std::uint64_t>() == 50);
+
+    f.server.setCacheCopyProgress(false, 0, 0);
+    const Response done = f.run("status");
+    REQUIRE(done.ok);
+    CHECK_FALSE(done.result.contains("cacheCopy"));
+    CHECK(done.result.at("cacheDisk").get<std::string>() == "C:");
+}
+
 TEST_CASE("status omits the render device block until the app reports it")
 {
     // The core fixture has no GPU: the app (which owns the Vulkan context)

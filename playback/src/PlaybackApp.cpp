@@ -1,18 +1,25 @@
 #include "PlaybackApp.h"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 
 #include "LocalAddress.h"
 #include "WindowSurface.h"
 #include "mediamax/media/FFmpegSupport.h"
+#include "mediamax/media/MediaCache.h"
 #include "mediamax/media/MediaThumbnail.h"
 #include "mediamax/overlay/StatusOverlay.h"
 #include "mediamax/show/Show.h"
 #include "mediamax/util/Logger.h"
+
+#if defined(_WIN32)
+#include <windows.h>
+#endif
 
 namespace mediamax
 {
@@ -55,6 +62,40 @@ std::string monitorName(GLFWmonitor* monitor)
 {
     const char* name = monitor ? glfwGetMonitorName(monitor) : nullptr;
     return name ? std::string(name) : std::string();
+}
+
+// Case-insensitive system-name comparison (the show's systems entry is
+// authored by hand; the engine's name is set by flag or the control).
+bool sameSystemName(const std::string& a, const std::string& b)
+{
+    if (a.size() != b.size())
+    {
+        return false;
+    }
+    for (size_t i = 0; i < a.size(); ++i)
+    {
+        if (std::tolower(static_cast<unsigned char>(a[i])) !=
+            std::tolower(static_cast<unsigned char>(b[i])))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+// True when a cache directory exists and holds at least one entry (the
+// cache-copy decision: an empty old cache has nothing to move).
+bool cacheHasContent(const std::string& diskRoot)
+{
+    const std::filesystem::path dir = media::cacheDirFor(diskRoot);
+    std::error_code ec;
+    if (!std::filesystem::is_directory(dir, ec) || ec)
+    {
+        return false;
+    }
+    std::filesystem::directory_iterator it(dir, ec);
+    // A default-constructed directory_iterator is the end sentinel.
+    return !ec && it != std::filesystem::directory_iterator();
 }
 
 // The monitor a window is primarily on (its physical output).
@@ -425,6 +466,13 @@ void PlaybackApp::shutdown()
 {
     auto& log = Logger::instance();
 
+    // A cache copy across disks (system.setCacheDisk) may still be running
+    // on its worker; join it before the command server it reports progress
+    // to goes away (the copy is local disk I/O - bounded, not a hang).
+    if (m_CacheCopyThread.joinable())
+    {
+        m_CacheCopyThread.join();
+    }
     m_ControlServer.reset(); // stops the accept thread + client threads
     // The logger listener forwards into m_CommandServer (destroyed when the
     // app goes away); detach it now that no command thread can log.
@@ -1599,13 +1647,152 @@ protocol::Response PlaybackApp::handleCommand(const protocol::Command& cmd)
         return m_CommandServer->handle(cmd);
     }
     std::lock_guard lock(m_StateMutex);
-    return m_CommandServer->handle(cmd);
+    const protocol::Response resp = m_CommandServer->handle(cmd);
+    // A show is where the system's cache disk persists: when a loaded show
+    // names this system with a disk, the engine's cache follows it (the
+    // same apply path as system.setCacheDisk, including the copy).
+    if (resp.ok && (cmd.method == "show.load" || cmd.method == "show.loadJson"))
+    {
+        applyShowCacheDisk();
+    }
+    return resp;
 }
 
 Id PlaybackApp::loadMediaFile(const std::string& path, std::string& error)
 {
     // Called with m_StateMutex held (the command handler holds it).
     return m_Library.load(path, error);
+}
+
+bool PlaybackApp::listDisks(std::vector<std::string>& disks, std::string& error)
+{
+    (void)error;
+#if defined(_WIN32)
+    // Every logical drive currently present (fixed, removable and network
+    // alike); the is_directory check drops dead entries (an empty floppy
+    // slot, a disconnected network share).
+    const std::uint32_t mask = GetLogicalDrives();
+    for (int i = 0; i < 26; ++i)
+    {
+        if ((mask & (1u << i)) == 0)
+        {
+            continue;
+        }
+        const std::string root = std::string(1, static_cast<char>('A' + i)) + ":\\";
+        std::error_code ec;
+        if (std::filesystem::is_directory(root, ec) && !ec)
+        {
+            disks.push_back(root);
+        }
+    }
+    return true;
+#else
+    disks.push_back("/");
+    return true;
+#endif
+}
+
+bool PlaybackApp::applyCacheDisk(const std::string& root, std::string& error)
+{
+    auto& log = Logger::instance();
+
+    // The command path arrives normalized + validated (system.
+    // setCacheDisk); the startup flag and a show's systems entry arrive
+    // as entered, so normalize here - an entered value that is not a disk
+    // root is a clean failure, not a guess.
+    std::string normalized;
+    if (!root.empty())
+    {
+        const auto disk = media::normalizeDiskRoot(root);
+        if (!disk)
+        {
+            error = "not a disk root: " + root + " (expected e.g. \"C:\\\")";
+            return false;
+        }
+        normalized = disk->string();
+        if (!media::ensureCacheDir(*disk, error))
+        {
+            error = "cache disk: " + error;
+            return false;
+        }
+    }
+
+    const std::string previous = m_CacheDisk;
+    m_CacheDisk = normalized;
+    m_CommandServer->setCacheDisk(m_CacheDisk);
+    if (previous == m_CacheDisk)
+    {
+        return true; // re-apply of the same disk (a show load): nothing to do
+    }
+    log.info("media cache disk: {} -> {}", previous.empty() ? std::string("(none)") : previous,
+             m_CacheDisk.empty() ? std::string("(none)") : m_CacheDisk);
+
+    // The disk changed: the existing cache follows it (the requirement:
+    // "if the cache disk is changed, the cache is copied across"). The
+    // copy is local disk I/O on a worker thread - a multi-GB cache must
+    // not sit under the state mutex inside the command handler. Progress
+    // reaches the control through status.cacheCopy (the worker reports it
+    // into the command server, which owns the status field). Clearing the
+    // disk (empty target) has nowhere to copy to: the old cache simply
+    // stays where it is, untouched.
+    if (!previous.empty() && !m_CacheDisk.empty() && cacheHasContent(previous))
+    {
+        if (m_CacheCopyThread.joinable())
+        {
+            m_CacheCopyThread.join(); // the previous change finished (or is about to)
+        }
+        protocol::CommandServer* server = m_CommandServer.get();
+        const std::string fromRoot = previous;
+        const std::string toRoot = m_CacheDisk;
+        m_CacheCopyThread = std::thread([server, fromRoot, toRoot]() {
+            auto& log = Logger::instance();
+            std::string error;
+            const bool ok = media::copyCacheTo(
+                fromRoot, toRoot,
+                [server](const media::CacheCopyProgress& p) {
+                    server->setCacheCopyProgress(true, p.bytesCopied, p.bytesTotal);
+                },
+                error);
+            server->setCacheCopyProgress(false, 0, 0);
+            if (ok)
+            {
+                log.info("media cache copied to {}", toRoot);
+            }
+            else
+            {
+                log.error("media cache copy to {} failed: {}", toRoot, error);
+            }
+        });
+    }
+    return true;
+}
+
+void PlaybackApp::applyShowCacheDisk()
+{
+    // This system's own entry in the show's systems list: matched by name
+    // (case-insensitive) when this engine has one, else by the control
+    // port the entry carries (an unnamed engine is identified by the port
+    // it listens on).
+    const std::string myName = m_Args.systemName;
+    const std::uint16_t myPort = m_Args.port;
+    for (const auto& sys : m_Engine.show().systems)
+    {
+        const bool match = (!myName.empty() && sameSystemName(sys.name, myName)) ||
+                           (myName.empty() && sys.port == myPort);
+        if (!match)
+        {
+            continue;
+        }
+        if (!sys.cacheDisk.empty())
+        {
+            std::string error;
+            if (!applyCacheDisk(sys.cacheDisk, error))
+            {
+                Logger::instance().warning("show systems entry '{}': {}", sys.name, error);
+            }
+        }
+        return;
+    }
 }
 
 // --- Engine setup ---------------------------------------------------------------------
@@ -1683,6 +1870,34 @@ bool PlaybackApp::initEngine()
         [this](const std::string& device, std::string& error) {
             return requestDeviceSwitch(device, error);
         });
+
+    // system.disks / system.setCacheDisk: the app owns the disks and the
+    // cache folder (the core has no platform access). Both callbacks run
+    // with m_StateMutex held (the command handler holds it), so they push
+    // straight into the app state and spawn no blocking work.
+    m_CommandServer->setDiskFunction(
+        [this](std::vector<std::string>& disks, std::string& error) { return listDisks(disks, error); });
+    m_CommandServer->setCacheDiskRequestFunction(
+        [this](const std::string& diskRoot, const std::string& previousRoot, std::string& error) {
+            (void)previousRoot; // applyCacheDisk compares against its own state
+            return applyCacheDisk(diskRoot, error);
+        });
+
+    // The startup cache disk (--cache-disk): applied before the startup
+    // show loads, so a show systems entry for this system re-applied on
+    // load starts from the flag's state (the entry, not the flag, is the
+    // last word). An explicit flag that cannot be applied fails startup:
+    // the operator asked for a local media cache and silently ignoring the
+    // flag would just look like a broken setting.
+    if (!m_Args.cacheDisk.empty())
+    {
+        std::string error;
+        if (!applyCacheDisk(m_Args.cacheDisk, error))
+        {
+            log.error("cache disk: {}", error);
+            return false;
+        }
+    }
     {
         std::vector<protocol::RenderDeviceInfo> available;
         for (const auto& d : m_Vulkan->enumerateDevices())
@@ -1721,6 +1936,11 @@ bool PlaybackApp::initEngine()
         }
         log.info("show '{}' loaded ({} scenes, {} media)", m_Engine.show().name, m_Engine.show().scenes.size(),
                  m_Engine.show().media.size());
+        // The show file's systems entry for this system carries its cache
+        // disk (the setting persists there across engine restarts). No
+        // other thread runs yet (the control server starts below), so the
+        // apply is lock-free of the frame loop.
+        applyShowCacheDisk();
     }
     else
     {
