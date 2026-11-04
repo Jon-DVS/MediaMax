@@ -16,12 +16,86 @@
 #include "mediamax/util/Base64.h"
 #include "mediamax/util/File.h"
 #include "mediamax/util/Logger.h"
+#include "mediamax/util/Sha256.h"
 
 namespace mediamax::protocol
 {
 
 namespace
 {
+
+// The maximum payload of one media.putChunk: 1 MiB of file data keeps the
+// base64 + JSON envelope well under the protocol's line limit (8 MiB)
+// while the per-chunk round trip keeps the transfer's progress fine-grained.
+constexpr std::size_t kMaxPutChunkBytes = 1u << 20;
+
+// Validates a media cache path: non-empty, relative to the cache root, and
+// without `..` components (the cache tree must stay inside the cache
+// directory). On Windows drive-relative paths ("C:foo") are rejected as
+// well - they are not absolute, but they are not cache-relative either.
+void validateCachePath(const std::string& path)
+{
+    if (path.empty())
+    {
+        throw ParameterError("missing or invalid parameter: path");
+    }
+    const std::filesystem::path p(path);
+    if (p.is_absolute())
+    {
+        throw ParameterError("path must be relative to the media cache: " + path);
+    }
+#if defined(_WIN32)
+    if (p.has_root_name())
+    {
+        throw ParameterError("path must be relative to the media cache: " + path);
+    }
+#endif
+    for (const std::filesystem::path& part : p)
+    {
+        if (part == "..")
+        {
+            throw ParameterError("path must not contain '..': " + path);
+        }
+    }
+}
+
+// Validates a sha256 hex checksum and normalizes it to the protocol's
+// lowercase form (64 characters; compared case-insensitively, so an
+// uppercase spelling is accepted).
+std::string normalizeChecksum(const std::string& in)
+{
+    if (in.size() != 64)
+    {
+        throw ParameterError("checksum must be the 64-character sha256 hex of the file");
+    }
+    std::string out;
+    out.reserve(64);
+    for (const char c : in)
+    {
+        if (!std::isxdigit(static_cast<unsigned char>(c)))
+        {
+            throw ParameterError("checksum must be the 64-character sha256 hex of the file");
+        }
+        out.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    }
+    return out;
+}
+
+// A non-negative 64-bit integer parameter (requireInt is 32-bit; media file
+// sizes exceed it).
+std::uint64_t requireUint64(const nlohmann::json& params, const char* key)
+{
+    if (!params.contains(key) || !params[key].is_number_integer())
+    {
+        throw ParameterError("missing or invalid parameter: " + std::string(key) + " (integer)");
+    }
+    const std::int64_t v = params[key].get<std::int64_t>();
+    if (v < 0)
+    {
+        throw ParameterError("parameter " + std::string(key) + " must be non-negative");
+    }
+    return static_cast<std::uint64_t>(v);
+}
 
 std::string mediaTypeToString(MediaType t)
 {
@@ -187,6 +261,11 @@ std::vector<std::string> CommandServer::supportedMethods()
             "media.list",
             "media.unload",
             "media.thumbnail",
+            "media.cacheList",
+            "media.cacheCheck",
+            "media.put",
+            "media.putChunk",
+            "media.putCancel",
             "playback.play",
             "playback.pause",
             "playback.stop",
@@ -272,6 +351,26 @@ Response CommandServer::handle(const Command& cmd) const
         else if (cmd.method == "media.thumbnail")
         {
             result = handleMediaThumbnail(cmd.params);
+        }
+        else if (cmd.method == "media.cacheList")
+        {
+            result = handleMediaCacheList();
+        }
+        else if (cmd.method == "media.cacheCheck")
+        {
+            result = handleMediaCacheCheck(cmd.params);
+        }
+        else if (cmd.method == "media.put")
+        {
+            result = handleMediaPut(cmd.params);
+        }
+        else if (cmd.method == "media.putChunk")
+        {
+            result = handleMediaPutChunk(cmd.params);
+        }
+        else if (cmd.method == "media.putCancel")
+        {
+            result = handleMediaPutCancel(cmd.params);
         }
         else if (cmd.method == "playback.play")
         {
@@ -1067,6 +1166,289 @@ nlohmann::json CommandServer::handleMediaThumbnail(const nlohmann::json& params)
         {"height", outHeight},
         {"data", mediamax::util::base64Encode(rgba)},
     };
+}
+
+std::string CommandServer::requireCacheRoot() const
+{
+    const std::string noCache = "no media cache is configured on this system (system.setCacheDisk)";
+    if (!m_CacheRootProvider)
+    {
+        throw ParameterError(noCache);
+    }
+    const std::string root = m_CacheRootProvider();
+    if (root.empty())
+    {
+        throw ParameterError(noCache);
+    }
+    return root;
+}
+
+nlohmann::json CommandServer::handleMediaCacheList() const
+{
+    const std::string root = requireCacheRoot();
+    const std::filesystem::path cacheDir = media::cacheDirFor(root);
+    std::error_code ec;
+    // No hashing here (media.cacheCheck is the per-file check): a cache
+    // list of a multi-GB tree must stay fast.
+    std::vector<std::pair<std::string, std::uint64_t>> list;
+    if (std::filesystem::is_directory(cacheDir, ec) && !ec)
+    {
+        for (std::filesystem::recursive_directory_iterator it(cacheDir, ec), end;
+             !ec && it != end; it.increment(ec))
+        {
+            if (ec)
+            {
+                break;
+            }
+            std::error_code fec;
+            if (!it->is_regular_file(fec) || fec)
+            {
+                continue;
+            }
+            // Transfer temp files are in-flight, not cache content.
+            const std::string name = it->path().filename().string();
+            if (name.find(".put-") != std::string::npos && name.ends_with(".tmp"))
+            {
+                continue;
+            }
+            const std::filesystem::path rel = std::filesystem::relative(it->path(), cacheDir, fec);
+            if (fec)
+            {
+                break;
+            }
+            const std::uint64_t bytes = std::filesystem::file_size(it->path(), fec);
+            if (fec)
+            {
+                break;
+            }
+            // Forward slashes on the wire (the form the control side
+            // writes); the platform separator is only in the tree itself.
+            list.emplace_back(rel.generic_string(), bytes);
+        }
+    }
+    if (ec)
+    {
+        throw ParameterError("cannot read the media cache: " + ec.message());
+    }
+    std::sort(list.begin(), list.end());
+    nlohmann::json files = nlohmann::json::array();
+    for (const auto& [rel, bytes] : list)
+    {
+        files.push_back({{"path", rel}, {"bytes", bytes}});
+    }
+    return {
+        {"cacheDisk", root},
+        {"files", files},
+    };
+}
+
+nlohmann::json CommandServer::handleMediaCacheCheck(const nlohmann::json& params) const
+{
+    const std::string path = requireString(params, "path");
+    validateCachePath(path);
+    const std::string checksum = normalizeChecksum(requireString(params, "checksum"));
+    const std::string root = requireCacheRoot();
+    const std::filesystem::path file = media::cacheDirFor(root) / path;
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(file, ec) || ec)
+    {
+        return {
+            {"path", path},
+            {"present", false},
+        };
+    }
+    // A full-file hash takes seconds for a multi-GB file and the command
+    // runs under the server's command mutex, so this briefly blocks other
+    // commands - accepted: it is the transfer's pre-check, run once per
+    // file, and hashing is far cheaper than transferring.
+    std::string hash, error;
+    if (!util::sha256File(file, hash, error))
+    {
+        throw ParameterError("cannot hash the cached file: " + error);
+    }
+    return {
+        {"path", path},
+        {"present", hash == checksum},
+        {"bytes", std::filesystem::file_size(file, ec)},
+    };
+}
+
+nlohmann::json CommandServer::handleMediaPut(const nlohmann::json& params) const
+{
+    const std::string path = requireString(params, "path");
+    validateCachePath(path);
+    const std::uint64_t bytes = requireUint64(params, "bytes");
+    const std::string checksum = normalizeChecksum(requireString(params, "checksum"));
+    const bool overwrite = optionalBool(params, "overwrite");
+    const std::string root = requireCacheRoot();
+    const std::filesystem::path finalFile = media::cacheDirFor(root) / path;
+
+    // A cached file that already is the expected file means nothing to
+    // transfer; a different file is a conflict unless the sender asked to
+    // overwrite it.
+    std::error_code ec;
+    if (std::filesystem::is_regular_file(finalFile, ec) && !ec)
+    {
+        std::string hash, error;
+        if (util::sha256File(finalFile, hash, error))
+        {
+            if (hash == checksum)
+            {
+                return {
+                    {"path", path},
+                    {"state", "current"},
+                };
+            }
+            if (!overwrite)
+            {
+                return {
+                    {"path", path},
+                    {"state", "conflict"},
+                    {"error", "the cache already holds a different file at this path; retry with overwrite"},
+                };
+            }
+        }
+    }
+
+    std::lock_guard lock(m_TransferMutex);
+    const std::uint32_t token = m_NextTransferToken++;
+    const std::filesystem::path tempFile =
+        finalFile.parent_path() / (finalFile.filename().string() + ".put-" + std::to_string(token) + ".tmp");
+    std::error_code tec;
+    std::filesystem::create_directories(finalFile.parent_path(), tec);
+    auto stream = std::make_unique<std::ofstream>(tempFile, std::ios::binary | std::ios::trunc);
+    if (tec || !stream->is_open())
+    {
+        throw ParameterError("cannot create the transfer temp file: " + tempFile.string() +
+                             (tec ? " (" + tec.message() + ")" : std::string()));
+    }
+    TransferSession session;
+    session.path = path;
+    session.finalFile = finalFile;
+    session.tempFile = tempFile;
+    session.expectedBytes = bytes;
+    session.expectedChecksum = checksum;
+    session.tempStream = std::move(stream);
+    m_Transfers.emplace(token, std::move(session));
+    return {
+        {"token", token},
+        {"path", path},
+    };
+}
+
+nlohmann::json CommandServer::handleMediaPutChunk(const nlohmann::json& params) const
+{
+    const std::uint32_t token = static_cast<std::uint32_t>(requireUint64(params, "token"));
+    const std::uint64_t offset = requireUint64(params, "offset");
+    const bool done = optionalBool(params, "done");
+    std::vector<std::uint8_t> data;
+    if (!util::base64Decode(requireString(params, "data"), data))
+    {
+        throw ParameterError("data is not valid base64");
+    }
+    if (data.size() > kMaxPutChunkBytes)
+    {
+        throw ParameterError("chunk data exceeds the 1 MiB limit (" + std::to_string(kMaxPutChunkBytes) +
+                             " bytes)");
+    }
+
+    std::lock_guard lock(m_TransferMutex);
+    const auto it = m_Transfers.find(token);
+    if (it == m_Transfers.end())
+    {
+        throw ParameterError("no transfer with token " + std::to_string(token));
+    }
+    TransferSession& session = it->second;
+    // Once a chunk of a found stream is rejected, the stream is over:
+    // tear it down (temp file + session) so no half-open transfer lingers.
+    // The client starts a fresh media.put.
+    const auto reject = [&](const std::string& message) {
+        session.tempStream->close();
+        std::error_code ec;
+        std::filesystem::remove(session.tempFile, ec);
+        m_Transfers.erase(it);
+        throw ParameterError(message);
+    };
+    if (offset != session.received)
+    {
+        reject("chunks must arrive in order: expected offset " +
+               std::to_string(session.received) + ", got " + std::to_string(offset));
+    }
+    if (data.empty() && !(done && session.received == 0))
+    {
+        reject("chunk data is empty");
+    }
+    if (session.received + data.size() > session.expectedBytes)
+    {
+        reject("the transfer would exceed the declared size (" +
+               std::to_string(session.expectedBytes) + " bytes)");
+    }
+
+    if (!data.empty())
+    {
+        session.tempStream->write(reinterpret_cast<const char*>(data.data()),
+                                  static_cast<std::streamsize>(data.size()));
+        session.hash.update(data.data(), data.size());
+    }
+    session.received += data.size();
+
+    if (!done)
+    {
+        return {
+            {"token", token},
+            {"state", "progress"},
+            {"received", session.received},
+        };
+    }
+
+    // Final chunk: verify the stream, then move the temp file into place
+    // (an atomic rename on the same volume).
+    if (session.received != session.expectedBytes)
+    {
+        reject("declared " + std::to_string(session.expectedBytes) + " bytes, received " +
+               std::to_string(session.received));
+    }
+    const std::string actual = session.hash.hex();
+    if (actual != session.expectedChecksum)
+    {
+        reject("checksum mismatch: got " + actual + ", expected " + session.expectedChecksum);
+    }
+    if (!session.tempStream->good())
+    {
+        reject("cannot write the transfer temp file: " + session.tempFile.string());
+    }
+    session.tempStream->close();
+    std::error_code ec;
+    std::filesystem::rename(session.tempFile, session.finalFile, ec);
+    const std::string landedPath = session.path;
+    m_Transfers.erase(it);
+    if (ec)
+    {
+        std::error_code rec;
+        std::filesystem::remove(session.tempFile, rec);
+        throw ParameterError("cannot move the transfer into place: " + ec.message());
+    }
+    return {
+        {"token", token},
+        {"state", "done"},
+        {"path", landedPath},
+    };
+}
+
+nlohmann::json CommandServer::handleMediaPutCancel(const nlohmann::json& params) const
+{
+    const std::uint32_t token = static_cast<std::uint32_t>(requireUint64(params, "token"));
+    std::lock_guard lock(m_TransferMutex);
+    const auto it = m_Transfers.find(token);
+    if (it == m_Transfers.end())
+    {
+        throw ParameterError("no transfer with token " + std::to_string(token));
+    }
+    it->second.tempStream->close();
+    std::error_code ec;
+    std::filesystem::remove(it->second.tempFile, ec);
+    m_Transfers.erase(it);
+    return {{"token", token}};
 }
 
 nlohmann::json CommandServer::handlePlaybackPlay(const nlohmann::json& params) const

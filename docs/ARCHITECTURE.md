@@ -175,15 +175,30 @@ clamped to its in/out points, with loop/hold-at-end semantics.
 
 - `Protocol.h` — the wire envelope (JSON lines, `"v":1`, 1:1 request/response
   with an echoed `id`) and encode/decode.
-- `CommandServer` — maps the 20 protocol commands onto
+- `CommandServer` — maps the control-protocol commands onto
   `PlaybackEngine` + `MediaLibrary` + `DisplayManager`. Deliberately
   engine-agnostic (no GPU, no network): given a decoded `Command` it
   produces a `Response`. All failures become `ok:false` responses
   (`ParameterError` is the internal mechanism). This makes the *entire*
   control surface unit-testable and lets clients validate commands offline.
+  The media-cache transfer commands (`media.cacheList` / `media.cacheCheck`
+  / `media.put` + chunk/cancel pair) manage the `<root>\mediamax-cache`
+  folder through an app-provided cache-root provider: the stream
+  accumulates in a per-token temp file, the final chunk verifies the
+  running SHA-256 and renames it into place atomically; a rejected chunk
+  discards the whole stream.
 - `net/Tcp` + `ControlServer`/`ControlClient` — the transport: blocking
   line-based TCP, the server runs the command dispatcher on a thread; the
   client is used by the control executable.
+- `net/MediaTransfer` — the client-side half of that transfer (the control
+  GUI's deploy feature): hashes the local file (`util/Sha256` — a
+  self-contained FIPS 180-4 implementation, so the core stays free of
+  platform crypto), skips the transfer when the cache already matches
+  (`media.cacheCheck`), and otherwise streams the file in 1 MiB base64
+  chunks through `media.put`/`media.putChunk`. It runs on its own
+  short-lived connection: each transfer is one worker thread with its own
+  `ControlClient` (the GUI's command connection is UI-thread only), and a
+  failed stream is cancelled best-effort.
 
 ### `display/` — display wall model
 

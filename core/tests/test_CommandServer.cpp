@@ -1,6 +1,6 @@
 // The command server: the full control surface mapped onto a real engine,
 // media library and display set. This is the integration test for the
-// protocol layer - it exercises every one of the 29 commands.
+// protocol layer - it exercises every supported command.
 
 #include <algorithm>
 #include <atomic>
@@ -20,6 +20,7 @@
 #include "mediamax/protocol/Protocol.h"
 #include "mediamax/util/Base64.h"
 #include "mediamax/util/File.h"
+#include "mediamax/util/Sha256.h"
 
 #include "TestFixtures.h"
 
@@ -2104,6 +2105,459 @@ TEST_CASE("media.thumbnail fails cleanly without a callback or with bad params")
     const Response r3 = f.run("media.thumbnail", {{"id", kMediaA}, {"width", "big"}});
     CHECK_FALSE(r3.ok);
     CHECK(r3.error.find("width") != std::string::npos);
+}
+
+// A temp "cache disk root" for the transfer commands: the provider reports
+// a temp directory, so the cache lands in <dir>/mediamax-cache. Removed on
+// scope exit.
+struct TempCacheRoot
+{
+    std::filesystem::path root;
+    std::filesystem::path cacheDir;
+
+    TempCacheRoot()
+    {
+        static std::atomic<std::uint64_t> counter{0};
+        const auto ns =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch())
+                .count();
+        root = std::filesystem::temp_directory_path() / "mediamax-tests" /
+               ("cacheroot-" + std::to_string(ns) + "-" + std::to_string(counter.fetch_add(1)));
+        std::error_code ec;
+        std::filesystem::create_directories(root, ec);
+        cacheDir = root / "mediamax-cache";
+    }
+
+    ~TempCacheRoot()
+    {
+        std::error_code ec;
+        std::filesystem::remove_all(root, ec);
+    }
+};
+
+// The transfer payload the tests stream: a little more than two 1 MiB
+// chunks, so a stream exercises a full chunk, another full chunk and a
+// short final one.
+const std::vector<std::uint8_t>& transferPayload()
+{
+    static const std::vector<std::uint8_t> payload = [] {
+        std::vector<std::uint8_t> p(2 * (1u << 20) + 1024);
+        for (std::size_t i = 0; i < p.size(); ++i)
+        {
+            p[i] = static_cast<std::uint8_t>((i * 7 + 13) & 0xFF);
+        }
+        return p;
+    }();
+    return payload;
+}
+
+TEST_CASE("media cache commands fail cleanly without a cache root")
+{
+    const std::string kAnyChecksum(64, 'a'); // valid sha256 shape
+    {
+        Fixture f; // no provider installed
+        const Response r1 = f.run("media.cacheList");
+        CHECK_FALSE(r1.ok);
+        CHECK(r1.error.find("no media cache is configured") != std::string::npos);
+
+        const Response r2 = f.run("media.cacheCheck",
+                                  {{"path", "media/x.bin"}, {"checksum", kAnyChecksum}});
+        CHECK_FALSE(r2.ok);
+        CHECK(r2.error.find("no media cache is configured") != std::string::npos);
+
+        const Response r3 = f.run("media.put",
+                                  {{"path", "media/x.bin"}, {"bytes", 16}, {"checksum", kAnyChecksum}});
+        CHECK_FALSE(r3.ok);
+        CHECK(r3.error.find("no media cache is configured") != std::string::npos);
+    }
+    {
+        // A provider that reports no cache disk (the default state).
+        Fixture f;
+        f.server.setCacheRootProvider([] { return std::string(); });
+        const Response resp = f.run("media.cacheList");
+        CHECK_FALSE(resp.ok);
+        CHECK(resp.error.find("no media cache is configured") != std::string::npos);
+    }
+}
+
+TEST_CASE("media.put validates its parameters")
+{
+    Fixture f;
+    TempCacheRoot cache;
+    f.server.setCacheRootProvider([&cache] { return cache.root.string(); });
+    const std::string kChecksum(64, 'b');
+
+    const Response r1 = f.run("media.put", {{"path", ""}, {"bytes", 4}, {"checksum", kChecksum}});
+    CHECK_FALSE(r1.ok);
+    CHECK(r1.error.find("path") != std::string::npos);
+
+#if defined(_WIN32)
+    const Response r2 = f.run("media.put",
+                              {{"path", "C:\\evil.bin"}, {"bytes", 4}, {"checksum", kChecksum}});
+    CHECK_FALSE(r2.ok);
+    CHECK(r2.error.find("relative") != std::string::npos);
+
+    // Drive-relative ("C:foo") is not absolute, but it is not cache-relative.
+    const Response r3 = f.run("media.put",
+                              {{"path", "C:evil.bin"}, {"bytes", 4}, {"checksum", kChecksum}});
+    CHECK_FALSE(r3.ok);
+    CHECK(r3.error.find("relative") != std::string::npos);
+#else
+    const Response r2 = f.run("media.put",
+                              {{"path", "/evil.bin"}, {"bytes", 4}, {"checksum", kChecksum}});
+    CHECK_FALSE(r2.ok);
+    CHECK(r2.error.find("relative") != std::string::npos);
+#endif
+
+    const Response r4 =
+        f.run("media.put", {{"path", "a/../../evil.bin"}, {"bytes", 4}, {"checksum", kChecksum}});
+    CHECK_FALSE(r4.ok);
+    CHECK(r4.error.find("'..'") != std::string::npos);
+
+    const Response r5 = f.run("media.put", {{"path", "media/x.bin"}, {"bytes", 4}, {"checksum", "short"}});
+    CHECK_FALSE(r5.ok);
+    CHECK(r5.error.find("sha256") != std::string::npos);
+
+    const Response r6 = f.run("media.put",
+                              {{"path", "media/x.bin"}, {"bytes", 4}, {"checksum", std::string(64, 'z')}});
+    CHECK_FALSE(r6.ok);
+    CHECK(r6.error.find("sha256") != std::string::npos);
+
+    const Response r7 = f.run("media.put", {{"path", "media/x.bin"}, {"bytes", -4}, {"checksum", kChecksum}});
+    CHECK_FALSE(r7.ok);
+    CHECK(r7.error.find("non-negative") != std::string::npos);
+
+    // Uppercase hex is accepted (normalized to lowercase internally).
+    const Response r8 = f.run(
+        "media.put", {{"path", "media/case.bin"}, {"bytes", 0}, {"checksum", std::string(64, 'A')}});
+    CHECK(r8.ok);
+    const Response cancel = f.run("media.putCancel",
+                                  {{"token", r8.result.at("token").get<std::uint32_t>()}});
+    CHECK(cancel.ok);
+}
+
+TEST_CASE("media.put streams a file into the cache with chunk progress")
+{
+    Fixture f;
+    TempCacheRoot cache;
+    f.server.setCacheRootProvider([&cache] { return cache.root.string(); });
+
+    const std::vector<std::uint8_t>& payload = transferPayload();
+    const std::string checksum = util::sha256Hex(payload.data(), payload.size());
+    const std::string path = "media/transfer.bin";
+
+    const Response put =
+        f.run("media.put", {{"path", path}, {"bytes", payload.size()}, {"checksum", checksum}});
+    REQUIRE(put.ok);
+    const std::uint32_t token = put.result.at("token").get<std::uint32_t>();
+
+    constexpr std::size_t kChunk = 1u << 20;
+    std::size_t offset = 0;
+    int chunkCount = 0;
+    while (offset < payload.size())
+    {
+        const std::size_t n = std::min(kChunk, payload.size() - offset);
+        const bool done = offset + n == payload.size();
+        const Response resp = f.run("media.putChunk",
+                                    {{"token", token},
+                                     {"offset", offset},
+                                     {"data", util::base64Encode(payload.data() + offset, n)},
+                                     {"done", done}});
+        REQUIRE(resp.ok);
+        if (done)
+        {
+            CHECK(resp.result.at("state").get<std::string>() == "done");
+        }
+        else
+        {
+            CHECK(resp.result.at("state").get<std::string>() == "progress");
+            CHECK(resp.result.at("received").get<std::uint64_t>() == offset + n);
+            if (offset + n == kChunk)
+            {
+                // In-flight temp files are not cache content.
+                const Response midList = f.run("media.cacheList");
+                REQUIRE(midList.ok);
+                CHECK(midList.result.at("files").size() == 0);
+            }
+        }
+        offset += n;
+        ++chunkCount;
+    }
+    CHECK(chunkCount == 3);
+
+    // The file landed at the cache path with the expected content.
+    const std::filesystem::path landed = cache.cacheDir / "media" / "transfer.bin";
+    REQUIRE(std::filesystem::is_regular_file(landed));
+    std::string landedHash, error;
+    REQUIRE(util::sha256File(landed, landedHash, error));
+    CHECK(landedHash == checksum);
+
+    // No temp files are left behind.
+    std::error_code ec;
+    std::uint64_t tmpCount = 0;
+    for (std::filesystem::recursive_directory_iterator it(cache.cacheDir, ec), end; !ec && it != end;
+         it.increment(ec))
+    {
+        if (ec)
+        {
+            break;
+        }
+        std::error_code fec;
+        if (it->is_regular_file(fec) && !fec && it->path().filename().string().ends_with(".tmp"))
+        {
+            ++tmpCount;
+        }
+    }
+    CHECK(tmpCount == 0);
+
+    // The cache now lists and checks the file.
+    const Response list = f.run("media.cacheList");
+    REQUIRE(list.ok);
+    CHECK(list.result.at("files").size() == 1);
+    CHECK(list.result.at("files")[0].at("path").get<std::string>() == "media/transfer.bin");
+    CHECK(list.result.at("files")[0].at("bytes").get<std::uint64_t>() == payload.size());
+
+    const Response check = f.run("media.cacheCheck", {{"path", path}, {"checksum", checksum}});
+    REQUIRE(check.ok);
+    CHECK(check.result.at("present").get<bool>());
+    CHECK(check.result.at("bytes").get<std::uint64_t>() == payload.size());
+}
+
+TEST_CASE("media.putChunk enforces order, size and the final checksum")
+{
+    Fixture f;
+    TempCacheRoot cache;
+    f.server.setCacheRootProvider([&cache] { return cache.root.string(); });
+    constexpr std::size_t kChunk = 1u << 20;
+
+    // An out-of-order chunk is rejected and ends the stream.
+    {
+        const std::vector<std::uint8_t>& payload = transferPayload();
+        const std::string checksum = util::sha256Hex(payload.data(), payload.size());
+        const Response put = f.run("media.put",
+                                   {{"path", "media/order.bin"},
+                                    {"bytes", payload.size()},
+                                    {"checksum", checksum}});
+        REQUIRE(put.ok);
+        const std::uint32_t token = put.result.at("token").get<std::uint32_t>();
+        const Response r1 = f.run("media.putChunk",
+                                  {{"token", token},
+                                   {"offset", kChunk},
+                                   {"data", util::base64Encode(payload.data() + kChunk, kChunk)}});
+        CHECK_FALSE(r1.ok);
+        CHECK(r1.error.find("order") != std::string::npos);
+        const Response after = f.run("media.putChunk",
+                                     {{"token", token}, {"offset", 0}, {"data", ""}});
+        CHECK_FALSE(after.ok);
+        CHECK(after.error.find("no transfer with token") != std::string::npos);
+    }
+
+    // An oversized chunk is rejected (before it touches the session).
+    {
+        const std::vector<std::uint8_t>& payload = transferPayload();
+        const std::string checksum = util::sha256Hex(payload.data(), payload.size());
+        const Response put = f.run("media.put",
+                                   {{"path", "media/oversize.bin"},
+                                    {"bytes", payload.size()},
+                                    {"checksum", checksum}});
+        REQUIRE(put.ok);
+        const std::uint32_t token = put.result.at("token").get<std::uint32_t>();
+        std::vector<std::uint8_t> big(kChunk + 1);
+        const Response r2 = f.run("media.putChunk",
+                                  {{"token", token},
+                                   {"offset", 0},
+                                   {"data", util::base64Encode(big.data(), big.size())}});
+        CHECK_FALSE(r2.ok);
+        CHECK(r2.error.find("1 MiB") != std::string::npos);
+        // The session is untouched by the size guard: a valid chunk still
+        // works, then the stream is cancelled.
+        const Response ok = f.run("media.putChunk",
+                                  {{"token", token},
+                                   {"offset", 0},
+                                   {"data", util::base64Encode(payload.data(), kChunk)}});
+        CHECK(ok.ok);
+        const Response cancel = f.run("media.putCancel", {{"token", token}});
+        CHECK(cancel.ok);
+    }
+
+    // A chunk that would exceed the declared size.
+    {
+        const std::string checksum = util::sha256Hex(std::string(100, 'x'));
+        const Response put =
+            f.run("media.put", {{"path", "media/overflow.bin"}, {"bytes", 100}, {"checksum", checksum}});
+        REQUIRE(put.ok);
+        const std::uint32_t token = put.result.at("token").get<std::uint32_t>();
+        std::vector<std::uint8_t> tooBig(1000, 'x');
+        const Response resp = f.run("media.putChunk",
+                                    {{"token", token},
+                                     {"offset", 0},
+                                     {"data", util::base64Encode(tooBig.data(), tooBig.size())},
+                                     {"done", true}});
+        CHECK_FALSE(resp.ok);
+        CHECK(resp.error.find("exceed the declared size") != std::string::npos);
+        // The failed stream is over: no file, no session, no temp file.
+        CHECK_FALSE(std::filesystem::exists(cache.cacheDir / "media" / "overflow.bin"));
+        const Response after = f.run("media.putChunk",
+                                     {{"token", token}, {"offset", 0}, {"data", ""}});
+        CHECK_FALSE(after.ok);
+        CHECK(after.error.find("no transfer with token") != std::string::npos);
+    }
+
+    // A done flag with fewer bytes than declared.
+    {
+        const std::string checksum = util::sha256Hex(std::string(1000, 'y'));
+        const Response put =
+            f.run("media.put", {{"path", "media/short.bin"}, {"bytes", 1000}, {"checksum", checksum}});
+        REQUIRE(put.ok);
+        const std::uint32_t token = put.result.at("token").get<std::uint32_t>();
+        const Response resp = f.run(
+            "media.putChunk",
+            {{"token", token},
+             {"offset", 0},
+             {"data", util::base64Encode(reinterpret_cast<const std::uint8_t*>("y"), 100)},
+             {"done", true}});
+        CHECK_FALSE(resp.ok);
+        CHECK(resp.error.find("declared") != std::string::npos);
+        CHECK_FALSE(std::filesystem::exists(cache.cacheDir / "media" / "short.bin"));
+    }
+
+    // A checksum mismatch on the final chunk.
+    {
+        const std::string wrongChecksum(64, '0');
+        const Response put =
+            f.run("media.put", {{"path", "media/mismatch.bin"}, {"bytes", 100}, {"checksum", wrongChecksum}});
+        REQUIRE(put.ok);
+        const std::uint32_t token = put.result.at("token").get<std::uint32_t>();
+        std::vector<std::uint8_t> hundred(100, 'z');
+        const Response resp = f.run("media.putChunk",
+                                    {{"token", token},
+                                     {"offset", 0},
+                                     {"data", util::base64Encode(hundred.data(), hundred.size())},
+                                     {"done", true}});
+        CHECK_FALSE(resp.ok);
+        CHECK(resp.error.find("checksum mismatch") != std::string::npos);
+        CHECK_FALSE(std::filesystem::exists(cache.cacheDir / "media" / "mismatch.bin"));
+    }
+}
+
+TEST_CASE("media.putCancel abandons the stream and cleans up")
+{
+    Fixture f;
+    TempCacheRoot cache;
+    f.server.setCacheRootProvider([&cache] { return cache.root.string(); });
+
+    const std::vector<std::uint8_t>& payload = transferPayload();
+    const std::string checksum = util::sha256Hex(payload.data(), payload.size());
+    const Response put =
+        f.run("media.put", {{"path", "media/cancelled.bin"}, {"bytes", payload.size()}, {"checksum", checksum}});
+    REQUIRE(put.ok);
+    const std::uint32_t token = put.result.at("token").get<std::uint32_t>();
+
+    const Response chunk = f.run("media.putChunk",
+                                 {{"token", token},
+                                  {"offset", 0},
+                                  {"data", util::base64Encode(payload.data(), 1u << 20)}});
+    REQUIRE(chunk.ok);
+
+    const Response cancel = f.run("media.putCancel", {{"token", token}});
+    REQUIRE(cancel.ok);
+
+    // The final file was never created and the session is finished.
+    CHECK_FALSE(std::filesystem::exists(cache.cacheDir / "media" / "cancelled.bin"));
+    const Response after = f.run("media.putChunk",
+                                 {{"token", token}, {"offset", 1u << 20}, {"data", ""}});
+    CHECK_FALSE(after.ok);
+    CHECK(after.error.find("no transfer with token") != std::string::npos);
+
+    // Cancelling twice fails cleanly.
+    const Response again = f.run("media.putCancel", {{"token", token}});
+    CHECK_FALSE(again.ok);
+    CHECK(again.error.find("no transfer with token") != std::string::npos);
+}
+
+TEST_CASE("media.put reports current / conflict and overwrites on request")
+{
+    Fixture f;
+    TempCacheRoot cache;
+    f.server.setCacheRootProvider([&cache] { return cache.root.string(); });
+    const std::string path = "media/versioned.bin";
+
+    // Seed the cache with v1 of the file (as an earlier transfer would).
+    const std::string v1 = "version-one payload";
+    const std::string v1Hash = util::sha256Hex(v1);
+    {
+        std::error_code ec;
+        std::filesystem::create_directories(cache.cacheDir / "media", ec);
+        std::ofstream out(cache.cacheDir / "media" / "versioned.bin", std::ios::binary | std::ios::trunc);
+        out << v1;
+    }
+
+    // The same file again: nothing to transfer.
+    const Response current =
+        f.run("media.put", {{"path", path}, {"bytes", v1.size()}, {"checksum", v1Hash}});
+    REQUIRE(current.ok);
+    CHECK(current.result.at("state").get<std::string>() == "current");
+    CHECK(current.result.contains("token") == false);
+
+    // A different file at the same path: conflict without overwrite...
+    const std::string v2 = "version-two payload, longer";
+    const std::string v2Hash = util::sha256Hex(v2);
+    const Response conflict =
+        f.run("media.put", {{"path", path}, {"bytes", v2.size()}, {"checksum", v2Hash}});
+    REQUIRE(conflict.ok);
+    CHECK(conflict.result.at("state").get<std::string>() == "conflict");
+    CHECK(conflict.result.contains("token") == false);
+
+    // ...accepted with overwrite, and the file is replaced.
+    const Response put = f.run(
+        "media.put", {{"path", path}, {"bytes", v2.size()}, {"checksum", v2Hash}, {"overwrite", true}});
+    REQUIRE(put.ok);
+    const std::uint32_t token = put.result.at("token").get<std::uint32_t>();
+    const Response chunk = f.run("media.putChunk",
+                                 {{"token", token},
+                                  {"offset", 0},
+                                  {"data", util::base64Encode(
+                                      reinterpret_cast<const std::uint8_t*>(v2.data()), v2.size())},
+                                  {"done", true}});
+    REQUIRE(chunk.ok);
+    CHECK(chunk.result.at("state").get<std::string>() == "done");
+
+    std::string landedHash, error;
+    REQUIRE(util::sha256File(cache.cacheDir / "media" / "versioned.bin", landedHash, error));
+    CHECK(landedHash == v2Hash);
+}
+
+TEST_CASE("media.put transfers a zero-byte file and cacheCheck reports misses")
+{
+    Fixture f;
+    TempCacheRoot cache;
+    f.server.setCacheRootProvider([&cache] { return cache.root.string(); });
+
+    const std::string emptyHash = util::sha256Hex(std::string());
+    const Response put =
+        f.run("media.put", {{"path", "media/empty.bin"}, {"bytes", 0}, {"checksum", emptyHash}});
+    REQUIRE(put.ok);
+    const std::uint32_t token = put.result.at("token").get<std::uint32_t>();
+    const Response chunk =
+        f.run("media.putChunk", {{"token", token}, {"offset", 0}, {"data", ""}, {"done", true}});
+    REQUIRE(chunk.ok);
+    CHECK(chunk.result.at("state").get<std::string>() == "done");
+    CHECK(std::filesystem::is_regular_file(cache.cacheDir / "media" / "empty.bin"));
+
+    // A file the cache does not hold.
+    const Response miss =
+        f.run("media.cacheCheck", {{"path", "media/absent.bin"}, {"checksum", emptyHash}});
+    REQUIRE(miss.ok);
+    CHECK(miss.result.at("present").get<bool>() == false);
+    CHECK(miss.result.contains("bytes") == false);
+
+    // A present file with the wrong checksum.
+    const Response wrong =
+        f.run("media.cacheCheck", {{"path", "media/empty.bin"}, {"checksum", std::string(64, 'f')}});
+    REQUIRE(wrong.ok);
+    CHECK(wrong.result.at("present").get<bool>() == false);
+    CHECK(wrong.result.at("bytes").get<std::uint64_t>() == 0);
 }
 
 TEST_CASE("every supported method is dispatched")

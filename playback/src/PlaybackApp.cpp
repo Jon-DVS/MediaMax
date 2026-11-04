@@ -1717,15 +1717,22 @@ bool PlaybackApp::applyCacheDisk(const std::string& root, std::string& error)
         }
     }
 
-    const std::string previous = m_CacheDisk;
-    m_CacheDisk = normalized;
-    m_CommandServer->setCacheDisk(m_CacheDisk);
-    if (previous == m_CacheDisk)
+    // m_CacheDisk has its own lock (not m_StateMutex): the media-cache
+    // commands read it through the cache-root provider while the command
+    // handler holds the state mutex.
+    std::string previous;
+    {
+        std::lock_guard lock(m_CacheDiskMutex);
+        previous = m_CacheDisk;
+        m_CacheDisk = normalized;
+    }
+    m_CommandServer->setCacheDisk(normalized);
+    if (previous == normalized)
     {
         return true; // re-apply of the same disk (a show load): nothing to do
     }
     log.info("media cache disk: {} -> {}", previous.empty() ? std::string("(none)") : previous,
-             m_CacheDisk.empty() ? std::string("(none)") : m_CacheDisk);
+             normalized.empty() ? std::string("(none)") : normalized);
 
     // The disk changed: the existing cache follows it (the requirement:
     // "if the cache disk is changed, the cache is copied across"). The
@@ -1735,7 +1742,7 @@ bool PlaybackApp::applyCacheDisk(const std::string& root, std::string& error)
     // into the command server, which owns the status field). Clearing the
     // disk (empty target) has nowhere to copy to: the old cache simply
     // stays where it is, untouched.
-    if (!previous.empty() && !m_CacheDisk.empty() && cacheHasContent(previous))
+    if (!previous.empty() && !normalized.empty() && cacheHasContent(previous))
     {
         if (m_CacheCopyThread.joinable())
         {
@@ -1743,7 +1750,7 @@ bool PlaybackApp::applyCacheDisk(const std::string& root, std::string& error)
         }
         protocol::CommandServer* server = m_CommandServer.get();
         const std::string fromRoot = previous;
-        const std::string toRoot = m_CacheDisk;
+        const std::string toRoot = normalized;
         m_CacheCopyThread = std::thread([server, fromRoot, toRoot]() {
             auto& log = Logger::instance();
             std::string error;
@@ -1882,6 +1889,16 @@ bool PlaybackApp::initEngine()
             (void)previousRoot; // applyCacheDisk compares against its own state
             return applyCacheDisk(diskRoot, error);
         });
+
+    // The media-cache commands (media.cacheList / media.cacheCheck /
+    // media.put and its chunk/cancel pair): the cache root their transfers
+    // write to. The provider is called while the command handler still
+    // holds m_StateMutex, so it takes m_CacheDiskMutex - the small lock
+    // guarding m_CacheDisk - and never the state mutex.
+    m_CommandServer->setCacheRootProvider([this]() {
+        std::lock_guard lock(m_CacheDiskMutex);
+        return m_CacheDisk;
+    });
 
     // The startup cache disk (--cache-disk): applied before the startup
     // show loads, so a show systems entry for this system re-applied on

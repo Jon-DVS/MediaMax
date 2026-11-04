@@ -265,9 +265,13 @@ private:
     // reported in the status result's "hostname".
     std::string m_SystemHost;
     // The media cache disk (a canonical disk root, e.g. "C:\\"; empty = no
-    // cache). Under m_StateMutex: the command handler, the show-load hook
-    // and the startup flag write it; the command server reports it in
-    // "status" (its own copy, kept in sync by applyCacheDisk).
+    // cache). Guarded by m_CacheDiskMutex - not m_StateMutex: the
+    // media-cache commands read it through the cache-root provider while
+    // the command handler still holds the state mutex. The command handler,
+    // the show-load hook and the startup flag write it (through
+    // applyCacheDisk); the command server reports it in "status" (its own
+    // copy, kept in sync by applyCacheDisk).
+    std::mutex m_CacheDiskMutex;
     std::string m_CacheDisk;
     // The cache-copy worker (system.setCacheDisk across disks): the copy
     // runs here so a large cache does not block the command handler;

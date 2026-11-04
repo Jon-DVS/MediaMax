@@ -14,7 +14,10 @@
 #include <deque>
 #include <exception>
 #include <filesystem>
+#include <fstream>
 #include <functional>
+#include <map>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -24,6 +27,7 @@
 #include "mediamax/playback/PlaybackEngine.h"
 #include "mediamax/protocol/Protocol.h"
 #include "mediamax/util/Logger.h"
+#include "mediamax/util/Sha256.h"
 
 namespace mediamax::protocol
 {
@@ -87,6 +91,14 @@ using CacheDiskRequestFunction =
     std::function<bool(const std::string& diskRoot, const std::string& previousRoot,
                        std::string& error)>;
 
+// Host callback for the media-cache commands (media.cacheList,
+// media.cacheCheck, media.put / media.putChunk / media.putCancel): returns
+// the canonical disk root of this system's media cache (e.g. "C:\\") or
+// the empty string when no cache disk is configured. The app provides it
+// (the command server has no platform state); the commands fail with a
+// clean error until one is installed and it reports a root.
+using CacheRootProviderFunction = std::function<std::string()>;
+
 class CommandServer
 {
 public:
@@ -131,6 +143,15 @@ public:
     void setCacheDiskRequestFunction(CacheDiskRequestFunction fn)
     {
         m_CacheDiskRequestFn = std::move(fn);
+    }
+
+    // Sets the cache-root provider (see CacheRootProviderFunction). The
+    // media-cache commands (media.cacheList / media.cacheCheck / media.put
+    // and its chunk/cancel pair) fail with a clean error until one is
+    // installed and it reports a root.
+    void setCacheRootProvider(CacheRootProviderFunction fn)
+    {
+        m_CacheRootProvider = std::move(fn);
     }
 
     // The cache disk (a canonical disk root, or empty) reported in
@@ -226,6 +247,11 @@ private:
     nlohmann::json handleMediaList() const;
     nlohmann::json handleMediaUnload(const nlohmann::json& params) const;
     nlohmann::json handleMediaThumbnail(const nlohmann::json& params) const;
+    nlohmann::json handleMediaCacheList() const;
+    nlohmann::json handleMediaCacheCheck(const nlohmann::json& params) const;
+    nlohmann::json handleMediaPut(const nlohmann::json& params) const;
+    nlohmann::json handleMediaPutChunk(const nlohmann::json& params) const;
+    nlohmann::json handleMediaPutCancel(const nlohmann::json& params) const;
     nlohmann::json handlePlaybackPlay(const nlohmann::json& params) const;
     nlohmann::json handlePlaybackPause() const;
     nlohmann::json handlePlaybackStop() const;
@@ -276,6 +302,11 @@ private:
     static std::optional<int> optionalInt(const nlohmann::json& params, const char* key);
     static bool optionalBool(const nlohmann::json& params, const char* key);
 
+    // The media-cache root for the media.* cache commands (see
+    // CacheRootProviderFunction); throws a clean error when the system has
+    // no cache configured.
+    std::string requireCacheRoot() const;
+
     PlaybackEngine& m_Engine;
     MediaLibrary& m_Media;
     DisplayManager& m_Displays;
@@ -301,6 +332,7 @@ private:
     RenderDeviceSwitchFunction m_RenderDeviceSwitchFn;
     DisksFunction m_DisksFn;
     CacheDiskRequestFunction m_CacheDiskRequestFn;
+    CacheRootProviderFunction m_CacheRootProvider;
     // Cache-copy progress (status "cacheCopy"): the app's copy worker
     // writes it from its own thread, the command threads read it for
     // status - hence its own lock, like m_RenderDeviceMutex.
@@ -308,6 +340,28 @@ private:
     bool m_CacheCopyActive = false;
     std::uint64_t m_CacheCopyBytes = 0;
     std::uint64_t m_CacheCopyTotal = 0;
+    // Media-transfer session (media.put, then the media.putChunk stream):
+    // the chunks accumulate in strict order into a temp file that sits
+    // next to the final cache path; the final chunk verifies the running
+    // SHA-256 and renames the temp file over the final path (atomic on
+    // the same volume). Guarded by m_TransferMutex - the transfer state's
+    // own lock, like the cache-copy progress above (the command handlers
+    // also run under the server's command mutex; the explicit lock keeps
+    // the ownership clear).
+    struct TransferSession
+    {
+        std::string path; // the requested cache-relative path
+        std::filesystem::path finalFile; // the cache file the transfer lands on
+        std::filesystem::path tempFile; // <finalFile> + ".put-<token>.tmp"
+        std::uint64_t expectedBytes = 0;
+        std::string expectedChecksum; // sha256 hex, lowercase
+        std::uint64_t received = 0;
+        util::Sha256 hash;
+        std::unique_ptr<std::ofstream> tempStream;
+    };
+    mutable std::mutex m_TransferMutex;
+    mutable std::map<std::uint32_t, TransferSession> m_Transfers;
+    mutable std::uint32_t m_NextTransferToken = 1;
 
     // Log ring buffer (log.tail): serious engine messages the control
     // surface reports. Guarded by m_LogMutex: any thread can log through

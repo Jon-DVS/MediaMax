@@ -5,6 +5,9 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -12,10 +15,16 @@
 
 #include <doctest/doctest.h>
 
+#include "mediamax/display/DisplayManager.h"
+#include "mediamax/media/MediaLibrary.h"
 #include "mediamax/net/ControlClient.h"
 #include "mediamax/net/ControlServer.h"
+#include "mediamax/net/MediaTransfer.h"
 #include "mediamax/net/Tcp.h"
+#include "mediamax/playback/PlaybackEngine.h"
+#include "mediamax/protocol/CommandServer.h"
 #include "mediamax/protocol/Protocol.h"
+#include "mediamax/util/Sha256.h"
 
 using namespace mediamax;
 using namespace std::chrono_literals;
@@ -455,6 +464,124 @@ TEST_CASE("ControlClient: a dropped connection is re-established transparently")
     CHECK(answered.load() >= 1);
     REQUIRE(secondOk);
     CHECK(result.at("echo").get<std::string>() == "two");
+}
+
+TEST_CASE("MediaTransfer: streams a file into the command server's media cache")
+{
+    namespace fs = std::filesystem;
+    // A real CommandServer (with a temp media-cache root) behind a
+    // ControlServer on an ephemeral loopback port: the full wire path the
+    // control interface's deploy feature uses.
+    MediaLibrary media;
+    DisplayManager displays;
+    PlaybackEngine engine(media);
+    protocol::CommandServer commandServer(engine, media, displays, "net-test");
+
+    static std::atomic<std::uint64_t> counter{0};
+    const auto ns =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count();
+    const auto cacheRoot =
+        fs::temp_directory_path() / "mediamax-tests" /
+        ("net-cacheroot-" + std::to_string(ns) + "-" + std::to_string(counter.fetch_add(1)));
+    const auto srcFile =
+        fs::temp_directory_path() / "mediamax-tests" / ("net-transfer-src-" + std::to_string(ns) + ".bin");
+    const auto srcFile2 =
+        fs::temp_directory_path() / "mediamax-tests" / ("net-transfer-src2-" + std::to_string(ns) + ".bin");
+    std::error_code ec;
+    fs::create_directories(cacheRoot, ec);
+    fs::create_directories(srcFile.parent_path(), ec);
+    commandServer.setCacheRootProvider([&cacheRoot] { return cacheRoot.string(); });
+
+    // The source file: a little more than two 1 MiB chunks (three on the
+    // wire).
+    std::vector<std::uint8_t> payload(2 * (1u << 20) + 1024);
+    for (std::size_t i = 0; i < payload.size(); ++i)
+    {
+        payload[i] = static_cast<std::uint8_t>((i * 31 + 7) & 0xFF);
+    }
+    {
+        std::ofstream out(srcFile, std::ios::binary | std::ios::trunc);
+        out.write(reinterpret_cast<const char*>(payload.data()),
+                  static_cast<std::streamsize>(payload.size()));
+    }
+    const std::string checksum = util::sha256Hex(payload.data(), payload.size());
+
+    ControlServer server("127.0.0.1", 0);
+    server.setHandler([&commandServer](const protocol::Command& cmd) { return commandServer.handle(cmd); });
+    REQUIRE(server.start());
+
+    std::uint64_t lastSent = 0;
+    std::uint64_t lastTotal = 0;
+    int progressCalls = 0;
+    std::string error;
+    REQUIRE(net::transferMediaFile(
+        "127.0.0.1", server.port(), srcFile, "media/loopback.bin", false,
+        [&](std::uint64_t sent, std::uint64_t total) {
+            lastSent = sent;
+            lastTotal = total;
+            ++progressCalls;
+        },
+        error));
+
+    // Three chunks: two full 1 MiB and a short final one.
+    CHECK(progressCalls == 3);
+    CHECK(lastSent == payload.size());
+    CHECK(lastTotal == payload.size());
+
+    // The file landed in the cache with the expected content.
+    const auto landed = cacheRoot / "mediamax-cache" / "media" / "loopback.bin";
+    REQUIRE(fs::is_regular_file(landed));
+    std::string landedHash;
+    REQUIRE(util::sha256File(landed, landedHash, error));
+    CHECK(landedHash == checksum);
+
+    // Re-transfer: the cacheCheck skip path (one full progress call, no
+    // chunks).
+    progressCalls = 0;
+    lastSent = 0;
+    REQUIRE(net::transferMediaFile(
+        "127.0.0.1", server.port(), srcFile, "media/loopback.bin", false,
+        [&](std::uint64_t sent, std::uint64_t) {
+            lastSent = sent;
+            ++progressCalls;
+        },
+        error));
+    CHECK(progressCalls == 1);
+    CHECK(lastSent == payload.size());
+
+    // Different content at the same path without overwrite: a conflict.
+    payload.push_back('!');
+    {
+        std::ofstream out(srcFile2, std::ios::binary | std::ios::trunc);
+        out.write(reinterpret_cast<const char*>(payload.data()),
+                  static_cast<std::streamsize>(payload.size()));
+    }
+    const std::string checksum2 = util::sha256Hex(payload.data(), payload.size());
+    CHECK_FALSE(net::transferMediaFile("127.0.0.1", server.port(), srcFile2, "media/loopback.bin",
+                                       false, nullptr, error));
+    CHECK(error.find("different file") != std::string::npos);
+
+    // ...and replaced when the transfer asks to overwrite.
+    REQUIRE(net::transferMediaFile("127.0.0.1", server.port(), srcFile2, "media/loopback.bin", true,
+                                   nullptr, error));
+    REQUIRE(util::sha256File(landed, landedHash, error));
+    CHECK(landedHash == checksum2);
+
+    // An unreachable endpoint is a clean failure.
+    net::TcpListener probe;
+    REQUIRE(probe.bind("127.0.0.1", 0));
+    const auto deadPort = probe.boundPort();
+    probe.close();
+    CHECK_FALSE(net::transferMediaFile("127.0.0.1", deadPort, srcFile, "media/x.bin", false, nullptr,
+                                       error));
+    CHECK(error.find("cannot reach") != std::string::npos);
+
+    server.stop();
+    fs::remove(srcFile, ec);
+    fs::remove(srcFile2, ec);
+    fs::remove_all(cacheRoot, ec);
 }
 
 } // TEST_SUITE("Net")

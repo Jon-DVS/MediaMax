@@ -385,6 +385,83 @@ and returns it as base64-encoded RGBA8 (top-left origin, 4 bytes/pixel).
 - The control GUI uses this for the show view's layer previews; at the
   default size the payload is ~310 KB, well under the 8 MB line limit.
 
+#### Media cache transfer
+
+The commands below manage the system's **media cache** — the
+`<cacheDisk>\mediamax-cache` folder (see `system.setCacheDisk`) the
+control side fills with the show's media so playback runs from the local
+disk. All of them need a cache disk configured on the target system;
+until then they fail with `no media cache is configured on this system
+(system.setCacheDisk)`.
+
+Paths are **cache-relative** (forward slashes recommended): `media/clip.mp4`
+lands in `<root>\mediamax-cache\media\clip.mp4`. Absolute paths and `..`
+components are rejected — the cache tree must stay inside the cache
+directory. Checksums are the 64-character SHA-256 hex of the file
+(lowercase canonical; either case is accepted).
+
+#### `media.cacheList`
+
+- Params: none.
+- Result: `{"cacheDisk":"C:\\","files":[{"path":"media/clip.mp4","bytes":12345},...]}`
+  — every file in the cache (relative path, size, sorted). No hashing: a
+  listing must stay fast for a multi-GB tree (`media.cacheCheck` is the
+  per-file check). In-flight transfer temp files are not listed.
+
+#### `media.cacheCheck`
+
+- Params: `path` (string, required, cache-relative), `checksum` (string,
+  required, sha256 hex).
+- Result: `{"path":<path>,"present":true,"bytes":<n>}` when the cached
+  file exists **and** its hash matches; `{"path":<path>,"present":false,
+  "bytes":<n>}` when it exists but differs; `{"path":<path>,
+  "present":false}` when absent.
+- Note: hashing an existing file takes seconds for a multi-GB file, and
+  the command briefly blocks other commands while it runs. Accepted: it
+  is the transfer's pre-check, run once per file, and hashing is far
+  cheaper than transferring.
+
+#### `media.put`
+
+Starts a transfer of a file into the cache.
+
+- Params: `path` (string, required, cache-relative), `bytes` (int,
+  required, the file's size), `checksum` (string, required, sha256 hex),
+  `overwrite` (bool, optional, default false).
+- Result: one of
+  - `{"token":<n>,"path":<path>}` — the transfer is open; stream the file
+    with `media.putChunk` under this token.
+  - `{"path":<path>,"state":"current"}` — the cache already holds a file
+    with exactly this checksum; nothing to transfer.
+  - `{"path":<path>,"state":"conflict","error":"..."}` — the cache holds
+    a different file at this path and `overwrite` was not set.
+- The server accumulates the stream in a temp file
+  (`<path>.put-<token>.tmp`, next to the final destination) and renames
+  it into place atomically (same volume) when the final chunk verifies.
+
+#### `media.putChunk`
+
+Streams one chunk of an open transfer. Chunks must arrive **strictly in
+order** (`offset` = the bytes received so far), at most 1 MiB each — the
+envelope keeps the base64 + JSON well under the 8 MiB line limit while
+the per-chunk round trip keeps progress fine-grained.
+
+- Params: `token` (int, required), `offset` (int, required), `data`
+  (string, required, base64 — empty only as the single chunk of a 0-byte
+  file), `done` (bool, optional, default false).
+- Result: `{"token":<n>,"state":"progress","received":<n>}` for a
+  non-final chunk; `{"token":<n>,"state":"done","path":<path>}` when the
+  final chunk has been verified (size + sha256) and moved into place.
+- Any rejected chunk (out of order, oversized, beyond the declared size,
+  short or checksum-mismatched final) discards the transfer (temp file
+  and session): the client starts a fresh `media.put`.
+
+#### `media.putCancel`
+
+- Params: `token` (int, required).
+- Result: `{"token":<n>}` — the stream is abandoned (temp file removed,
+  session gone). Fails when no transfer exists under the token.
+
 ### Playback
 
 #### `playback.play`
