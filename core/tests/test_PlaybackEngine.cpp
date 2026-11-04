@@ -241,6 +241,103 @@ TEST_CASE("Layer state resolves tracks and overrides")
     }
 }
 
+TEST_CASE("Live show edit re-authoring a field drops its stale manual override")
+{
+    auto media = makeLoadedMediaLibrary();
+    auto engine = makeTestEngine(media);
+    Show original = engine.show();
+
+    auto frameLayer = [](const FrameState& state, Id id) -> const LayerFrame* {
+        for (const auto& l : state.layers)
+        {
+            if (l.layerId == id)
+            {
+                return &l;
+            }
+        }
+        return nullptr;
+    };
+
+    // The operator sets live overrides: a position (a show-view drag) on
+    // layer 10 and an opacity on layer 11.
+    CHECK(engine.setLayerPosition(10, 100.f, 50.f));
+    CHECK(engine.setLayerOpacity(11, 0.25f));
+    {
+        const FrameState st = engine.frameStateAt(Time::zero());
+        REQUIRE(frameLayer(st, 10) != nullptr);
+        REQUIRE(frameLayer(st, 11) != nullptr);
+        CHECK(frameLayer(st, 10)->x == doctest::Approx(100.f));
+        CHECK(frameLayer(st, 10)->y == doctest::Approx(50.f));
+        CHECK(frameLayer(st, 11)->opacity == doctest::Approx(0.25f));
+    }
+
+    // An unrelated live edit (a rename) keeps both overrides.
+    Show renamed = original;
+    renamed.name = "Renamed";
+    engine.loadShow(renamed, true);
+    {
+        const FrameState st = engine.frameStateAt(Time::zero());
+        CHECK(frameLayer(st, 10)->x == doctest::Approx(100.f));
+        CHECK(frameLayer(st, 11)->opacity == doctest::Approx(0.25f));
+    }
+
+    // An edit that re-authors layer 10's position drops the position
+    // override: the authored values reach the screen again...
+    Show moved = original;
+    Layer* l10 = moved.findScene(1)->findLayer(10);
+    REQUIRE(l10 != nullptr);
+    l10->transform.x = 50.f;
+    l10->transform.y = 60.f;
+    engine.loadShow(moved, true);
+    {
+        const FrameState st = engine.frameStateAt(Time::zero());
+        CHECK(frameLayer(st, 10)->x == doctest::Approx(50.f));
+        CHECK(frameLayer(st, 10)->y == doctest::Approx(60.f));
+        // ...while the unrelated opacity override survives the same edit.
+        CHECK(frameLayer(st, 11)->opacity == doctest::Approx(0.25f));
+    }
+
+    // Re-pushing the same document changes nothing (no override left to
+    // reconcile, the values are simply authored).
+    engine.loadShow(moved, true);
+    {
+        const FrameState st = engine.frameStateAt(Time::zero());
+        CHECK(frameLayer(st, 10)->x == doctest::Approx(50.f));
+        CHECK(frameLayer(st, 11)->opacity == doctest::Approx(0.25f));
+    }
+
+    // An edit that re-authors the opacity drops that override too.
+    Show faded = moved;
+    Layer* l11 = faded.findScene(1)->findLayer(11);
+    REQUIRE(l11 != nullptr);
+    l11->opacity = 0.5f;
+    engine.loadShow(faded, true);
+    {
+        const FrameState st = engine.frameStateAt(Time::zero());
+        CHECK(frameLayer(st, 11)->opacity == doctest::Approx(0.5f));
+    }
+
+    // A fresh override after the edit is honored, and an edit that does not
+    // touch the position keeps it pinned.
+    CHECK(engine.setLayerPosition(10, 30.f, 40.f));
+    Show renamedAgain = faded;
+    renamedAgain.name = "Again";
+    engine.loadShow(renamedAgain, true);
+    {
+        const FrameState st = engine.frameStateAt(Time::zero());
+        CHECK(frameLayer(st, 10)->x == doctest::Approx(30.f));
+        CHECK(frameLayer(st, 10)->y == doctest::Approx(40.f));
+    }
+
+    // A non-preserve load clears every override (existing contract).
+    engine.loadShow(makeTestShow(), false);
+    {
+        const FrameState st = engine.frameStateAt(Time::zero());
+        CHECK(frameLayer(st, 10)->x == doctest::Approx(0.f));
+        CHECK(frameLayer(st, 11)->opacity == doctest::Approx(1.f));
+    }
+}
+
 TEST_CASE("layerControlPosition is the authored value, not the animation")
 {
     auto media = makeLoadedMediaLibrary();

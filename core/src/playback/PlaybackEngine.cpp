@@ -45,6 +45,12 @@ void PlaybackEngine::loadShow(Show show, bool preserveState)
     // still makes sense.
     const PlayState state = m_State;
     const Time time = m_Time;
+    // A live edit re-authors the layers: a manual override whose field the
+    // edit changed is stale - left alone it keeps shadowing the newly
+    // authored value (the show editor's transform edits would appear to do
+    // nothing on a system where the value was last set live). Drop exactly
+    // the overridden fields the edit changed; the rest survive.
+    dropReauthoredOverrides(show);
     m_Show = std::move(show);
     m_State = state;
     m_Time = time;
@@ -74,6 +80,68 @@ void PlaybackEngine::loadShow(Show show, bool preserveState)
     {
         const bool kept = layerExistsInShow(m_Show, it->first);
         it = kept ? std::next(it) : m_Overrides.erase(it);
+    }
+}
+
+void PlaybackEngine::dropReauthoredOverrides(const Show& newShow)
+{
+    // m_Show is still the show being replaced, so the old static fields are
+    // the baseline "the operator saw when the override was set".
+    for (auto it = m_Overrides.begin(); it != m_Overrides.end();)
+    {
+        const Layer* oldLayer = nullptr;
+        for (const auto& scene : m_Show.scenes)
+        {
+            if (const Layer* found = scene.findLayer(it->first); found != nullptr)
+            {
+                oldLayer = found;
+                break;
+            }
+        }
+        const Layer* newLayer = nullptr;
+        for (const auto& scene : newShow.scenes)
+        {
+            if (const Layer* found = scene.findLayer(it->first); found != nullptr)
+            {
+                newLayer = found;
+                break;
+            }
+        }
+        if (oldLayer != nullptr && newLayer != nullptr)
+        {
+            LayerOverride& ov = it->second;
+            // Position is one control (layer.set takes x and y together):
+            // an edit of either axis re-authors the pair.
+            if ((ov.x || ov.y) &&
+                (newLayer->transform.x != oldLayer->transform.x ||
+                 newLayer->transform.y != oldLayer->transform.y))
+            {
+                ov.x.reset();
+                ov.y.reset();
+            }
+            if (ov.opacity && newLayer->opacity != oldLayer->opacity)
+            {
+                ov.opacity.reset();
+            }
+            if (ov.visible && newLayer->visible != oldLayer->visible)
+            {
+                ov.visible.reset();
+            }
+            if (ov.blend && newLayer->blend != oldLayer->blend)
+            {
+                ov.blend.reset();
+            }
+        }
+        // Fully re-authored (or emptied): the entry no longer holds a value.
+        if (!it->second.x && !it->second.y && !it->second.opacity && !it->second.visible &&
+            !it->second.blend)
+        {
+            it = m_Overrides.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
     }
 }
 

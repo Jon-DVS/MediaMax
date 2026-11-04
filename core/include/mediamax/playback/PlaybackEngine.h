@@ -89,9 +89,11 @@ public:
     // show wherever the new show allows: the play state (playing/paused/
     // stopped) is kept, the playhead is kept (clamped to the new duration),
     // a manual scene override is kept when that scene id still exists, and
-    // layer overrides are kept for layers that still exist. Used for live
-    // edits pushed from the control interface, which must not restart
-    // playback.
+    // layer overrides are kept for layers that still exist - except the
+    // fields the edit itself changed: a re-authored static value must reach
+    // the screen, not the stale runtime override (see
+    // dropReauthoredOverrides). Used for live edits pushed from the control
+    // interface, which must not restart playback.
     void loadShow(Show show, bool preserveState = false);
 
     const Show& show() const { return m_Show; }
@@ -218,6 +220,12 @@ private:
     // Applies the layer-targeting cues (opacity/visibility/blend/position)
     // whose time is at or before showTime; the last one wins.
     void applyLayerCues(Id layerId, const Time& showTime, LayerFrame& out) const;
+    // loadShow(preserveState) reconciliation: for each layer present in both
+    // the current (m_Show) and the incoming show, drops the manual override
+    // fields the edit re-authored (static transform x/y, opacity, visible,
+    // blend), so the newly authored values stop being shadowed by a stale
+    // runtime override; fields the edit left alone keep their overrides.
+    void dropReauthoredOverrides(const Show& newShow);
     Time mediaTimeFor(const Layer& layer, const Time& showTime, const Time& sceneStart,
                       bool& atEnd) const;
 

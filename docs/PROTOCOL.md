@@ -255,9 +255,14 @@ no scene/layer overrides). With `preserveState: true`, the live playback
 state carries over to the new show wherever it still makes sense: the play
 state (playing/paused/stopped) is kept, the playhead is kept (clamped to the
 new duration), a manual scene override is kept when that scene still exists,
-and layer overrides are kept for layers that still exist. This is what the
-control GUI's auto-push of live edits uses, so editing a show does not
-restart playback on the systems it is pushed to.
+and layer overrides are kept for layers that still exist - except the fields
+the incoming document re-authors: when the edit changes a layer's static
+position, opacity, visibility or blend, that layer's manual override for the
+changed field is dropped, so the newly authored value reaches the screen
+instead of a stale runtime pin (position counts as one field: an edit of
+either x or y drops the pair). This is what the control GUI's auto-push of
+live edits uses, so editing a show does not restart playback on the systems
+it is pushed to.
 
 #### `show.save`
 
@@ -446,8 +451,10 @@ uses `x`/`y` to keep its position fields in sync with the engine and
 #### `layer.set`
 
 Set one or more runtime overrides for a layer (applied on top of the show's
-static values and its keyframe tracks until cleared with `layer.clear` or
-the show is reloaded). The layer id must exist in at least one scene of the
+static values and its keyframe tracks until cleared with `layer.clear`, or
+by a show load: a non-`preserveState` load clears all overrides, and a
+`preserveState` load drops the fields its document re-authors - see
+`show.loadJson`). The layer id must exist in at least one scene of the
 loaded show; unknown ids are rejected.
 
 - Params: `layer` (int id, required); any of:
