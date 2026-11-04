@@ -195,9 +195,24 @@ int PlaybackApp::run()
     }
 
     auto lastTime = std::chrono::steady_clock::now();
+    // The next display present's deadline: the loaded show's frame rate caps
+    // the display output (a 30 fps show presents 30 times a second on a
+    // 60 Hz display; a faster show is left to the refresh rate). The engine
+    // keeps ticking on every iteration, so playback stays in wall-clock
+    // time while presents are skipped. Zero time point = due immediately.
+    std::chrono::steady_clock::time_point nextPresent{};
     while (!m_ShutdownRequested.load())
     {
-        glfwWaitEventsTimeout(kFrameLoopWaitSeconds);
+        const auto loopStart = std::chrono::steady_clock::now();
+        // Present not due yet: sleep until it is (window events still wake
+        // the loop early). Due: the old short poll - the fence wait inside
+        // renderFrame paced the loop to the refresh rate.
+        const bool presentDue = loopStart >= nextPresent;
+        const double waitSeconds =
+            presentDue
+                ? kFrameLoopWaitSeconds
+                : std::chrono::duration<double>(nextPresent - loopStart).count();
+        glfwWaitEventsTimeout(waitSeconds);
         pollWindowEvents();
         if (m_ShutdownRequested.load())
         {
@@ -221,7 +236,31 @@ int PlaybackApp::run()
         }
 
         const FrameSnapshot snap = takeFrameSnapshot(dt);
-        renderFrame(snap);
+        if (now >= nextPresent)
+        {
+            renderFrame(snap);
+            const double period = snap.showFrameRate.secondsPerFrame();
+            if (period > 0.0)
+            {
+                const auto periodDur = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                    std::chrono::duration<double>(period));
+                // Advance from the schedule, not the actual present time:
+                // on a high-refresh display the present lands on the vsync
+                // after the deadline, and scheduling from the land time
+                // would drift the output below the show's rate.
+                nextPresent += periodDur;
+                // The schedule fell behind (a stall longer than one period,
+                // the zero-initialized first deadline, ...): resync to now
+                // instead of burst-rendering to catch up.
+                if (nextPresent < now)
+                {
+                    nextPresent = now + periodDur;
+                }
+            }
+            // period <= 0 (an invalid rate) leaves the deadline in the
+            // past: every frame stays due, so the cap degrades to "present
+            // every iteration" like an uncapped loop.
+        }
     }
 
     shutdown();
@@ -894,6 +933,7 @@ PlaybackApp::FrameSnapshot PlaybackApp::takeFrameSnapshot(const Time& dt)
     snap.displays = m_Displays.displayList();
     snap.sceneSize = m_Displays.outputBounds().size();
     snap.playing = m_Engine.state() == PlayState::Playing;
+    snap.showFrameRate = m_Engine.show().frameRate;
     m_AudioActive.store(snap.playing);
 
     // The pump re-seeks channels when the playhead jumps: on a deliberate

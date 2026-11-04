@@ -31,7 +31,7 @@ Reference implementation: `Show::toJson` / `Show::fromJson`
 | `app` | string | yes | Must be exactly `"mediamax-show"` (compatibility gate) |
 | `version` | int | yes | Format version; only `1` is currently accepted |
 | `name` | string | no | Show name (default `"Untitled Show"`) |
-| `frameRate` | object | no | `{"num": <int>, "den": <int>}` — reduced rational, both > 0. Default 30/1 |
+| `frameRate` | object | no | `{"num": <int>, "den": <int>}` — reduced rational, both > 0. Default 30/1. The playback app caps the display render output at this rate (a 30 fps show presents 30 times a second on a faster display) |
 | `duration` | number | no | Show duration in **seconds**. `0` (default) = unlimited: the show runs until a `stop` cue (or forever) |
 | `media` | array | no | Media references (below) |
 | `scenes` | array | yes* | Scenes (below) — a show without scenes is empty |

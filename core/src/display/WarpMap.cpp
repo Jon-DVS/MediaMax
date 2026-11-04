@@ -458,7 +458,7 @@ void WarpMap::buildInverseDenseTexture(std::vector<unsigned char>& outData, int 
                         continue; // first cell wins
                     }
 
-                    float qu, qv;
+                    float qu = 0.f, qv = 0.f; // assigned on every path that stores
                     bool ok = false;
                     // Exact algebraic solve of the cell's bilinear map.
                     float luS, lvS;

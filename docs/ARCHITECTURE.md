@@ -311,9 +311,14 @@ render thread (main)   media pump                       audio thread         con
 
 - `PlaybackApp` — owns `PlaybackEngine`, `MediaLibrary`, `DisplayManager`,
   `VulkanContext`, swapchains, `SceneRenderer`, `AudioSink`,
-  `ControlServer`. Each tick: advance the engine clock, resolve the
-  `FrameState`, map media frames onto layers (via the texture pool), record
-  and present.
+  `ControlServer`. Each tick: advance the engine clock (wall-clock dt, on
+  every loop iteration), resolve the `FrameState`, map media frames onto
+  layers (via the texture pool), record and present — the display presents
+  are capped at the loaded show's frame rate: the loop keeps a show-frame
+  deadline and renders a present only when it is due (a 30 fps show outputs
+  30 Hz on a 60 Hz display; a show at or above the refresh rate is left to
+  the refresh rate). The engine and the media pump stay in wall-clock time
+  while presents are skipped.
 - `MediaPump` — a coordinator thread plus one decode worker thread per
   active media layer. Each worker owns its layer's `IMediaSource` instance
   (opened through the library's source factory - a source is

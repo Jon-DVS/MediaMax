@@ -6,7 +6,11 @@
 //
 // Thread model (one application, a few threads):
 //
-//   render thread (main)      owns the frame cadence. Each frame:
+//   render thread (main)      owns the frame cadence. The engine ticks on
+//                              every loop iteration (wall-clock dt), but the
+//                              display presents are capped at the loaded
+//                              show's frame rate (see run()). Each rendered
+//                              frame:
 //                              - under m_StateMutex: engine.tick(), frameState(),
 //                                display snapshot, pump target publication
 //                              - outside the lock: deliverVideo() (texture
@@ -127,6 +131,9 @@ private:
         Size2i sceneSize{0, 0};
         std::vector<LayerTarget> targets;
         bool playing = false;
+        // The loaded show's frame rate: the display output's cap (the frame
+        // loop presents only when its show-frame deadline is due).
+        FrameRate showFrameRate;
     };
 
     // A surface operation requested by display.add / display.remove. The
