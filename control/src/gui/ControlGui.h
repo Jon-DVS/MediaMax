@@ -216,6 +216,10 @@ public:
     // The show view's current mode ("display" | "layer" | "show") - the
     // self-test's strip-click check reads back what the click selected.
     std::string testShowViewMode() const;
+    // Set the show view's selection directly (the click path is exercised
+    // separately in the live self-test): exactly one of the two ids may be
+    // set, the other must be kInvalidId.
+    void testShowViewSetSelection(Id displayId, Id layerId);
     // The screen rect of the show view strip's widget (`which`: "display" |
     // "layer" | "show" | "reset") as drawn by the last rendered frame, plus
     // the name of the window that owns the item: the self-test checks the
@@ -865,6 +869,11 @@ private:
         Show,
     };
     ShowViewMode m_ShowViewMode = ShowViewMode::Display;
+    // Switches the show view's mode (the strip's radios and the self-test
+    // hook go through here): a change clears the current selection - a
+    // selection belongs to the view it was made in, so the operator starts
+    // the new view with a clean slate.
+    void setShowViewMode(ShowViewMode mode);
     // The selection (at most one of the two; picking one clears the other).
     // Dropped automatically when the item leaves the scene.
     Id m_ShowViewSelDisplay = kInvalidId;

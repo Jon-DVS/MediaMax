@@ -740,10 +740,27 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
         const bool svStateOk = app.testShowViewSelectedDisplay() == kInvalidId &&
                                app.testShowViewSelectedLayer() == kInvalidId &&
                                !app.testShowViewEditPopupOpen();
+        // A mode switch deselects: the selection belongs to the view it was
+        // made in, so each switch starts from a clean slate.
         app.testShowViewSetMode("display");
-        modalOk = modalOk && svStateOk;
+        app.testShowViewSetSelection(kInvalidId, 777); // a layer is selected
+        const bool svSelSet = app.testShowViewSelectedLayer() == 777;
+        app.testShowViewSetMode("show"); // the switch must clear it
+        const bool svDeselect1 =
+            app.testShowViewSelectedDisplay() == kInvalidId &&
+            app.testShowViewSelectedLayer() == kInvalidId;
+        app.testShowViewSetSelection(555, kInvalidId); // a display is selected
+        app.testShowViewSetMode("layer"); // and the other way round
+        const bool svDeselect2 =
+            app.testShowViewSelectedDisplay() == kInvalidId &&
+            app.testShowViewSelectedLayer() == kInvalidId;
+        app.testShowViewSetMode("display");
+        const bool svDeselectOk = svSelSet && svDeselect1 && svDeselect2;
+        modalOk = modalOk && svStateOk && svDeselectOk;
         modalReport += std::string(svStateOk ? "PASS " : "FAIL ") +
                        "show view mode/selection state\n";
+        modalReport += std::string(svDeselectOk ? "PASS " : "FAIL ") +
+                       "show view mode switch deselects the current selection\n";
     }
 
     // 3d2) Show view strip over the scene (issue: the show view's UI
@@ -1657,14 +1674,15 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
                               layerOrder + ", dim " + std::to_string(layerDim) + ")\n";
                 liveOk = liveOk && layerOrderOk;
 
-                // 5) Show mode: clicks select nothing (the selection from
-                //    the previous mode persists, unchanged).
+                // 5) Show mode: the switch deselects (the selection belongs
+                //    to the view it was made in) and clicks select nothing,
+                //    so the view stays selection-free.
                 app.testShowViewSetMode("show");
                 clickAt(sx, sy);
-                const bool showModeOk = app.testShowViewSelectedLayer() == layerId &&
+                const bool showModeOk = app.testShowViewSelectedLayer() == kInvalidId &&
                                         app.testShowViewSelectedDisplay() == kInvalidId;
                 liveReport += std::string(showModeOk ? "PASS " : "FAIL ") +
-                              "show mode clicks select nothing\n";
+                              "show mode switch deselects; clicks select nothing\n";
                 liveOk = liveOk && showModeOk;
 
                 // 6) Clicking empty space (inside the fitted view, outside

@@ -2520,6 +2520,20 @@ std::string ControlGuiApp::showViewDisplaySystem(const ShowViewDisplay& d) const
     return mapped != nullptr ? mapped->name() : std::string("unmapped");
 }
 
+void ControlGuiApp::setShowViewMode(ShowViewMode mode)
+{
+    if (mode == m_ShowViewMode)
+    {
+        return; // re-selecting the current view keeps the selection
+    }
+    m_ShowViewMode = mode;
+    // The selection is view-specific: a display picked in Display mode is
+    // meaningless in Layer mode (and Show mode selects nothing), so a view
+    // switch starts from a clean slate instead of a leftover highlight.
+    m_ShowViewSelDisplay = kInvalidId;
+    m_ShowViewSelLayer = kInvalidId;
+}
+
 void ControlGuiApp::renderShowViewWindow()
 {
     m_ShowViewEditPopupOpen = false;
@@ -2588,7 +2602,6 @@ void ControlGuiApp::renderShowViewWindow()
     // widgets are submitted in this child, below the scene's draw
     // commands); the scene input ignores the strip's rect.
     const float frameH = ImGui::GetFrameHeight();
-    const float itemSpacing = ImGui::GetStyle().ItemSpacing.x;
     const auto widgetWidth = [](const char* text) {
         return ImGui::CalcTextSize(text).x + ImGui::GetStyle().FramePadding.x * 2.f;
     };
@@ -2596,12 +2609,16 @@ void ControlGuiApp::renderShowViewWindow()
     const float wShow = widgetWidth("Show");
     const float wLayer = widgetWidth("Layer");
     const float wDisplay = widgetWidth("Display");
+    // The strip's own gap: wider than the style's ItemSpacing so the mode
+    // radios and the reset button are not cheek-to-cheek (the cramped strip
+    // made the Display / Layer / Show switch hard to hit and to read).
+    const float stripGap = ImGui::GetStyle().ItemSpacing.x * 2.0f;
     const float stripRight = childSize.x - 8.f;
     const float stripY = frameH - 8.f;
     const float xReset = stripRight - wReset;
-    const float xShow = xReset - itemSpacing - wShow;
-    const float xLayer = xShow - itemSpacing - wLayer;
-    const float xDisplay = xLayer - itemSpacing - wDisplay;
+    const float xShow = xReset - stripGap - wShow;
+    const float xLayer = xShow - stripGap - wLayer;
+    const float xDisplay = xLayer - stripGap - wDisplay;
     const ImVec2 stripMin(childMin.x + xDisplay, childMin.y + stripY);
     const ImVec2 stripMax(childMin.x + stripRight, childMin.y + stripY + frameH);
 
@@ -2883,19 +2900,19 @@ void ControlGuiApp::renderShowViewWindow()
     ImGui::SetCursorPos(ImVec2(xDisplay, stripY));
     if (ImGui::RadioButton("Display##showmode", m_ShowViewMode == ShowViewMode::Display))
     {
-        m_ShowViewMode = ShowViewMode::Display;
+        setShowViewMode(ShowViewMode::Display);
     }
     recordStripItem("display");
     ImGui::SetCursorPos(ImVec2(xLayer, stripY));
     if (ImGui::RadioButton("Layer##showmode", m_ShowViewMode == ShowViewMode::Layer))
     {
-        m_ShowViewMode = ShowViewMode::Layer;
+        setShowViewMode(ShowViewMode::Layer);
     }
     recordStripItem("layer");
     ImGui::SetCursorPos(ImVec2(xShow, stripY));
     if (ImGui::RadioButton("Show##showmode", m_ShowViewMode == ShowViewMode::Show))
     {
-        m_ShowViewMode = ShowViewMode::Show;
+        setShowViewMode(ShowViewMode::Show);
     }
     recordStripItem("show");
     ImGui::SetCursorPos(ImVec2(xReset, stripY));
@@ -6366,15 +6383,30 @@ void ControlGuiApp::testShowViewSetMode(const std::string& mode)
 {
     if (mode == "display")
     {
-        m_ShowViewMode = ShowViewMode::Display;
+        setShowViewMode(ShowViewMode::Display);
     }
     else if (mode == "layer")
     {
-        m_ShowViewMode = ShowViewMode::Layer;
+        setShowViewMode(ShowViewMode::Layer);
     }
     else if (mode == "show")
     {
-        m_ShowViewMode = ShowViewMode::Show;
+        setShowViewMode(ShowViewMode::Show);
+    }
+}
+
+void ControlGuiApp::testShowViewSetSelection(Id displayId, Id layerId)
+{
+    // Mirrors the click path's invariant: at most one of the two.
+    if (displayId != kInvalidId)
+    {
+        m_ShowViewSelDisplay = displayId;
+        m_ShowViewSelLayer = kInvalidId;
+    }
+    else
+    {
+        m_ShowViewSelDisplay = kInvalidId;
+        m_ShowViewSelLayer = layerId;
     }
 }
 
