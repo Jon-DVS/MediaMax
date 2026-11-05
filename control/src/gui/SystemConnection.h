@@ -32,8 +32,11 @@ class SystemConnection
 public:
     // `renderDevice`: the persisted render device selection (the show
     // file's systems entry); empty = the engine's default selection.
+    // `cacheDisk`: the persisted media cache disk selection (the show
+    // file's systems entry "cacheDisk", a disk root like "C:\\"); empty =
+    // no cache disk selection.
     SystemConnection(std::string name, std::string host, std::uint16_t port,
-                     std::string renderDevice = "");
+                     std::string renderDevice = "", std::string cacheDisk = "");
     ~SystemConnection();
 
     SystemConnection(const SystemConnection&) = delete;
@@ -56,6 +59,22 @@ public:
     {
         std::lock_guard lock(m_SnapMutex);
         m_RenderDevice = device;
+    }
+
+    // The persisted media cache disk selection (the show file's systems
+    // entry "cacheDisk", a disk root like "C:\\"; empty = no selection).
+    // The poll loop re-applies it to a (re)started engine - see pollLoop().
+    // Under m_SnapMutex: the UI thread sets it (the settings dialog), the
+    // poll thread reads it.
+    std::string cacheDisk() const
+    {
+        std::lock_guard lock(m_SnapMutex);
+        return m_CacheDisk;
+    }
+    void setCacheDisk(const std::string& disk)
+    {
+        std::lock_guard lock(m_SnapMutex);
+        m_CacheDisk = disk;
     }
 
     // Starts the poll thread (which dials the poll connection). Idempotent.
@@ -160,6 +179,7 @@ private:
     std::string m_Host;
     std::uint16_t m_Port;
     std::string m_RenderDevice; // persisted system.setRenderDevice selection
+    std::string m_CacheDisk; // persisted system.setCacheDisk selection (disk root)
     // True once the persisted render device selection is known to match the
     // live engine (or does not apply). Reset on every (re)connect and
     // retarget: the engine reports the mismatch on the next status poll and
@@ -168,6 +188,9 @@ private:
     // the poll thread is stopped (a fresh start or right after the
     // retarget's join) and by the poll loop otherwise - no lock needed.
     bool m_DeviceReapplied = false;
+    // The same bookkeeping for the media cache disk selection (the poll
+    // loop re-sends system.setCacheDisk after a (re)connect).
+    bool m_CacheDiskReapplied = false;
 
     mediamax::ControlClient m_PollClient; // poll thread only
     mediamax::ControlClient m_CmdClient;  // UI thread only

@@ -29,6 +29,7 @@
 #include "gui/ShowEditor.h"
 #include "gui/ShowView.h"
 #include "gui/SystemConnection.h"
+#include "mediamax/net/MediaDeploy.h"
 
 namespace mediamax::gui
 {
@@ -174,6 +175,13 @@ public:
     // The dialog's Render device field (same state the combo edits);
     // empty = the engine's default selection.
     void testSetSystemSettingsRenderDevice(const std::string& device);
+    // The dialog's Media cache disk field (same state the combo edits);
+    // empty = no media cache.
+    void testSetSystemSettingsCacheDisk(const std::string& disk);
+    // The disk list the settings dialog fetched for its cache disk combo
+    // (the system.disks result); the live self-test checks the dialog got
+    // the machine's disks.
+    std::vector<std::string> testSystemDisksFetched() const { return m_SysDisks; }
     bool testApplySystemSettings();
     // The dialog's last Apply error (empty when the last Apply succeeded or
     // none ran); the self-tests report it with a failed Apply.
@@ -186,6 +194,12 @@ public:
     // The render device the engine at `index` currently runs on (status
     // "renderDevice.current"; empty when it has not reported it yet).
     std::string testSystemRenderDeviceCurrent(int index) const;
+    // The system entry's persisted media cache disk selection at `index`
+    // (empty when none / out of range).
+    std::string testSystemCacheDiskAt(int index) const;
+    // The media cache disk the engine at `index` currently runs on (status
+    // "cacheDisk"; empty when it has not reported it yet).
+    std::string testSystemCacheDiskCurrent(int index) const;
     // The machine name the engine at `index` reports (status "hostname";
     // empty when the snapshot has no status yet).
     std::string testSystemHostname(int index) const;
@@ -624,6 +638,12 @@ private:
     std::vector<std::unique_ptr<SystemConnection>> m_Systems;
     int m_Active = -1; // selected system index
 
+    // The media deploys (transfers of show media into the systems' media
+    // caches) in flight and recently finished: the worker threads of a
+    // deploy batch report begin/progress/finish here, the Systems tab
+    // renders the per-system progress list from a snapshot of it.
+    mediamax::net::MediaDeployTracker m_DeployTracker;
+
     // "Add system" form.
     std::string m_NewName;
     std::string m_NewHost = "127.0.0.1";
@@ -662,9 +682,19 @@ private:
         // = the engine's default selection. Applied via system.
         // setRenderDevice and persisted in the show file's systems entry.
         std::string renderDevice;
+        // Media cache disk selection (a disk root, e.g. "C:\\"; the combo's
+        // items come from the system.disks result); empty = no media cache.
+        // Applied via system.setCacheDisk (a cross-disk pick makes the
+        // engine copy the existing cache across) and persisted in the show
+        // file's systems entry.
+        std::string cacheDisk;
         std::string error;
     };
     SystemSettingsEdit m_SysSettings;
+    // The disks the "System settings" dialog's system has (the
+    // system.disks result, fetched when the dialog opens); the items of the
+    // "Media cache disk" combo.
+    std::vector<std::string> m_SysDisks;
     // "Display settings" dialog (Edit... in the Displays block): per-display
     // x/y/w/h/brightness/enabled. m_EditTarget is the system the dialog was
     // opened from; m_EditSystem is the System dropdown's selection (index

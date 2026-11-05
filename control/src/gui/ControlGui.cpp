@@ -25,6 +25,7 @@
 
 #include "gui/GuiCrash.h"
 #include "mediamax/net/ControlClient.h"
+#include "mediamax/net/MediaDeploy.h"
 #include "mediamax/time/Timecode.h"
 #include "mediamax/util/File.h"
 
@@ -38,6 +39,32 @@ namespace
 
 constexpr const char* kBlendModes[] = {"normal", "add", "subtract", "multiply", "screen"};
 constexpr int kBlendModeCount = 5;
+
+// Human-readable byte count for the progress lines under the Systems tab
+// ("512 B", "4.2 MB", "1.3 GB").
+std::string formatBytes(std::uint64_t bytes)
+{
+    const double value0 = static_cast<double>(bytes);
+    if (value0 < 1024.0)
+    {
+        return std::to_string(bytes) + " B";
+    }
+    const char* const units[] = {"KB", "MB", "GB", "TB"};
+    double value = value0 / 1024.0;
+    int unit = 0;
+    while (value >= 1024.0 && unit < 3)
+    {
+        value /= 1024.0;
+        ++unit;
+    }
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%.1f %s", value, units[unit]);
+    return buf;
+}
+
+// Finished deploys shown under a system row (the rest are dropped by the
+// tracker's clearFinished as newer work arrives): keeps the row compact.
+constexpr int kMaxFinishedDeploysShown = 3;
 
 // A minimal 24-bit BMP (left half red, right half blue) for the live
 // self-test's media.thumbnail check: it exercises the engine's real image
@@ -520,7 +547,8 @@ void ControlGuiApp::syncSystemsToShow()
     for (const auto& system : m_Systems)
     {
         show.systems.push_back(
-            {system->name(), system->host(), system->port(), system->renderDevice()});
+            {system->name(), system->host(), system->port(), system->renderDevice(),
+             system->cacheDisk()});
     }
 }
 
@@ -532,6 +560,9 @@ void ControlGuiApp::applyShowSystems()
     // everything else is dropped, and new entries connect.
     const Show& show = m_Editor.show();
     std::vector<std::unique_ptr<SystemConnection>> next;
+    // The list was replaced: any tracked deploys address systems that are
+    // gone or renamed (a new show's entries), so the batch starts fresh.
+    m_DeployTracker.reset();
     for (const auto& ref : show.systems)
     {
         std::unique_ptr<SystemConnection> conn;
@@ -548,7 +579,7 @@ void ControlGuiApp::applyShowSystems()
         if (!conn)
         {
             conn = std::make_unique<SystemConnection>(ref.name, ref.host, ref.port,
-                                                      ref.renderDevice);
+                                                      ref.renderDevice, ref.cacheDisk);
             conn->connect();
         }
         next.push_back(std::move(conn));
@@ -1240,6 +1271,68 @@ void ControlGuiApp::renderSystemsWindow()
                     {
                         ImGui::TextDisabled("on %s", machine.c_str());
                     }
+                    // Media distribution progress (under the system row):
+                    // the cache disk (status "cacheDisk"), the cache copy
+                    // in flight (status "cacheCopy" - a cross-disk
+                    // system.setCacheDisk), and this system's media
+                    // deploys (the tracker the deploy workers report).
+                    const std::string disk = sysSnap.status.value("cacheDisk", std::string());
+                    if (disk.empty())
+                    {
+                        ImGui::TextDisabled("cache: none");
+                    }
+                    else
+                    {
+                        ImGui::TextDisabled("cache: %s", disk.c_str());
+                    }
+                    if (sysSnap.status.contains("cacheCopy") &&
+                        sysSnap.status["cacheCopy"].is_object())
+                    {
+                        const json& cc = sysSnap.status["cacheCopy"];
+                        const std::uint64_t copied = cc.value("bytesCopied", std::uint64_t{0});
+                        const std::uint64_t total = cc.value("bytesTotal", std::uint64_t{0});
+                        const float frac =
+                            total > 0 ? static_cast<float>(copied) / static_cast<float>(total)
+                                      : 0.0f;
+                        ImGui::ProgressBar(frac, ImVec2(-FLT_MIN, 0.0f));
+                        ImGui::TextDisabled("copying cache: %s / %s", formatBytes(copied).c_str(),
+                                            formatBytes(total).c_str());
+                    }
+                    std::size_t shownFinished = 0;
+                    for (const auto& deploy : m_DeployTracker.entries())
+                    {
+                        if (deploy.systemName != conn.name())
+                        {
+                            continue;
+                        }
+                        if (deploy.state == "sending")
+                        {
+                            const float frac = deploy.totalBytes > 0
+                                                   ? static_cast<float>(deploy.bytesSent) /
+                                                         static_cast<float>(deploy.totalBytes)
+                                                   : 0.0f;
+                            ImGui::ProgressBar(frac, ImVec2(-FLT_MIN, 0.0f));
+                            const std::string line =
+                                "deploying " + deploy.fileName + ": " +
+                                formatBytes(deploy.bytesSent) + " / " +
+                                formatBytes(deploy.totalBytes);
+                            ImGui::TextUnformatted(line.c_str());
+                        }
+                        else if (shownFinished < kMaxFinishedDeploysShown)
+                        {
+                            ++shownFinished;
+                            if (deploy.state == "done")
+                            {
+                                ImGui::TextDisabled("deployed %s", deploy.fileName.c_str());
+                            }
+                            else
+                            {
+                                ImGui::TextColored(kBadColor, "deploy %s failed: %s",
+                                                   deploy.fileName.c_str(),
+                                                   deploy.error.c_str());
+                            }
+                        }
+                    }
                 }
                 ImGui::TableNextColumn();
                 ImGui::TextUnformatted((conn.host() + ":" + std::to_string(conn.port())).c_str());
@@ -1267,6 +1360,7 @@ void ControlGuiApp::renderSystemsWindow()
                 {
                     const std::string name = conn.name();
                     conn.disconnect();
+                    m_DeployTracker.clearSystem(name); // its deploys are stale
                     m_Systems.erase(m_Systems.begin() + static_cast<std::ptrdiff_t>(i));
                     if (m_Active >= static_cast<int>(m_Systems.size()))
                     {
@@ -1915,11 +2009,44 @@ void ControlGuiApp::openSystemSettings(int index)
     }
     // The same fields the show file's `systems` list stores (issue 16): the
     // entry's identity and address.
-    const SystemConnection& conn = *m_Systems[static_cast<size_t>(index)];
+    SystemConnection& conn = *m_Systems[static_cast<size_t>(index)];
     m_SysSettings.name = conn.name();
     m_SysSettings.host = conn.host();
     m_SysSettings.port = static_cast<int>(conn.port());
     m_SysSettings.renderDevice = conn.renderDevice();
+    // The media cache disk: what the engine actually runs (the live status
+    // - it may differ from the persisted pick, e.g. a --cache-disk startup
+    // flag) falls back to the persisted selection (the show file's entry).
+    m_SysSettings.cacheDisk = conn.cacheDisk();
+    {
+        const SystemConnection::Snapshot liveSnap = conn.snapshot();
+        if (liveSnap.haveStatus && liveSnap.status.contains("cacheDisk") &&
+            liveSnap.status["cacheDisk"].is_string())
+        {
+            m_SysSettings.cacheDisk = liveSnap.status["cacheDisk"].get<std::string>();
+        }
+    }
+    // The combo's items: the disks this system's machine has (system.disks
+    // over the command connection - a short UI-thread block on an explicit
+    // dialog open, like the address Test probe). An offline system gets
+    // only the current value.
+    m_SysDisks.clear();
+    {
+        json disksResult;
+        std::string disksError;
+        if (conn.active() &&
+            conn.send("system.disks", json::object(), disksResult, disksError, 2000) &&
+            disksResult.contains("disks") && disksResult["disks"].is_array())
+        {
+            for (const auto& d : disksResult["disks"])
+            {
+                if (d.is_string())
+                {
+                    m_SysDisks.push_back(d.get<std::string>());
+                }
+            }
+        }
+    }
     m_SysSettings.error.clear();
     m_SysSettingsIndex = index;
     m_SysSettingsModal = true;
@@ -1978,10 +2105,45 @@ bool ControlGuiApp::applySystemSettings()
         }
     }
 
+    // The media cache disk selection: a changed pick on a connected engine
+    // is sent now (the engine validates the disk against system.disks and,
+    // for a cross-disk switch, starts the cache copy - its progress
+    // reaches the UI through the status "cacheCopy" field). Like the
+    // render device: sent only when the latest status reports the current
+    // disk (right after a (re)connect the snapshot is empty, and this
+    // Apply may be retargeting away from a dead engine - the poll loop's
+    // re-apply pushes the selection as soon as a fresh status arrives).
+    // An unchanged pick is a no-op on the engine side, so the exact-string
+    // pre-check keeps a no-op Apply off the wire.
+    if (conn.active())
+    {
+        const auto diskSnap = conn.snapshot();
+        if (diskSnap.haveStatus && diskSnap.status.contains("cacheDisk") &&
+            diskSnap.status["cacheDisk"].is_string())
+        {
+            const std::string currentDisk = diskSnap.status["cacheDisk"].get<std::string>();
+            if (currentDisk != m_SysSettings.cacheDisk)
+            {
+                json diskResult;
+                std::string diskError;
+                if (!conn.send("system.setCacheDisk", {{"disk", m_SysSettings.cacheDisk}},
+                               diskResult, diskError, 10000))
+                {
+                    m_SysSettings.error = "media cache disk: " + diskError;
+                    return false;
+                }
+                log("media cache disk: " + conn.name() + " -> " +
+                    (m_SysSettings.cacheDisk.empty() ? std::string("(none)")
+                                                     : m_SysSettings.cacheDisk));
+            }
+        }
+    }
+
     const bool wasActive = conn.active();
     conn.retarget(m_SysSettings.name, m_SysSettings.host,
                   static_cast<std::uint16_t>(m_SysSettings.port));
     conn.setRenderDevice(m_SysSettings.renderDevice); // persists in the show file
+    conn.setCacheDisk(m_SysSettings.cacheDisk); // persists in the show file
     log("system settings applied: " + m_SysSettings.name + " (" + m_SysSettings.host + ":" +
         std::to_string(m_SysSettings.port) + ")" + (wasActive ? "; reconnecting" : ""));
     m_SysSettingsModal = false;
@@ -4651,6 +4813,83 @@ void ControlGuiApp::renderModals()
                         }
                     }
                 }
+                // Media cache disk (system.setCacheDisk): the disk the
+                // engine's media cache lives on (<disk>/mediamax-cache).
+                // The combo items come from system.disks (fetched when the
+                // dialog opened). A cross-disk pick makes the engine copy
+                // the existing cache across (the progress shows under the
+                // system row in the list); the choice persists in the show
+                // file's systems entry and is re-applied whenever the
+                // engine (re)connects.
+                {
+                    const std::string liveDisk =
+                        snap.haveStatus && snap.status.contains("cacheDisk") &&
+                                snap.status["cacheDisk"].is_string()
+                            ? snap.status["cacheDisk"].get<std::string>()
+                            : std::string();
+                    std::vector<std::string> items;
+                    std::vector<std::string> values; // disk root per item ("" = no cache)
+                    items.push_back("no cache (default)");
+                    values.push_back("");
+                    for (const auto& d : m_SysDisks)
+                    {
+                        std::string label = d;
+                        if (d == liveDisk)
+                        {
+                            label += "  (current)";
+                        }
+                        items.push_back(label);
+                        values.push_back(d);
+                    }
+                    // The selected disk is not on the list (the fetch
+                    // failed while the system was online, or the disk was
+                    // disconnected): keep it selectable so the current
+                    // state is not lost.
+                    if (!m_SysSettings.cacheDisk.empty())
+                    {
+                        bool listed = false;
+                        for (const auto& d : m_SysDisks)
+                        {
+                            if (d == m_SysSettings.cacheDisk)
+                            {
+                                listed = true;
+                                break;
+                            }
+                        }
+                        if (!listed)
+                        {
+                            items.push_back(m_SysSettings.cacheDisk + "  (not listed)");
+                            values.push_back(m_SysSettings.cacheDisk);
+                        }
+                    }
+                    int sel = 0;
+                    for (size_t i = 0; i < values.size(); ++i)
+                    {
+                        if (values[i] == m_SysSettings.cacheDisk)
+                        {
+                            sel = static_cast<int>(i);
+                            break;
+                        }
+                    }
+                    std::vector<const char*> itemPtrs;
+                    itemPtrs.reserve(items.size());
+                    for (const auto& s : items)
+                    {
+                        itemPtrs.push_back(s.c_str());
+                    }
+                    ImGui::SetNextItemWidth(-FLT_MIN);
+                    if (ImGui::Combo("Media cache disk##syscachedisk", &sel, itemPtrs.data(),
+                                     static_cast<int>(itemPtrs.size())))
+                    {
+                        m_SysSettings.cacheDisk = values[static_cast<size_t>(sel)];
+                    }
+                    if (m_SysDisks.empty())
+                    {
+                        ImGui::TextDisabled(
+                            "(the engine has not reported its disks - the current value "
+                            "is kept)");
+                    }
+                }
                 if (!m_SysSettings.error.empty())
                 {
                     ImGui::TextColored(kBadColor, "%s", m_SysSettings.error.c_str());
@@ -6726,6 +6965,12 @@ void ControlGuiApp::testSetSystemSettingsRenderDevice(const std::string& device)
     m_SysSettings.renderDevice = device;
 }
 
+void ControlGuiApp::testSetSystemSettingsCacheDisk(const std::string& disk)
+{
+    // The dialog's Media cache disk combo edits this field.
+    m_SysSettings.cacheDisk = disk;
+}
+
 bool ControlGuiApp::testApplySystemSettings()
 {
     // The exact action of the dialog's Apply button (no ImGui involved).
@@ -6768,6 +7013,30 @@ std::string ControlGuiApp::testSystemRenderDeviceCurrent(int index) const
         return std::string();
     }
     return snap.status["renderDevice"].value("current", std::string());
+}
+
+std::string ControlGuiApp::testSystemCacheDiskAt(int index) const
+{
+    if (index < 0 || index >= static_cast<int>(m_Systems.size()))
+    {
+        return std::string();
+    }
+    return m_Systems[static_cast<size_t>(index)]->cacheDisk();
+}
+
+std::string ControlGuiApp::testSystemCacheDiskCurrent(int index) const
+{
+    if (index < 0 || index >= static_cast<int>(m_Systems.size()))
+    {
+        return std::string();
+    }
+    const auto snap = m_Systems[static_cast<size_t>(index)]->snapshot();
+    if (!snap.haveStatus || !snap.status.contains("cacheDisk") ||
+        !snap.status["cacheDisk"].is_string())
+    {
+        return std::string();
+    }
+    return snap.status["cacheDisk"].get<std::string>();
 }
 
 std::string ControlGuiApp::testSystemHostname(int index) const

@@ -2425,6 +2425,53 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
                       "system settings persist the render device selection (no-op switch)\n";
         liveOk = liveOk && deviceOk;
 
+        // Media cache disk selection (system.setCacheDisk): the engine
+        // reports its current disk in the status ("cacheDisk"); opening the
+        // settings fetches the machine's disks (system.disks) for the
+        // combo, and picking the disk the engine already runs on + Apply
+        // is a no-op switch that persists the selection in the show
+        // file's systems entry (the poll loop re-applies it whenever the
+        // engine reconnects).
+        bool diskOk = false;
+        bool disksFetched = false;
+        if (renamedOk)
+        {
+            app.testOpenModal("syssettings");
+            bool opened = false;
+            for (int i = 0; i < 3 && !opened; ++i)
+            {
+                glfwPollEvents();
+                if (runtime.renderFrame())
+                {
+                    opened = app.testModalOpen("syssettings");
+                }
+            }
+            if (opened)
+            {
+                // The machine has at least one disk (the playback app
+                // enumerates them for system.disks).
+                disksFetched = !app.testSystemDisksFetched().empty();
+                // The dialog's field was initialized from the live status
+                // on open; re-selecting the same value is the no-op Apply.
+                app.testSetSystemSettingsCacheDisk(app.testSystemCacheDiskCurrent(1));
+                const bool applied = app.testApplySystemSettings();
+                diskOk = applied &&
+                         app.testSystemCacheDiskAt(1) == app.testSystemCacheDiskCurrent(1);
+            }
+        }
+        app.testCloseModal("syssettings");
+        for (int i = 0; i < 3; ++i)
+        {
+            glfwPollEvents();
+            runtime.renderFrame();
+        }
+        liveReport += std::string(disksFetched ? "PASS " : "FAIL ") +
+                      "system settings fetched the system's disk list (system.disks)\n";
+        liveOk = liveOk && disksFetched;
+        liveReport += std::string(diskOk ? "PASS " : "FAIL ") +
+                      "system settings persist the media cache disk selection (no-op switch)\n";
+        liveOk = liveOk && diskOk;
+
         // Re-target the entry's port: a closed port goes offline (the poll
         // thread can no longer reach the engine), switching back comes
         // online again with a fresh status - the dialog's address path.

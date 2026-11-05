@@ -51,9 +51,9 @@ bool sameName(const std::string& a, const std::string& b)
 } // namespace
 
 SystemConnection::SystemConnection(std::string name, std::string host, std::uint16_t port,
-                                   std::string renderDevice)
+                                   std::string renderDevice, std::string cacheDisk)
     : m_Name(std::move(name)), m_Host(std::move(host)), m_Port(port),
-      m_RenderDevice(std::move(renderDevice))
+      m_RenderDevice(std::move(renderDevice)), m_CacheDisk(std::move(cacheDisk))
 {
 }
 
@@ -78,6 +78,7 @@ void SystemConnection::connect()
         // A fresh connection cycle: the engine (possibly restarted) must
         // be re-checked against the persisted render device selection.
         m_DeviceReapplied = false;
+        m_CacheDiskReapplied = false;
     }
     // A fresh connection cycle also starts the engine log from the current
     // ring: the UI already delivered (or never saw) whatever queued up
@@ -231,6 +232,52 @@ void SystemConnection::pollLoop()
                 }
                 // !hasInfo or switching: wait for the engine to report its
                 // devices / finish the in-flight switch.
+            }
+
+            // Re-apply the persisted media cache disk selection (system.
+            // setCacheDisk): like the render device, the selection must
+            // survive engine restarts. The engine reports its current disk
+            // in the status (always present in current builds, "" when
+            // none); a mismatch is pushed to it here on the poll connection
+            // (the UI never blocks on it). The engine validates the disk
+            // and, for a cross-disk switch, starts the cache copy itself
+            // (its progress shows up in the status as "cacheCopy").
+            if (!m_CacheDiskReapplied)
+            {
+                std::string wanted;
+                std::string current;
+                bool hasInfo = false;
+                {
+                    std::lock_guard lock(m_SnapMutex);
+                    wanted = m_CacheDisk;
+                    if (m_Snap.haveStatus && m_Snap.status.contains("cacheDisk") &&
+                        m_Snap.status["cacheDisk"].is_string())
+                    {
+                        hasInfo = true;
+                        current = m_Snap.status["cacheDisk"].get<std::string>();
+                    }
+                }
+                if (wanted.empty())
+                {
+                    m_CacheDiskReapplied = true; // no selection to apply
+                }
+                else if (hasInfo && sameName(wanted, current))
+                {
+                    m_CacheDiskReapplied = true; // the engine already runs it
+                }
+                else if (hasInfo)
+                {
+                    nlohmann::json diskResult;
+                    std::string diskError;
+                    if (m_PollClient.request("system.setCacheDisk", {{"disk", wanted}},
+                                             diskResult, diskError, kPollTimeoutMs))
+                    {
+                        m_CacheDiskReapplied = true;
+                    }
+                    // Failure (engine busy, mid-reconnect): retry next cycle.
+                }
+                // !hasInfo: the engine predates the media cache - nothing
+                // to re-apply against.
             }
 
             nlohmann::json scenes;

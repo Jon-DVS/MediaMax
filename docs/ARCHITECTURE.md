@@ -217,6 +217,13 @@ clamped to its in/out points, with loop/hold-at-end semantics.
   short-lived connection: each transfer is one worker thread with its own
   `ControlClient` (the GUI's command connection is UI-thread only), and a
   failed stream is cancelled best-effort.
+- `net/MediaDeploy` — the deploy tracker those worker threads report
+  into: a thread-safe registry of in-flight and recently finished media
+  deploys (`begin` / `progress` / `finish`, monotone byte counts, first
+  outcome wins; `entries()` snapshots for the UI, `clearFinished()` /
+  `clearSystem()` / `reset()` to drop them). Pure bookkeeping — no
+  network, no engine access — so the Systems tab's per-system progress
+  list reads it every frame and the logic is unit-testable in the core.
 
 ### `display/` — display wall model
 
@@ -452,6 +459,26 @@ variable — passing the root ID as a split out-parameter clobbers it, makes
 plus a private, never-again-submitted host window; the pane renders into the
 dead window and the process crashes once ImGui's 60 s memory compaction
 frees that host's draw-list channels.)
+
+The **Systems** pane lists the show file's `systems` entries, each backed
+by a `SystemConnection` (two independent protocol connections per system:
+a background poll thread that refreshes the `status` / `scene.list` /
+`frame.state` snapshot every 500 ms — 10 Hz while the Show view is
+visible — and a UI-thread command connection for interactive commands).
+Under each system row the pane shows that system's media distribution
+state: the cache disk the engine runs (`status.cacheDisk`), a progress
+bar while the engine copies the cache across disks (`status.cacheCopy`),
+and the system's media deploys from the `net/MediaDeploy` tracker
+(in-flight transfers with a progress bar, recent outcomes kept brief).
+The per-system settings dialog (settings... on a row) edits the entry's
+identity and address and carries the two engine selections that persist
+in the show file's systems entry and are re-applied to a (re)started
+engine by the poll loop (the engine reports its current values in the
+`status`; a mismatch is pushed on the poll connection, so neither the UI
+nor the command path ever blocks on it): the render device
+(`system.setRenderDevice`) and the media cache disk
+(`system.setCacheDisk`, whose combo items come from the machine's
+`system.disks`, fetched when the dialog opens).
 
 The **Show view** is a live 2D render of the active system's output, drawn
 on the ImGui draw list of its scene child (no custom pipeline: the control
