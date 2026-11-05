@@ -403,6 +403,13 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
     std::uint16_t livePort = 0;
     bool haveLiveSystem = false;
     std::string autoPushName;
+    // The media distribution checks run in the live setup (right after the
+    // BMP is added to the show): the 4a load-push check later loads a
+    // minimal show (no media) through the production Open path, which
+    // replaces the document and resets the deploy tracker - the add-time
+    // state these checks verify must be captured before that happens.
+    bool mediaDeployOk = false;
+    bool mediaDeployListOk = false;
     if (!liveSystem.empty())
     {
         const size_t colon = liveSystem.rfind(':');
@@ -442,6 +449,43 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
             // show view (the live check above inspected the same command
             // path via frame.state).
             app.testGiveEditorALayer();
+
+            // 4e) Media distribution (checked here, in the setup: see the
+            // mediaDeployOk declaration for why this cannot wait for the
+            // live phase). The add went through the production path with
+            // the system connected, so (a) the new reference's deploy list
+            // took the "all connected systems" default, and (b) the deploy
+            // worker transferred the file into the engine's media cache -
+            // the tracker records the outcome as done under the system.
+            const std::string bmpPath = app.testSelfTestBmpPath();
+            const auto mediaPaths = app.testShowMediaPaths();
+            int bmpIdx = -1;
+            for (size_t i = 0; i < mediaPaths.size(); ++i)
+            {
+                if (mediaPaths[i] == bmpPath)
+                {
+                    bmpIdx = static_cast<int>(i);
+                }
+            }
+            if (bmpIdx >= 0)
+            {
+                const auto deployTo = app.testMediaDeployTo(bmpIdx);
+                mediaDeployListOk =
+                    std::find(deployTo.begin(), deployTo.end(), "self-test") != deployTo.end();
+                const std::string target =
+                    "self-test|" + std::filesystem::path(bmpPath).filename().string() + "|done";
+                const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+                while (!mediaDeployOk && std::chrono::steady_clock::now() < deadline)
+                {
+                    const auto entries = app.testDeployEntries();
+                    mediaDeployOk =
+                        std::find(entries.begin(), entries.end(), target) != entries.end();
+                    if (!mediaDeployOk)
+                    {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    }
+                }
+            }
         }
     }
 
@@ -1027,6 +1071,117 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
         modalOk = modalOk && osDropOk;
         modalReport += std::string(osDropOk ? "PASS " : "FAIL ") +
                        "editor: OS file drop pipeline adds media to the show\n";
+    }
+
+    // 3e3) Media tab rework (the media distribution UI): the browse button
+    //      sits on top of the list, the rows are selectable and drive the
+    //      Media settings section (fixed path text, the automatic probe
+    //      info + checksum, Replace..., the deploy-to checkbox list).
+    {
+        auto frame = [&] {
+            glfwPollEvents();
+            runtime.renderFrame();
+        };
+        auto clickAt = [&](float sx, float sy) {
+            runtime.preNewFrameHook = [sx, sy] {
+                ImGui::GetIO().AddMousePosEvent(sx, sy);
+            };
+            glfwPollEvents();
+            runtime.renderFrame();
+            runtime.preNewFrameHook = [sx, sy] {
+                ImGui::GetIO().AddMousePosEvent(sx, sy);
+                ImGui::GetIO().AddMouseButtonEvent(0, true);
+            };
+            glfwPollEvents();
+            runtime.renderFrame();
+            runtime.preNewFrameHook = [sx, sy] {
+                ImGui::GetIO().AddMousePosEvent(sx, sy);
+                ImGui::GetIO().AddMouseButtonEvent(0, false);
+            };
+            glfwPollEvents();
+            runtime.renderFrame();
+            runtime.preNewFrameHook = nullptr;
+        };
+        bool mediaOk = false;
+        float x = 0.f;
+        float y = 0.f;
+        float w = 0.f;
+        float h = 0.f;
+        if (app.testEditorItemRect(kInvalidId, "tab-media", x, y, w, h))
+        {
+            clickAt(x + w * 0.5f, y + h * 0.5f);
+        }
+        frame();
+        float bx = 0.f;
+        float by = 0.f;
+        float bw = 0.f;
+        float bh = 0.f;
+        float rx = 0.f;
+        float ry = 0.f;
+        float rw = 0.f;
+        float rh = 0.f;
+        // Layout: the browse button is above the first media row (the
+        // rework moved it to the top of the tab).
+        const bool browseAbove =
+            app.testEditorItemRect(kInvalidId, "media-browse", bx, by, bw, bh) &&
+            app.testEditorItemRect(kInvalidId, "media-row-0", rx, ry, rw, rh) && by < ry;
+        // Selection: clicking a row selects it for the Media settings
+        // section below the list (the row's index differs between the
+        // headless and live runs - the live show carries the self-test BMP
+        // first - so it is looked up by path).
+        int selIdx = -1;
+        const auto mediaPaths = app.testShowMediaPaths();
+        for (int i = 0; i < static_cast<int>(mediaPaths.size()); ++i)
+        {
+            if (mediaPaths[static_cast<size_t>(i)] == "selftest-drop-b.png")
+            {
+                selIdx = i;
+            }
+        }
+        bool selOk = false;
+        if (browseAbove && selIdx >= 0 &&
+            app.testEditorItemRect(kInvalidId,
+                                   ("media-row-" + std::to_string(selIdx)).c_str(), rx, ry, rw, rh))
+        {
+            clickAt(rx + rw * 0.5f, ry + rh * 0.5f);
+            frame();
+            selOk = app.testSelectedMediaPath() == "selftest-drop-b.png";
+        }
+        // The settings section carries the automatic probe info: the
+        // dropped self-test files do not exist on this machine, so the
+        // worker reports the not-found note (it runs in the background -
+        // allow frames for it to land).
+        std::string info;
+        for (int i = 0; i < 20 && info.empty(); ++i)
+        {
+            frame();
+            info = app.testMediaInfoLine(selIdx);
+        }
+        const bool infoOk = info.find("not found") != std::string::npos;
+        // The deploy-to checkbox list renders one box per registered
+        // system (headless runs have none - then the list shows the hint).
+        const bool sysBoxes =
+            haveLiveSystem
+                ? app.testEditorItemRect(kInvalidId, "media-sys-0", rx, ry, rw, rh)
+                : true;
+        // Replace... swaps the file out through the settings' action
+        // (same reference: the path list changes in place), then it is
+        // swapped back so the later checks run against the original list.
+        bool replOk = false;
+        if (selOk)
+        {
+            const size_t before = app.testShowMediaPaths().size();
+            replOk = app.testReplaceMedia(selIdx, "selftest-drop-b2.png") &&
+                     app.testShowMediaPaths().size() == before &&
+                     app.testSelectedMediaPath() == "selftest-drop-b2.png";
+            replOk = replOk && app.testReplaceMedia(selIdx, "selftest-drop-b.png");
+            frame();
+        }
+        mediaOk = browseAbove && selOk && infoOk && sysBoxes && replOk;
+        modalOk = modalOk && mediaOk;
+        modalReport += std::string(mediaOk ? "PASS " : "FAIL ") +
+                       "media tab: browse on top, selectable rows drive the settings "
+                       "(probe info + replace)\n";
     }
 
     // 4) Auto-push (issue 8): the editor edit from step 1 must have reached
@@ -2431,11 +2586,24 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
         // combo, and picking the disk the engine already runs on + Apply
         // is a no-op switch that persists the selection in the show
         // file's systems entry (the poll loop re-applies it whenever the
-        // engine reconnects).
+        // engine reconnects). Like the render device check, the live value
+        // is captured BEFORE the Apply: the Apply retargets the connection,
+        // which wipes the snapshot until the poll thread reconnects, so the
+        // post-Apply status would race the check.
         bool diskOk = false;
         bool disksFetched = false;
         if (renamedOk)
         {
+            std::string currentDisk;
+            const auto diskDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(6);
+            while (currentDisk.empty() && std::chrono::steady_clock::now() < diskDeadline)
+            {
+                currentDisk = app.testSystemCacheDiskCurrent(1);
+                if (currentDisk.empty())
+                {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                }
+            }
             app.testOpenModal("syssettings");
             bool opened = false;
             for (int i = 0; i < 3 && !opened; ++i)
@@ -2451,12 +2619,11 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
                 // The machine has at least one disk (the playback app
                 // enumerates them for system.disks).
                 disksFetched = !app.testSystemDisksFetched().empty();
-                // The dialog's field was initialized from the live status
-                // on open; re-selecting the same value is the no-op Apply.
-                app.testSetSystemSettingsCacheDisk(app.testSystemCacheDiskCurrent(1));
+                // Re-selecting the disk the engine already runs on is the
+                // no-op Apply.
+                app.testSetSystemSettingsCacheDisk(currentDisk);
                 const bool applied = app.testApplySystemSettings();
-                diskOk = applied &&
-                         app.testSystemCacheDiskAt(1) == app.testSystemCacheDiskCurrent(1);
+                diskOk = applied && app.testSystemCacheDiskAt(1) == currentDisk;
             }
         }
         app.testCloseModal("syssettings");
@@ -2471,6 +2638,22 @@ int runGuiSelfTest(int frames, const std::string& liveSystem)
         liveReport += std::string(diskOk ? "PASS " : "FAIL ") +
                       "system settings persist the media cache disk selection (no-op switch)\n";
         liveOk = liveOk && diskOk;
+
+        // Media auto-deploy (the media distribution): the self-test BMP was
+        // added to the show through the production add path (the live
+        // setup's testGiveEditorALayer) with the system connected, so its
+        // deploy worker transferred it into the engine's media cache (the
+        // tracker records the outcome under the system; the engine serves
+        // layers from the cache as the file lands), and the new media's
+        // deploy list took the "all connected systems" default at add
+        // time. Both are checked in the live setup: the 4a load-push check
+        // above loads a minimal show through the production Open path,
+        // which replaces the document and resets the deploy tracker.
+        liveOk = liveOk && mediaDeployOk && mediaDeployListOk;
+        liveReport += std::string(mediaDeployOk ? "PASS " : "FAIL ") +
+                      "added media auto-deploys to the connected system's media cache\n";
+        liveReport += std::string(mediaDeployListOk ? "PASS " : "FAIL ") +
+                      "new media defaults its deploy list to the connected systems\n";
 
         // Re-target the entry's port: a closed port goes offline (the poll
         // thread can no longer reach the engine), switching back comes

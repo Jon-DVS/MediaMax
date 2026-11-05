@@ -75,6 +75,11 @@ pixels to this reference for every mode.
 
 - `Show` — name, frame rate, duration (zero = unlimited), media references,
   scenes, and the cue timeline (kept sorted by time).
+- `MediaReference` — one show media, by id + file path; the optional
+  `checksum` (the sha256 of the file when it was added/replaced — the
+  change-detection log) and `deployTo` (the systems the control interface
+  deploys it to) are client-side info: the control GUI writes them, the
+  engine stores but ignores them.
 - `Scene` — a named set of `Layer`s.
 - `Layer` — one media element: media id (`0` = solid-color layer),
   in/out points (out `0` = to end of media), loop, rate, transform, opacity,
@@ -480,6 +485,27 @@ nor the command path ever blocks on it): the render device
 (`system.setCacheDisk`, whose combo items come from the machine's
 `system.disks`, fetched when the dialog opens).
 
+The Show Editor's **Media** tab is the media-distribution surface: the
+Browse button sits on top of the reference list (files can also be dropped
+anywhere on the window); the path is fixed text — a stray keystroke must
+not rewrite where the show reads its media from — and each row is
+selectable, driving the Media settings section below it: the automatic
+probe info (a worker probes the local file with FFmpeg when it is
+added/replaced), the file's sha256 checksum (same worker; the result is
+logged in the show file's `checksum` field), a Replace... button (swaps
+the file out: same id, deploy list and layers, new path — the info
+recomputes and the file re-deploys), and the "deploy to" checkbox list
+(one box per registered system, offline ones marked; the choice persists
+in the show file's `deployTo`). Adding a file checks all connected systems
+and deploys to them automatically: one worker thread per (file, system)
+runs `net/MediaTransfer` on its own short-lived connection and reports
+into the `net/MediaDeploy` tracker (the Systems tab shows the progress);
+the frame loop joins finished workers (the destructor joins the rest), the
+info workers' results are queued under a mutex and applied on the UI
+thread, and `log()` locks both its log targets for the same reason. As the
+deployed files land, the engine's pending-media watcher activates the
+waiting layers from the cache — no further action.
+
 The **Show view** is a live 2D render of the active system's output, drawn
 on the ImGui draw list of its scene child (no custom pipeline: the control
 app links the core only, and a second vk-hpp default dispatcher for NVRHI
@@ -487,7 +513,10 @@ is forbidden by the single-dispatcher rule). Its scene model
 (`ShowViewScene`) is rebuilt every frame from the `frame.state` poll — the
 poll connection switches from its 500 ms status cadence to a 10 Hz live poll
 only while the view is visible — and the free camera (wheel-zoom, drag-pan,
-reset) auto-refits when the display wall changes. The view-mode radios
+reset) auto-refits when the display wall changes, once the view's size has
+been stable for a frame (the window's first frames can carry a transient,
+pre-dock-layout size, and fitting on it would bake in the wrong scale). The
+view-mode radios
 (Display / Layer / Show) pick what a left click selects; **display mode also
 changes the drawing**: the display wall is drawn on top of the layers and
 the layer fills are dimmed so the wall reads through them - a show-view

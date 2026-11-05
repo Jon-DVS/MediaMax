@@ -25,6 +25,13 @@ TEST_CASE("Round trip: full show serializes and parses back")
     layer.transform.rotation = 0.5f;
     layer.color = {0.5f, 0.25f, 0.125f, 0.75f};
 
+    // Media distribution: the first reference carries the file's checksum
+    // (logged on add) and its deploy-to list; the second keeps both unset
+    // (the fields must be omitted from the JSON, not written as empty).
+    original.media[0].checksum =
+        "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+    original.media[0].deployTo = {"Main Wall", "Lobby"};
+
     // Target systems (issue 18): the show file carries the system list.
     // "Main Wall" pins its render device; "Lobby" keeps the engine default
     // (the field must be omitted from the JSON, not written as empty) but
@@ -51,6 +58,20 @@ TEST_CASE("Round trip: full show serializes and parses back")
     CHECK(s.media.size() == 2);
     CHECK(s.media[0].id == test::kMediaA);
     CHECK(s.media[0].path == "media/video-a.mp4");
+    CHECK(s.media[0].checksum ==
+          "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08");
+    CHECK(s.media[0].deployTo.size() == 2);
+    CHECK(s.media[0].deployTo[0] == "Main Wall");
+    CHECK(s.media[0].deployTo[1] == "Lobby");
+    CHECK(s.media[1].checksum.empty());
+    CHECK(s.media[1].deployTo.empty());
+    // Additive fields: the set entry carries them, the unset one omits them
+    // (older files without them parse with empty values - same as the
+    // systems entry's cacheDisk above).
+    CHECK(json.at("media")[0].contains("checksum"));
+    CHECK(json.at("media")[0].contains("deployTo"));
+    CHECK_FALSE(json.at("media")[1].contains("checksum"));
+    CHECK_FALSE(json.at("media")[1].contains("deployTo"));
     CHECK(s.scenes.size() == 2);
     CHECK(s.scenes[0].name == "A");
     CHECK(s.scenes[0].layers.size() == 2);
@@ -213,6 +234,26 @@ TEST_CASE("fromJson rejects malformed input")
          nlohmann::json::array({{{"name", "a"}, {"host", "b"}, {"cacheDisk", 42}}})},
     };
     CHECK_FALSE(Show::fromJson(badSysCacheDisk, error).has_value());
+
+    nlohmann::json badMediaChecksum = {
+        {"app", "mediamax-show"},
+        {"version", 1},
+        {"media",
+         nlohmann::json::array({{{"id", 1}, {"path", "a.mp4"}, {"checksum", 42}}})},
+    };
+    CHECK_FALSE(Show::fromJson(badMediaChecksum, error).has_value());
+
+    nlohmann::json badMediaDeployTo = {
+        {"app", "mediamax-show"},
+        {"version", 1},
+        {"media",
+         nlohmann::json::array({{
+             {"id", 1},
+             {"path", "a.mp4"},
+             {"deployTo", nlohmann::json::array({42})},
+         }})},
+    };
+    CHECK_FALSE(Show::fromJson(badMediaDeployTo, error).has_value());
 
     // A display entry must carry a non-empty name (the name is the wall's
     // identity).

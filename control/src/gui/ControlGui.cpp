@@ -4,6 +4,7 @@
 #include "gui/ControlGui.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cfloat>
 #include <cmath>
@@ -12,6 +13,8 @@
 #include <ctime>
 #include <filesystem>
 #include <functional>
+#include <set>
+#include <thread>
 #include <utility>
 
 #include <imgui.h>
@@ -24,10 +27,17 @@
 #include "ImGuiFileDialog.h"
 
 #include "gui/GuiCrash.h"
+#include "mediamax/media/MediaCache.h"
+#include "mediamax/media/MediaTypes.h"
 #include "mediamax/net/ControlClient.h"
 #include "mediamax/net/MediaDeploy.h"
+#include "mediamax/net/MediaTransfer.h"
 #include "mediamax/time/Timecode.h"
 #include "mediamax/util/File.h"
+#include "mediamax/util/Sha256.h"
+#if defined(MEDIAMAX_HAS_FFMPEG)
+#include "mediamax/media/FFmpegSupport.h"
+#endif
 
 namespace mediamax::gui
 {
@@ -65,6 +75,56 @@ std::string formatBytes(std::uint64_t bytes)
 // Finished deploys shown under a system row (the rest are dropped by the
 // tracker's clearFinished as newer work arrives): keeps the row compact.
 constexpr int kMaxFinishedDeploysShown = 3;
+
+#if defined(MEDIAMAX_HAS_FFMPEG)
+// The automatic probe info line for the Media settings section: the probe's
+// metadata, human formatted ("" when the probe reported nothing).
+std::string formatMediaInfo(const MediaMetadata& meta)
+{
+    if (!meta.valid())
+    {
+        return std::string();
+    }
+    std::string line;
+    if (meta.hasVideo)
+    {
+        line = std::to_string(meta.width) + "x" + std::to_string(meta.height);
+        if (!meta.videoCodec.empty())
+        {
+            line += " " + meta.videoCodec;
+        }
+    }
+    if (meta.hasAudio)
+    {
+        if (!line.empty())
+        {
+            line += ", ";
+        }
+        line += "audio";
+        if (!meta.audioCodec.empty())
+        {
+            line += " " + meta.audioCodec;
+        }
+        if (meta.audioSampleRate > 0.0)
+        {
+            char buf[32];
+            std::snprintf(buf, sizeof(buf), " %.0f Hz", meta.audioSampleRate);
+            line += buf;
+        }
+    }
+    if (meta.duration.isValid() && meta.duration.toSeconds() > 0.0)
+    {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), ", %.2fs", meta.duration.toSeconds());
+        line += buf;
+    }
+    if (line.empty())
+    {
+        line = meta.type == MediaType::Image ? std::string("image") : std::string("media");
+    }
+    return line;
+}
+#endif // MEDIAMAX_HAS_FFMPEG
 
 // A minimal 24-bit BMP (left half red, right half blue) for the live
 // self-test's media.thumbnail check: it exercises the engine's real image
@@ -194,6 +254,7 @@ void modalStartSize(float width)
 constexpr const char* kOpenDialogKey = "OpenShow";
 constexpr const char* kSaveAsDialogKey = "SaveAsShow";
 constexpr const char* kMediaDialogKey = "AddMedia";
+constexpr const char* kMediaReplaceDialogKey = "ReplaceMedia";
 // The show files the dialogs accept (filter syntax: dot-prefixed
 // extensions, comma separated).
 constexpr const char* kShowFilter = ".json";
@@ -387,6 +448,17 @@ ControlGuiApp::ControlGuiApp()
 
 ControlGuiApp::~ControlGuiApp()
 {
+    // The media workers (info computes, deploy transfers) run on their own
+    // threads and report into members the destruction below removes: join
+    // them first. A transfer in flight is network I/O bounded by its chunk
+    // timeouts; the info compute by the file's size.
+    for (auto& worker : m_MediaWorkers)
+    {
+        if (worker->thread.joinable())
+        {
+            worker->thread.join();
+        }
+    }
     // SystemConnection destructors stop and join their poll threads.
 }
 
@@ -440,6 +512,11 @@ void ControlGuiApp::frame()
     // Hotkeys first: key state and the previous frame's keyboard capture
     // (text fields, open popups) are the frame's input ground truth.
     processHotkeys();
+    // Media worker housekeeping: join the finished workers (info computes,
+    // deploy transfers) and apply the queued info results (the checksum
+    // lands in the show document, the probe line in m_MediaLocalInfo).
+    reapMediaWorkers();
+    drainMediaInfo();
     if (m_Active != m_LastActive)
     {
         // Reset the transient playback edit state on system switch.
@@ -550,6 +627,21 @@ void ControlGuiApp::syncSystemsToShow()
             {system->name(), system->host(), system->port(), system->renderDevice(),
              system->cacheDisk()});
     }
+    // The media's deploy lists keep only surviving systems (a name for a
+    // system that left the list deploys nowhere and would clutter the show
+    // file).
+    std::set<std::string> names;
+    for (const auto& system : m_Systems)
+    {
+        names.insert(system->name());
+    }
+    for (auto& ref : show.media)
+    {
+        ref.deployTo.erase(
+            std::remove_if(ref.deployTo.begin(), ref.deployTo.end(),
+                           [&names](const std::string& n) { return names.find(n) == names.end(); }),
+            ref.deployTo.end());
+    }
 }
 
 void ControlGuiApp::applyShowSystems()
@@ -615,6 +707,9 @@ SystemConnection* ControlGuiApp::activeConnection() const
 
 void ControlGuiApp::log(const std::string& line)
 {
+    // Thread-safe: the media workers (info computes, deploy transfers) log
+    // their outcomes from their own threads.
+    std::lock_guard lock(m_LogTabMutex);
     m_ConsoleLog.push_back(truncate(line, kLogLineLimit));
     while (m_ConsoleLog.size() > kMaxLogLines)
     {
@@ -622,13 +717,10 @@ void ControlGuiApp::log(const std::string& line)
     }
     // The Log tab carries the control's own messages too (next to the
     // systems' serious engine messages).
+    m_LogTab.push_back({"local", "info", nowEpochSeconds(), truncate(line, kLogLineLimit)});
+    while (m_LogTab.size() > kMaxLogTabLines)
     {
-        std::lock_guard lock(m_LogTabMutex);
-        m_LogTab.push_back({"local", "info", nowEpochSeconds(), truncate(line, kLogLineLimit)});
-        while (m_LogTab.size() > kMaxLogTabLines)
-        {
-            m_LogTab.erase(m_LogTab.begin());
-        }
+        m_LogTab.erase(m_LogTab.begin());
     }
 }
 
@@ -2756,6 +2848,19 @@ void ControlGuiApp::renderShowViewWindow()
     const ImVec2 childSize = ImGui::GetContentRegionAvail();
     m_ShowViewRectMin = childMin;
     m_ShowViewRectMax = ImVec2(childMin.x + childSize.x, childMin.y + childSize.y);
+    // The camera fit needs a settled view size. The window's early frames
+    // can carry a transient one: at start it renders one frame floating at
+    // its default size (nearly the whole dockspace) before the DockBuilder
+    // layout lands it in its node (and the same happens after a dock
+    // re-layout). Fitting on a transient size bakes in the wrong scale - a
+    // refit would only fire if the wall's signature changed afterwards, so
+    // a wall that is already known on the first frame would never be
+    // corrected. Hold the fit off until the size has been stable for a
+    // frame; a size that is stable is the size the fit can trust.
+    const bool sizeStable =
+        childSize.x > 0.f && childSize.y > 0.f &&
+        m_ShowViewPrevChildSize.x == childSize.x && m_ShowViewPrevChildSize.y == childSize.y;
+    m_ShowViewPrevChildSize = childSize;
 
     // The top-right control strip: [Display][Layer][Show]  [Reset view],
     // right-aligned. It sits one row below the content top - at y=8 the old
@@ -2825,11 +2930,13 @@ void ControlGuiApp::renderShowViewWindow()
     // display.set moves the wall, and refitting would fight it) and for a
     // short settle after it (the wall's signature keeps updating for a
     // poll period after the release).
+    //
     const bool dragSettling =
         m_ShowDragEndTime != std::chrono::steady_clock::time_point{} &&
         std::chrono::steady_clock::now() < m_ShowDragEndTime + std::chrono::seconds(2);
-    if (!m_ShowCam.fitted ||
-        (signature != m_ShowFittedSignature && !m_ShowDragActive && !dragSettling))
+    if (sizeStable &&
+        (!m_ShowCam.fitted ||
+         (signature != m_ShowFittedSignature && !m_ShowDragActive && !dragSettling)))
     {
         fitShowViewCamera(childSize, signature);
     }
@@ -3556,12 +3663,26 @@ void ControlGuiApp::renderShowTab()
 void ControlGuiApp::renderMediaTab()
 {
     Show& show = m_Editor.show();
-    if (ImGui::BeginTable("editmedia", 4,
+    // The browse button is the tab's primary action, so it sits on top of
+    // the list (files can also be dropped anywhere on the window). The
+    // stored paths are kept as-is (they must exist on the systems the show
+    // is pushed to).
+    if (ImGui::Button("Browse...##mediabrowse"))
+    {
+        addMediaFileDialog();
+    }
+    recordTestEditorItem(kInvalidId, "media-browse", false);
+    ImGui::SameLine();
+    ImGui::TextDisabled("(or drop files anywhere on the window)");
+
+    // The reference list: one selectable row per file. The path is fixed
+    // text - a stray keystroke must not rewrite where the show reads its
+    // media from (files swap out through the settings' Replace... below).
+    if (ImGui::BeginTable("editmedia", 3,
                           ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_BordersOuter))
     {
         ImGui::TableSetupColumn("##id", ImGuiTableColumnFlags_WidthFixed, 50.0f);
         ImGui::TableSetupColumn("path");
-        ImGui::TableSetupColumn("##probe", ImGuiTableColumnFlags_WidthFixed, 70.0f);
         ImGui::TableSetupColumn("##rm", ImGuiTableColumnFlags_WidthFixed, 50.0f);
         for (size_t i = 0; i < show.media.size(); ++i)
         {
@@ -3571,34 +3692,23 @@ void ControlGuiApp::renderMediaTab()
             ImGui::TableNextColumn();
             ImGui::Text("%u", ref.id);
             ImGui::TableNextColumn();
-            if (ImGui::InputText("##path", &ref.path))
+            // The path is the row's label (the "###" id stays stable while
+            // the text shows the path); the row selects it for the Media
+            // settings section below.
+            if (ImGui::Selectable((ref.path + "###media" + std::to_string(i)).c_str(),
+                                  m_SelectedMediaIdx == static_cast<int>(i)))
             {
-                m_Editor.touch();
+                m_SelectedMediaIdx = static_cast<int>(i);
             }
-            ImGui::TableNextColumn();
-            if (ImGui::Button("Probe##probe"))
-            {
-                // Loads the file on the active system and shows the result.
-                json result;
-                std::string error;
-                if (sendActive("media.load", {{"path", ref.path}}, error, &result))
-                {
-                    m_MediaProbeResult = "loaded as id " +
-                                         std::to_string(static_cast<unsigned>(result.value("id", 0u))) +
-                                         " (" + result.value("type", "?") + ", " +
-                                         std::to_string(static_cast<int>(result.value("width", 0))) +
-                                         "x" + std::to_string(static_cast<int>(result.value("height", 0))) +
-                                         ")";
-                }
-                else
-                {
-                    m_MediaProbeResult = "probe failed: " + error;
-                }
-            }
+            recordTestEditorItem(kInvalidId, "media-row-" + std::to_string(i), false);
             ImGui::TableNextColumn();
             if (ImGui::Button("x##rm"))
             {
                 show.media.erase(show.media.begin() + static_cast<std::ptrdiff_t>(i));
+                if (m_SelectedMediaIdx >= static_cast<int>(show.media.size()))
+                {
+                    m_SelectedMediaIdx = static_cast<int>(show.media.size()) - 1;
+                }
                 m_Editor.touch();
                 ImGui::PopID();
                 break;
@@ -3607,21 +3717,105 @@ void ControlGuiApp::renderMediaTab()
         }
         ImGui::EndTable();
     }
-    // Pick existing files with the file dialog (multi-select), or drop files
-    // anywhere on the window (both add references to this show); the stored
-    // paths are kept as-is (they must exist on the systems the show is
-    // pushed to).
-    if (ImGui::Button("Browse...##mediabrowse"))
+    if (show.media.empty())
     {
-        addMediaFileDialog();
+        ImGui::TextDisabled("(no media - browse or drop files above)");
     }
-    ImGui::SameLine();
-    ImGui::TextDisabled("(or drop files anywhere on the window)");
-    if (!m_MediaProbeResult.empty())
+    renderMediaSettings();
+}
+
+void ControlGuiApp::renderMediaSettings()
+{
+    Show& show = m_Editor.show();
+    if (m_SelectedMediaIdx < 0 || m_SelectedMediaIdx >= static_cast<int>(show.media.size()))
     {
-        ImGui::Spacing();
-        ImGui::TextWrapped("%s", m_MediaProbeResult.c_str());
+        m_SelectedMediaIdx = -1;
     }
+    if (m_SelectedMediaIdx < 0)
+    {
+        return;
+    }
+    MediaReference& ref = show.media[static_cast<size_t>(m_SelectedMediaIdx)];
+    ImGui::Separator();
+    ImGui::TextUnformatted("Media settings");
+    // The file (fixed text - changes go through Replace... below).
+    ImGui::TextWrapped("%s", ref.path.c_str());
+    recordTestEditorItem(kInvalidId, "media-settings-path", false);
+
+    // The automatic probe info + the file's checksum: computed on a worker
+    // when the file was added/replaced (a multi-GB hash must not freeze
+    // the UI); "computing" until the result lands in m_MediaLocalInfo.
+    auto it = m_MediaLocalInfo.find(ref.path);
+    if (it != m_MediaLocalInfo.end())
+    {
+        ImGui::Text("info: %s", it->second.info.c_str());
+        recordTestEditorItem(kInvalidId, "media-info", false);
+        if (!it->second.checksum.empty())
+        {
+            ImGui::TextWrapped("checksum (sha256): %s", it->second.checksum.c_str());
+            recordTestEditorItem(kInvalidId, "media-checksum", false);
+        }
+    }
+    else
+    {
+        ImGui::TextDisabled("computing info...");
+        recordTestEditorItem(kInvalidId, "media-info", false);
+    }
+
+    // Swap the file out: the same reference (id, deploy list, the layers
+    // that use it) points at a new file.
+    if (ImGui::Button("Replace...##mediareplace"))
+    {
+        openMediaReplaceDialog();
+    }
+    recordTestEditorItem(kInvalidId, "media-replace", false);
+
+    // The systems this media deploys to (the default - all connected
+    // systems - is taken when the reference is added; the choices persist
+    // in the show file's entry).
+    ImGui::TextUnformatted("Deploy to:");
+    if (m_Systems.empty())
+    {
+        ImGui::TextDisabled("(no systems registered)");
+    }
+    for (int i = 0; i < static_cast<int>(m_Systems.size()); ++i)
+    {
+        SystemConnection& conn = *m_Systems[static_cast<size_t>(i)];
+        const std::string& name = conn.name();
+        bool checked =
+            std::find(ref.deployTo.begin(), ref.deployTo.end(), name) != ref.deployTo.end();
+        const bool online = conn.snapshot().haveStatus;
+        if (ImGui::Checkbox(
+                (name + (online ? "" : " (offline)") + "###mediasys" + std::to_string(i)).c_str(),
+                &checked))
+        {
+            if (checked)
+            {
+                if (std::find(ref.deployTo.begin(), ref.deployTo.end(), name) == ref.deployTo.end())
+                {
+                    ref.deployTo.push_back(name);
+                }
+            }
+            else
+            {
+                ref.deployTo.erase(std::remove(ref.deployTo.begin(), ref.deployTo.end(), name),
+                                   ref.deployTo.end());
+            }
+            m_Editor.touch();
+        }
+        recordTestEditorItem(kInvalidId, "media-sys-" + std::to_string(i), false);
+    }
+    // The deploy itself: one worker per checked system (the transfer runs
+    // net/MediaTransfer on its own connection; the progress shows under
+    // the system in the Systems tab).
+    if (ImGui::Button("Deploy##mediadeploy"))
+    {
+        for (const auto& name : ref.deployTo)
+        {
+            deployMediaTo(name, ref.path);
+        }
+    }
+    recordTestEditorItem(kInvalidId, "media-deploy", false);
 }
 
 void ControlGuiApp::renderScenesTab()
@@ -4359,7 +4553,12 @@ void ControlGuiApp::renderConsoleWindow()
     }
     if (ImGui::BeginChild("consolelog", ImVec2(0.0f, -30.0f), true))
     {
-        for (const auto& line : m_ConsoleLog)
+        std::vector<std::string> lines;
+        {
+            std::lock_guard lock(m_LogTabMutex);
+            lines = m_ConsoleLog;
+        }
+        for (const auto& line : lines)
         {
             ImGui::TextUnformatted(line.c_str());
         }
@@ -4371,6 +4570,7 @@ void ControlGuiApp::renderConsoleWindow()
     ImGui::EndChild();
     if (ImGui::Button("Clear log"))
     {
+        std::lock_guard lock(m_LogTabMutex);
         m_ConsoleLog.clear();
     }
     ImGui::End();
@@ -4591,6 +4791,30 @@ void ControlGuiApp::renderFileDialogs()
         }
         dlg->Close();
     }
+
+    if (dlg->Display(kMediaReplaceDialogKey, kFileDialogFlags, kFileDialogMinSize))
+    {
+        if (dlg->IsOk())
+        {
+            const auto selection = dlg->GetSelection();
+            if (!selection.empty())
+            {
+                // The selected Media tab row is the target (the dialog is
+                // modal, so the selection cannot change while it is open).
+                std::string error;
+                if (!replaceMediaPath(m_SelectedMediaIdx, selection.begin()->second, error))
+                {
+                    m_EditorError = error;
+                }
+                else
+                {
+                    m_EditorError.clear();
+                    log("media replaced: " + selection.begin()->second);
+                }
+            }
+        }
+        dlg->Close();
+    }
 }
 
 // Adds the given file paths to the show's media list, skipping paths the
@@ -4601,6 +4825,10 @@ int ControlGuiApp::addMediaPaths(const std::vector<std::string>& paths)
 {
     Show& show = m_Editor.show();
     int added = 0;
+    // The default deploy target of a new reference: the systems that are
+    // online right now (the "default all connected systems checked"
+    // requirement).
+    const std::vector<std::string> connected = connectedSystemNames();
     for (const auto& path : paths)
     {
         if (path.empty())
@@ -4623,10 +4851,241 @@ int ControlGuiApp::addMediaPaths(const std::vector<std::string>& paths)
         MediaReference ref;
         ref.id = ShowEditor::nextMediaId(show);
         ref.path = path;
+        ref.deployTo = connected;
         show.media.push_back(ref);
         ++added;
+        // Media distribution: the local info (checksum + probe line)
+        // computes on a worker (a multi-GB hash must not freeze the UI),
+        // and the file deploys to the connected systems' media caches (the
+        // progress shows under the system in the Systems tab; the engine
+        // activates the layer from its cache as soon as it lands).
+        startMediaInfoWorker(path);
+        for (const auto& name : connected)
+        {
+            deployMediaTo(name, path);
+        }
     }
     return added;
+}
+
+std::filesystem::path ControlGuiApp::localMediaPath(const std::string& refPath) const
+{
+    const std::filesystem::path p(refPath);
+    if (p.is_absolute())
+    {
+        return p;
+    }
+    return std::filesystem::path(showDir()) / p;
+}
+
+std::vector<std::string> ControlGuiApp::connectedSystemNames() const
+{
+    std::vector<std::string> names;
+    for (const auto& conn : m_Systems)
+    {
+        if (conn->snapshot().haveStatus)
+        {
+            names.push_back(conn->name());
+        }
+    }
+    return names;
+}
+
+void ControlGuiApp::startMediaInfoWorker(const std::string& refPath)
+{
+    const std::filesystem::path local = localMediaPath(refPath);
+    auto worker = std::make_unique<MediaWorker>();
+    MediaWorker* const w = worker.get();
+    worker->thread = std::thread([this, w, refPath, local]() {
+        MediaInfoResult result;
+        result.path = refPath;
+        std::error_code ec;
+        if (!std::filesystem::is_regular_file(local, ec) || ec)
+        {
+            result.info = "(file not found on this machine)";
+        }
+        else
+        {
+            std::string hashError;
+            if (!util::sha256File(local, result.checksum, hashError))
+            {
+                result.info = "(cannot hash: " + hashError + ")";
+            }
+            else
+            {
+#if defined(MEDIAMAX_HAS_FFMPEG)
+                std::string probeError;
+                const MediaMetadata meta = ffmpeg::probeFile(local.string(), probeError);
+                const std::string line = formatMediaInfo(meta);
+                result.info = line.empty() ? "(probe failed: " + probeError + ")" : line;
+#else
+                result.info = "(probe unavailable - this build has no FFmpeg)";
+#endif
+            }
+        }
+        {
+            std::lock_guard lock(m_MediaInfoMutex);
+            m_MediaInfoPending.push_back(std::move(result));
+        }
+        w->finished = true;
+    });
+    m_MediaWorkers.push_back(std::move(worker));
+}
+
+void ControlGuiApp::deployMediaTo(const std::string& systemName, const std::string& refPath)
+{
+    SystemConnection* conn = nullptr;
+    for (auto& c : m_Systems)
+    {
+        if (c->name() == systemName)
+        {
+            conn = c.get();
+            break;
+        }
+    }
+    if (conn == nullptr)
+    {
+        return; // a stale deployTo name: the system left the list
+    }
+    if (!conn->snapshot().haveStatus)
+    {
+        log("deploy skipped: system '" + systemName + "' is offline (" + refPath + ")");
+        return;
+    }
+    // The transfer (hash, cacheCheck, the chunked stream) is blocking and
+    // network-bound: its own thread, its own short-lived connection
+    // (net/MediaTransfer - the GUI's command connection is UI-thread only),
+    // reporting into the deploy tracker the Systems tab renders.
+    const std::filesystem::path local = localMediaPath(refPath);
+    const std::string cachePath = media::cacheKeyFor(refPath);
+    const std::string host = conn->host();
+    const std::uint16_t port = conn->port();
+    const std::string fileName = std::filesystem::path(refPath).filename().string();
+    std::error_code ec;
+    const bool exists = std::filesystem::is_regular_file(local, ec) && !ec;
+    const std::uint64_t totalBytes = exists ? std::filesystem::file_size(local, ec) : 0;
+    const std::uint32_t handle = m_DeployTracker.begin(systemName, fileName, totalBytes);
+    auto worker = std::make_unique<MediaWorker>();
+    MediaWorker* const w = worker.get();
+    worker->thread =
+        std::thread([this, w, handle, host, port, local, cachePath, systemName, refPath]() {
+            std::string error;
+            const bool ok = net::transferMediaFile(
+                host, port, local, cachePath, true,
+                [this, handle](std::uint64_t sent, std::uint64_t) {
+                    m_DeployTracker.progress(handle, sent);
+                },
+                error);
+            m_DeployTracker.finish(handle, ok ? std::string() : error);
+            log(ok ? "deployed " + refPath + " -> " + systemName
+                   : "deploy failed: " + refPath + " -> " + systemName + ": " + error);
+            w->finished = true;
+        });
+    m_MediaWorkers.push_back(std::move(worker));
+}
+
+bool ControlGuiApp::replaceMediaPath(int index, const std::string& newPath, std::string& error)
+{
+    Show& show = m_Editor.show();
+    if (index < 0 || index >= static_cast<int>(show.media.size()))
+    {
+        error = "no media at that index";
+        return false;
+    }
+    if (newPath.empty())
+    {
+        error = "no file chosen";
+        return false;
+    }
+    MediaReference& ref = show.media[static_cast<size_t>(index)];
+    for (size_t i = 0; i < show.media.size(); ++i)
+    {
+        if (i != static_cast<size_t>(index) && show.media[i].path == newPath)
+        {
+            error = "the show already references that file (media " +
+                    std::to_string(show.media[i].id) + ")";
+            return false;
+        }
+    }
+    // The same reference points at a new file: the id, the deploy list and
+    // the layers that use it stay; the checksum is unknown until the worker
+    // hashes the new file.
+    ref.path = newPath;
+    ref.checksum.clear();
+    m_Editor.touch();
+    startMediaInfoWorker(newPath);
+    // The new file goes to the systems this reference deploys to (the
+    // connected ones when the list is unset).
+    const std::vector<std::string> targets =
+        ref.deployTo.empty() ? connectedSystemNames() : ref.deployTo;
+    for (const auto& name : targets)
+    {
+        deployMediaTo(name, newPath);
+    }
+    return true;
+}
+
+void ControlGuiApp::openMediaReplaceDialog()
+{
+    IGFD::FileDialogConfig config;
+    config.path = showDir();
+    config.countSelectionMax = 1; // one file: it replaces the selected reference
+    IGFD::FileDialog::Instance()->OpenDialog(kMediaReplaceDialogKey, "Replace media file...",
+                                             kMediaFilter, config);
+}
+
+void ControlGuiApp::reapMediaWorkers()
+{
+    for (auto it = m_MediaWorkers.begin(); it != m_MediaWorkers.end();)
+    {
+        if ((*it)->finished)
+        {
+            (*it)->thread.join();
+            it = m_MediaWorkers.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
+}
+
+void ControlGuiApp::drainMediaInfo()
+{
+    std::vector<MediaInfoResult> pending;
+    {
+        std::lock_guard lock(m_MediaInfoMutex);
+        pending.swap(m_MediaInfoPending);
+    }
+    if (pending.empty())
+    {
+        return;
+    }
+    Show& show = m_Editor.show();
+    bool checksumLanded = false;
+    for (auto& result : pending)
+    {
+        // The map entry (the settings section's display) updates either
+        // way; the show document's checksum field only on a real hash.
+        MediaLocalInfo& info = m_MediaLocalInfo[result.path];
+        info.checksum = result.checksum;
+        info.info = result.info;
+        for (auto& ref : show.media)
+        {
+            if (ref.path == result.path && !result.checksum.empty() &&
+                ref.checksum != result.checksum)
+            {
+                ref.checksum = result.checksum;
+                checksumLanded = true;
+            }
+        }
+    }
+    if (checksumLanded)
+    {
+        // The checksum is part of the show file (the change-detection log):
+        // mark it edited so the auto-push delivers it.
+        m_Editor.touch();
+    }
 }
 
 // --- modals ---------------------------------------------------------------------------
@@ -6319,25 +6778,36 @@ void ControlGuiApp::testGiveEditorALayer()
     scene.layers.push_back(layer);
     if (!m_SelfTestBmpPath.empty())
     {
-        // A media layer over the self-test BMP (320x180, scaled to cover the
-        // 1920x1080 wall): the auto-push delivers it to the engine, so the
-        // frame phases exercise the show view's media path (thumbnail +
-        // texture + textured quad) against a real system.
-        MediaReference ref;
-        ref.id = 1;
-        ref.path = m_SelfTestBmpPath;
-        show.media.push_back(ref);
-        Layer mediaLayer;
-        mediaLayer.id = 12;
-        mediaLayer.name = "testbmp";
-        mediaLayer.mediaId = 1;
-        // The default anchor is the media's top-left: at (0,0) scaled 6x the
-        // 320x180 BMP covers the whole 1920x1080 wall.
-        mediaLayer.transform.x = 0.f;
-        mediaLayer.transform.y = 0.f;
-        mediaLayer.transform.scaleX = 6.f;
-        mediaLayer.transform.scaleY = 6.f;
-        scene.layers.push_back(mediaLayer);
+        // The BMP goes through the production add path (the Media tab's
+        // file dialog and the window's drop target use the same one): the
+        // reference gets the "all connected systems" deploy list and its
+        // file deploys to their media caches automatically - the live
+        // self-test verifies that transfer. The auto-deploy targets the
+        // systems that are online right now, and the poll thread's first
+        // status may still be in flight: give it a bounded moment (the
+        // engine runs on localhost in the self-test).
+        for (int i = 0; i < 100 && connectedSystemNames().empty(); ++i)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        if (addMediaPaths({m_SelfTestBmpPath}) == 1)
+        {
+            // A media layer over the self-test BMP (320x180, scaled to cover
+            // the 1920x1080 wall): the auto-push delivers it to the engine,
+            // so the frame phases exercise the show view's media path
+            // (thumbnail + texture + textured quad) against a real system.
+            Layer mediaLayer;
+            mediaLayer.id = 12;
+            mediaLayer.name = "testbmp";
+            mediaLayer.mediaId = show.media.back().id;
+            // The default anchor is the media's top-left: at (0,0) scaled 6x
+            // the 320x180 BMP covers the whole 1920x1080 wall.
+            mediaLayer.transform.x = 0.f;
+            mediaLayer.transform.y = 0.f;
+            mediaLayer.transform.scaleX = 6.f;
+            mediaLayer.transform.scaleY = 6.f;
+            scene.layers.push_back(mediaLayer);
+        }
     }
     show.scenes.push_back(std::move(scene));
     m_Editor.touch();
@@ -6407,6 +6877,78 @@ std::vector<std::string> ControlGuiApp::testShowMediaPaths() const
         paths.push_back(ref.path);
     }
     return paths;
+}
+
+bool ControlGuiApp::testSelectMediaRow(int index)
+{
+    const auto& show = m_Editor.show();
+    if (index < 0 || index >= static_cast<int>(show.media.size()))
+    {
+        return false;
+    }
+    m_SelectedMediaIdx = index;
+    return true;
+}
+
+std::string ControlGuiApp::testSelectedMediaPath() const
+{
+    const auto& show = m_Editor.show();
+    if (m_SelectedMediaIdx < 0 || m_SelectedMediaIdx >= static_cast<int>(show.media.size()))
+    {
+        return std::string();
+    }
+    return show.media[static_cast<size_t>(m_SelectedMediaIdx)].path;
+}
+
+std::string ControlGuiApp::testMediaInfoLine(int index) const
+{
+    const auto& show = m_Editor.show();
+    if (index < 0 || index >= static_cast<int>(show.media.size()))
+    {
+        return std::string();
+    }
+    const auto& ref = show.media[static_cast<size_t>(index)];
+    const auto it = m_MediaLocalInfo.find(ref.path);
+    return it != m_MediaLocalInfo.end() ? it->second.info : std::string();
+}
+
+std::string ControlGuiApp::testMediaChecksum(int index) const
+{
+    const auto& show = m_Editor.show();
+    if (index < 0 || index >= static_cast<int>(show.media.size()))
+    {
+        return std::string();
+    }
+    const auto& ref = show.media[static_cast<size_t>(index)];
+    const auto it = m_MediaLocalInfo.find(ref.path);
+    return it != m_MediaLocalInfo.end() ? it->second.checksum : std::string();
+}
+
+std::vector<std::string> ControlGuiApp::testMediaDeployTo(int index) const
+{
+    const auto& show = m_Editor.show();
+    if (index < 0 || index >= static_cast<int>(show.media.size()))
+    {
+        return {};
+    }
+    return show.media[static_cast<size_t>(index)].deployTo;
+}
+
+bool ControlGuiApp::testReplaceMedia(int index, const std::string& newPath)
+{
+    // The exact action the Replace... file dialog's result runs.
+    std::string error;
+    return replaceMediaPath(index, newPath, error);
+}
+
+std::vector<std::string> ControlGuiApp::testDeployEntries() const
+{
+    std::vector<std::string> out;
+    for (const auto& e : m_DeployTracker.entries())
+    {
+        out.push_back(e.systemName + "|" + e.fileName + "|" + e.state);
+    }
+    return out;
 }
 
 void ControlGuiApp::testEnsureEditorSceneLayer()

@@ -14,13 +14,17 @@
 // Displays window lists the active system's displays and media in tabs.
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <span>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -145,6 +149,10 @@ public:
     // engine already loaded it from the path the pushed show carries).
     // No-op in the headless run (no BMP was created).
     void testRemoveSelfTestBmp();
+    // The live self-test's scratch BMP path ("" in the headless run): the
+    // live auto-deploy check verifies the file landed on the system's
+    // media cache under its file name.
+    std::string testSelfTestBmpPath() const { return m_SelfTestBmpPath; }
     // Sets the Display settings dialog's System dropdown (index into
     // m_Systems; the same state the combo sets) - the live self-test's
     // display-move check (issue 14).
@@ -360,6 +368,27 @@ public:
     int testAddDroppedFiles(const std::vector<std::string>& paths);
     // The show's media reference paths (document order).
     std::vector<std::string> testShowMediaPaths() const;
+    // Selects the Media tab's row at `index` (the same action the row's
+    // click performs); false when out of range.
+    bool testSelectMediaRow(int index);
+    // The Media tab's selected row's path ("" = none selected).
+    std::string testSelectedMediaPath() const;
+    // The Media settings' automatic info line for the media at `index`
+    // (the worker's probe result; "" while it is still running / failed
+    // without a note); -1 out of range.
+    std::string testMediaInfoLine(int index) const;
+    // The Media settings' checksum (sha256 hex) for the media at `index`
+    // ("" while it is still running / the file could not be hashed).
+    std::string testMediaChecksum(int index) const;
+    // The media at `index`'s deploy-to list (the settings' checkbox state).
+    std::vector<std::string> testMediaDeployTo(int index) const;
+    // The Media settings' Replace... action (the file dialog's result
+    // path): swaps the file out through the exact production path; false
+    // with the dialog's error when it refuses.
+    bool testReplaceMedia(int index, const std::string& newPath);
+    // The deploy tracker's entries as "system|file|state" lines (the live
+    // self-test waits for an auto-deploy to finish).
+    std::vector<std::string> testDeployEntries() const;
     // Ensures the self-test editor has scene id 1 with two solid-color
     // layers (id 10 "red", id 11 "blue", red listed first): idempotent, so
     // the live run (which already seeded the scene via testGiveEditorALayer)
@@ -633,6 +662,43 @@ private:
     // playback). Called from frame().
     void autoPushEditedShow();
 
+    // --- media distribution (the Media tab's workers) ------------------------
+    // The local file a media reference's path resolves to on this machine
+    // (relative paths resolve against the show file's directory, like the
+    // engine does; showDir() is "." while the show is unsaved).
+    std::filesystem::path localMediaPath(const std::string& refPath) const;
+    // The names of the systems that are online right now (the "all
+    // connected systems" default for new media's deploy list).
+    std::vector<std::string> connectedSystemNames() const;
+    // Starts the worker that computes a reference's local info: the sha256
+    // checksum (the show file's `checksum` field) and the automatic probe
+    // line (FFmpeg metadata). Multi-GB files must not hash on the UI
+    // thread; the result is queued and applied by frame() (see
+    // drainMediaInfo).
+    void startMediaInfoWorker(const std::string& refPath);
+    // Deploys one media file (by its reference path) to one system (by
+    // name): the transfer (net/MediaTransfer - hash, cacheCheck, the
+    // chunked stream) runs on a worker thread with its own connection and
+    // reports into the deploy tracker the Systems tab renders. Skips (with
+    // a log) systems that are offline or no longer registered.
+    void deployMediaTo(const std::string& systemName, const std::string& refPath);
+    // Replaces the media at `index` with a new file (the Media settings'
+    // Replace...): same id and deploy list, new path; the info recomputes
+    // and the file re-deploys to its deploy targets. Refuses (with `error`)
+    // a path the show already references elsewhere.
+    bool replaceMediaPath(int index, const std::string& newPath, std::string& error);
+    // Opens the Replace... file dialog (single selection) for the Media
+    // tab's selected row.
+    void openMediaReplaceDialog();
+    // frame() housekeeping: joins the finished media workers (the
+    // destructor joins the rest) and applies the queued info results (the
+    // checksum lands in the show document, the probe line in m_MediaLocalInfo).
+    void reapMediaWorkers();
+    void drainMediaInfo();
+    // The Media settings' content for the selected row (called from
+    // renderMediaTab).
+    void renderMediaSettings();
+
     // --- state ---------------------------------------------------------------
 
     std::vector<std::unique_ptr<SystemConnection>> m_Systems;
@@ -643,6 +709,39 @@ private:
     // deploy batch report begin/progress/finish here, the Systems tab
     // renders the per-system progress list from a snapshot of it.
     mediamax::net::MediaDeployTracker m_DeployTracker;
+
+    // Local info about the show's media, computed by the info workers
+    // (startMediaInfoWorker) and applied by frame() (UI thread only): the
+    // sha256 checksum and the automatic probe line, keyed by the
+    // reference's path as written in the show.
+    struct MediaLocalInfo
+    {
+        std::string checksum; // sha256 hex ("" when the file could not be read)
+        std::string info; // the probe line, or the failure note
+    };
+    std::map<std::string, MediaLocalInfo> m_MediaLocalInfo;
+    // One worker thread per media job (an info compute or a deploy
+    // transfer): the thread marks itself finished on exit; frame() joins
+    // and drops the finished ones (reapMediaWorkers) so a live transfer
+    // never blocks the UI, the destructor joins the rest.
+    struct MediaWorker
+    {
+        std::thread thread;
+        std::atomic<bool> finished{false};
+    };
+    std::vector<std::unique_ptr<MediaWorker>> m_MediaWorkers;
+    // The info workers' results, queued under a mutex (the workers write,
+    // frame() drains into m_MediaLocalInfo + the show document).
+    struct MediaInfoResult
+    {
+        std::string path; // the reference's path, as written in the show
+        std::string checksum; // sha256 hex ("" on failure)
+        std::string info; // the probe line or the failure note
+    };
+    std::mutex m_MediaInfoMutex;
+    std::vector<MediaInfoResult> m_MediaInfoPending;
+    // The Media tab's selected list row (index into show.media; -1 = none).
+    int m_SelectedMediaIdx = -1;
 
     // "Add system" form.
     std::string m_NewName;
@@ -886,6 +985,10 @@ private:
     // the camera math's origin and the drawing bounds.
     ImVec2 m_ShowViewRectMin{0.f, 0.f};
     ImVec2 m_ShowViewRectMax{0.f, 0.f};
+    // The previous frame's scene child size: the camera fit waits for the
+    // size to be stable (see renderShowViewWindow - the window's first
+    // frames can carry a transient, pre-dock-layout size).
+    ImVec2 m_ShowViewPrevChildSize{0.f, 0.f};
     bool m_ShowViewVisible = false; // the window was Begun this frame
     ShowTexturePool m_ShowTexPool;
     // Show view interaction (issue: show view improvements). The mode picks
@@ -933,9 +1036,6 @@ private:
     // The live self-test's scratch BMP (written by selfTestSystem, removed
     // by testRemoveSelfTestBmp after the frame phases).
     std::string m_SelfTestBmpPath;
-
-    // Media tab probe result (last probe, shown under the list).
-    std::string m_MediaProbeResult;
 
     bool m_ShutdownRequested = false;
     bool m_FirstFrame = true;

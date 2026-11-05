@@ -31,6 +31,17 @@ struct MediaReference
 {
     Id id = kInvalidId;
     std::string path;
+    // The sha256 of the file (lowercase hex) when it was added to / replaced
+    // in the show. Logged in the show file so a changed file is visible;
+    // empty = not computed yet. The deploy pre-check (media.cacheCheck)
+    // re-hashes the local file either way, so the transfer itself detects
+    // changes even with an empty/stale entry here. Client-side info: the
+    // engine stores the field but does not use it.
+    std::string checksum;
+    // The systems (by name) this media deploys to - the Media tab's
+    // "deploy to" checkbox list. Empty = unset (the default is "all
+    // connected systems", taken when the reference is added).
+    std::vector<std::string> deployTo;
 };
 
 // One display of the show's wall definition (docs/SHOW_FORMAT.md). The show

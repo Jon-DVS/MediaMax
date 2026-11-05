@@ -209,7 +209,23 @@ nlohmann::json Show::toJson() const
     nlohmann::json mediaArr = nlohmann::json::array();
     for (const auto& m : media)
     {
-        mediaArr.push_back({{"id", m.id}, {"path", m.path}});
+        // Additive fields: omitted while empty so older readers (and the
+        // common case) see the classic two-field entry.
+        nlohmann::json mj = {{"id", m.id}, {"path", m.path}};
+        if (!m.checksum.empty())
+        {
+            mj["checksum"] = m.checksum;
+        }
+        if (!m.deployTo.empty())
+        {
+            nlohmann::json arr = nlohmann::json::array();
+            for (const auto& systemName : m.deployTo)
+            {
+                arr.push_back(systemName);
+            }
+            mj["deployTo"] = std::move(arr);
+        }
+        mediaArr.push_back(std::move(mj));
     }
     j["media"] = mediaArr;
 
@@ -378,8 +394,40 @@ std::optional<Show> Show::fromJson(const nlohmann::json& in, std::string& error)
                 error = "show file: invalid media entry";
                 return std::nullopt;
             }
-            show.media.push_back({static_cast<Id>(m["id"].get<std::uint64_t>()),
-                                  m["path"].get<std::string>()});
+            MediaReference ref;
+            ref.id = static_cast<Id>(m["id"].get<std::uint64_t>());
+            ref.path = m["path"].get<std::string>();
+            // Additive (absent in older files = not computed / unset). The
+            // content is not validated here (a checksum is a hex string,
+            // deployTo system names - neither is meaningful to this side of
+            // the file).
+            if (m.contains("checksum"))
+            {
+                if (!m["checksum"].is_string())
+                {
+                    error = "show file: invalid media entry";
+                    return std::nullopt;
+                }
+                ref.checksum = m["checksum"].get<std::string>();
+            }
+            if (m.contains("deployTo"))
+            {
+                if (!m["deployTo"].is_array())
+                {
+                    error = "show file: invalid media entry";
+                    return std::nullopt;
+                }
+                for (const auto& systemName : m["deployTo"])
+                {
+                    if (!systemName.is_string())
+                    {
+                        error = "show file: invalid media entry";
+                        return std::nullopt;
+                    }
+                    ref.deployTo.push_back(systemName.get<std::string>());
+                }
+            }
+            show.media.push_back(std::move(ref));
         }
     }
 

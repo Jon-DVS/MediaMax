@@ -52,7 +52,12 @@ rationals afterwards.
 ```json
 "media": [
   { "id": 1, "path": "media/bg.mp4" },
-  { "id": 2, "path": "media/logo.png" }
+  {
+    "id": 2,
+    "path": "media/logo.png",
+    "checksum": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+    "deployTo": [ "Main Wall" ]
+  }
 ]
 ```
 
@@ -64,6 +69,17 @@ rationals afterwards.
   plus the media it references, so a relative `path` resolves against the
   directory the show file was loaded from — the engine's working directory
   is irrelevant.
+- `checksum` — **optional**, the sha256 of the file (lowercase hex) when it
+  was added to, or replaced in, the show. Written by the control interface
+  (its Media tab); it makes a file that changed on disk visible. Omitted
+  while not computed. Client-side info: the engine stores but does not use
+  the field (a deploy re-hashes the local file anyway, see
+  `media.cacheCheck` in PROTOCOL.md).
+- `deployTo` — **optional**, array of system names (as listed in
+  `systems`) this media deploys to — the control interface's Media tab
+  carries the "deploy to" checkbox list, and adding a file checks all
+  connected systems by default. Omitted while unset. Client-side info: the
+  engine ignores the field.
 
 Supported media: video containers (mp4/mov/...), images (png/jpg/bmp/tiff/
 webp/gif — still images, or GIF as animation), audio.
