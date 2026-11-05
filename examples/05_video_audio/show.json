@@ -5,7 +5,12 @@
   "frameRate": { "num": 60, "den": 1 },
   "duration": 10.0,
   "media": [
-    { "id": 1, "path": "media/tone.mp4" }
+    {
+      "id": 1,
+      "path": "media/tone.mp4",
+      "checksum": "7ea176199ab79cc620591ac491ac9f35f4f5a5d1785278eea435be7909bdf9ac",
+      "deployTo": [ "Local" ]
+    }
   ],
   "scenes": [
     {
@@ -43,6 +48,14 @@
   "cues": [
     { "time": 0.0,  "name": "start", "action": { "type": "playScene", "scene": 1 } },
     { "time": 10.0, "name": "end",   "action": { "type": "stop" } }
+  ],
+  "systems": [
+    {
+      "name": "Local",
+      "host": "127.0.0.1",
+      "port": 47600,
+      "cacheDisk": "C:\\"
+    }
   ],
   "displays": [
     {

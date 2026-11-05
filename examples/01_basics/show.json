@@ -5,9 +5,24 @@
   "frameRate": { "num": 60, "den": 1 },
   "duration": 12.0,
   "media": [
-    { "id": 1, "path": "media/colorbars.mp4" },
-    { "id": 2, "path": "media/plasma.mp4" },
-    { "id": 3, "path": "media/logo.png" }
+    {
+      "id": 1,
+      "path": "media/colorbars.mp4",
+      "checksum": "1ce8dda68a823a4b275f65f61d4fec2198d526ac2323316744e085ce421fb9e5",
+      "deployTo": [ "Local" ]
+    },
+    {
+      "id": 2,
+      "path": "media/plasma.mp4",
+      "checksum": "abc33b2dbf104574161282cf077e0f76beeec53b63b462d58453df034425544e",
+      "deployTo": [ "Local" ]
+    },
+    {
+      "id": 3,
+      "path": "media/logo.png",
+      "checksum": "7f2007adcb5a07312b28613aee75f5b2a0f15ea5541e5b9af5104a0f30c38c4c",
+      "deployTo": [ "Local" ]
+    }
   ],
   "scenes": [
     {
@@ -89,6 +104,14 @@
     { "time": 6.0,  "name": "plasma",  "action": { "type": "playScene", "scene": 2 } },
     { "time": 9.0,  "name": "title",   "action": { "type": "playScene", "scene": 3 } },
     { "time": 12.0, "name": "end",     "action": { "type": "stop" } }
+  ],
+  "systems": [
+    {
+      "name": "Local",
+      "host": "127.0.0.1",
+      "port": 47600,
+      "cacheDisk": "C:\\"
+    }
   ],
   "displays": [
     {

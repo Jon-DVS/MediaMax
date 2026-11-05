@@ -56,6 +56,34 @@ and the engine's default layer anchor is the media's top-left (0,0).
 | `05_video_audio` | A/V sync: a 5 s segment (inPoint 1.0, outPoint 6.0) of an 8 s clip **with audio**, looping inside a 10 s show; layer opacity also drives the audio gain (you hear the fade) |
 | `06_multi_display` | A two-display wall (3840x1080 shared wall space, two HD outputs): per-display positioning, a layer spanning both displays, and a scene swap |
 
+### Media distribution in the example shows
+
+Every example show carries the project's media-distribution state (docs/
+SHOW_FORMAT.md for the field semantics):
+
+- **`systems`** — one entry for the machine the show runs on (`Local`,
+  `127.0.0.1:47600`). Its `cacheDisk` names the root of that machine's
+  media cache: the playback engine applies the entry that identifies it when
+  the show loads (by `--system-name`, or by the control port for an unnamed
+  engine) and creates `<root>\mediamax-cache` — `C:\mediamax-cache` for
+  these shows; if the disk is changed, an existing cache is copied across
+  to the new one.
+- **`checksum`** — the sha256 of each media file (lowercase hex): the
+  change-detection log, so a file that changed on disk is visible against
+  it. The control interface's Media tab recomputes it when the file is
+  added to, or replaced in, the show.
+- **`deployTo`** — the systems (by name) each media entry deploys to.
+  Adding media in the Media tab checks all connected systems by default and
+  transfers each file into the system's media cache over the network
+  (per-system progress in the Systems tab); the playback engine serves the
+  layer from the cache as the file lands, and a layer whose file has not
+  arrived yet draws a placeholder in the render output.
+
+The engine acts on the `systems` entry only for the cache disk: `checksum`
+and `deployTo` are client-side info (the control interface writes them, the
+engine stores but ignores them — the deploy pre-check re-hashes the local
+file either way, so a stale checksum is harmless).
+
 ### 04_cues: watching the seek cue
 
 Run the example and watch `status` around 9 s — the timecode jumps from
@@ -111,3 +139,8 @@ powershell -ExecutionPolicy Bypass -File examples\generate_media.ps1
 The script prefers the FFmpeg binaries CMake fetched
 (`build\_deps\mediamax-ffmpeg\bin\ffmpeg.exe`) and falls back to a
 `ffmpeg` on PATH.
+
+Regenerating the media makes the shows' `checksum` values stale on purpose
+(the checksum is the change-detection log, see above): the control
+interface recomputes a checksum when the file is added to, or replaced in,
+the show.
