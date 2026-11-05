@@ -36,6 +36,8 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cstdint>
+#include <filesystem>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -164,6 +166,20 @@ private:
     FrameSnapshot takeFrameSnapshot(const Time& dt);
     std::vector<render::SceneRenderer::LayerDraw> buildLayerDraws(const FrameSnapshot& snap);
     void renderFrame(const FrameSnapshot& snap);
+    // The late-arrival media poll (pending media, ~2 s cadence): for each
+    // media reference that failed to load at the show load, stats the
+    // original and the media-cache path; when a file appears, loads it into
+    // the library and remaps the loaded show in place (pending id ->
+    // library id, refs and layers). The pump rebinds the layer's channel on
+    // the media id change and decodes from the new asset. Render thread;
+    // takes m_StateMutex itself (called from the frame loop, before
+    // takeFrameSnapshot).
+    void pollPendingMedia();
+    // Rasterizes (once per layer + file name + scene size) and uploads the
+    // media placeholder (core media/MediaPlaceholder) into the layer's
+    // media texture: the stand-in frame for a layer whose media is not
+    // loaded yet. Render thread only (called from buildLayerDraws).
+    void ensureMediaPlaceholder(Id layerId, Size2i sceneSize, const std::string& label);
     void updateWarpTexture(DisplaySurface& ds, const Display& display);
     // Rasterizes the status text (system IP, display name/number, measured
     // fps, resolution, CPU/GPU frame time) and uploads it to the scene
@@ -277,6 +293,36 @@ private:
     // runs here so a large cache does not block the command handler;
     // joined in shutdown() before the command server goes away.
     std::thread m_CacheCopyThread;
+
+    // --- Pending media + placeholders (render thread) ------------------------------
+
+    // Last pending-media poll (see pollPendingMedia): the frame loop runs
+    // at the display rate, the poll rate-limits itself to ~2 s.
+    std::chrono::steady_clock::time_point m_LastPendingMediaPoll{};
+    // The (size, last write time) fingerprint of the last load failure per
+    // pending id: a present-but-unloadable file warns once per file state,
+    // not on every poll.
+    struct PendingLoadFailure
+    {
+        std::uint64_t size = 0;
+        std::filesystem::file_time_type lastWrite{};
+        bool operator==(const PendingLoadFailure& other) const
+        {
+            return size == other.size && lastWrite == other.lastWrite;
+        }
+    };
+    std::map<std::uint32_t, PendingLoadFailure> m_PendingLoadFailures;
+    // The media placeholder cache (render thread): one rasterized upload
+    // per (layer, file name, scene size) while the layer's media is
+    // missing. Erased when the layer's texture holds real media again
+    // (buildLayerDraws), so a later missing state re-uploads.
+    struct PlaceholderCache
+    {
+        std::string label;
+        Size2i size{0, 0};
+        bool uploaded = false;
+    };
+    std::map<Id, PlaceholderCache> m_PlaceholderCache;
 
     // --- Pump / audio (own locks) -------------------------------------------------
 

@@ -12,6 +12,7 @@
 #include "WindowSurface.h"
 #include "mediamax/media/FFmpegSupport.h"
 #include "mediamax/media/MediaCache.h"
+#include "mediamax/media/MediaPlaceholder.h"
 #include "mediamax/media/MediaThumbnail.h"
 #include "mediamax/overlay/StatusOverlay.h"
 #include "mediamax/show/Show.h"
@@ -275,6 +276,11 @@ int PlaybackApp::run()
         {
             dt = Time::fromSeconds(kMaxFrameDeltaSeconds);
         }
+
+        // Late-arrival media (pending from the show load): the poll stats
+        // the watched paths at a ~2 s cadence and activates the media in
+        // place when a file appears.
+        pollPendingMedia();
 
         const FrameSnapshot snap = takeFrameSnapshot(dt);
         if (now >= nextPresent)
@@ -1034,6 +1040,28 @@ PlaybackApp::FrameSnapshot PlaybackApp::takeFrameSnapshot(const Time& dt)
                 t.audioSampleRate = md.audioSampleRate;
                 t.mediaDuration = md.duration;
             }
+            else
+            {
+                // The media is not loaded (a pending id from the show load,
+                // or an unloaded asset): the render thread draws the media
+                // placeholder in the layer's slot (buildLayerDraws). The
+                // label is the media reference's file name (the show's refs
+                // keep the path as written).
+                t.mediaMissing = true;
+                for (const auto& ref : m_Engine.show().media)
+                {
+                    if (ref.id == lf.mediaId)
+                    {
+                        const std::string leaf = std::filesystem::path(ref.path).filename().string();
+                        t.mediaLabel = leaf.empty() ? std::string("media") : leaf;
+                        break;
+                    }
+                }
+                if (t.mediaLabel.empty())
+                {
+                    t.mediaLabel = "media";
+                }
+            }
             // The loop flag and bounds live on the Layer, not the resolved
             // frame.
             if (snap.fs.activeSceneId != kInvalidId)
@@ -1091,6 +1119,10 @@ std::vector<render::SceneRenderer::LayerDraw> PlaybackApp::buildLayerDraws(const
             draw.mediaSize = target != nullptr ? target->mediaSize : Size2i{1, 1};
             if (draw.texture != nullptr)
             {
+                // The texture holds real media now: drop any placeholder the
+                // layer had while the media was missing (a later missing
+                // state must re-upload its own placeholder, not reuse this).
+                m_PlaceholderCache.erase(lf.layerId);
                 // The plane set + color metadata of the frame in the
                 // texture. RGBA frames carry null planes and the defaults
                 // (the layer pass then samples the texture directly); YUV
@@ -1102,6 +1134,21 @@ std::vector<render::SceneRenderer::LayerDraw> PlaybackApp::buildLayerDraws(const
                 draw.mediaFormat = set.format;
                 draw.mediaColorSpace = set.colorSpace;
                 draw.mediaFullRange = set.fullRange;
+            }
+            else if (target != nullptr && target->mediaMissing)
+            {
+                // The media is not loaded yet (a pending id): draw the
+                // placeholder (file name + hint) in the layer's slot. The
+                // texture is the scene size, so the layer pass composites
+                // it 1:1 and the layer's transform moves and scales it like
+                // the media would.
+                const Size2i sceneSize = m_Scene.sceneSize();
+                if (sceneSize.valid())
+                {
+                    ensureMediaPlaceholder(lf.layerId, sceneSize, target->mediaLabel);
+                    draw.texture = m_Scene.mediaTexture(lf.layerId);
+                    draw.mediaSize = sceneSize;
+                }
             }
         }
         else
@@ -1116,6 +1163,130 @@ std::vector<render::SceneRenderer::LayerDraw> PlaybackApp::buildLayerDraws(const
         draws.push_back(std::move(draw));
     }
     return draws;
+}
+
+void PlaybackApp::pollPendingMedia()
+{
+    // The frame loop runs at the display rate; statting a few paths is
+    // cheap, but the poll still rate-limits itself to ~2 s.
+    const auto now = std::chrono::steady_clock::now();
+    if (now - m_LastPendingMediaPoll < std::chrono::seconds(2))
+    {
+        return;
+    }
+    m_LastPendingMediaPoll = now;
+
+    const auto pending = m_CommandServer->pendingMedia();
+    if (pending.empty())
+    {
+        return;
+    }
+
+    std::lock_guard lock(m_StateMutex);
+    auto& log = Logger::instance();
+    for (const auto& pm : pending)
+    {
+        // The media cache is the expected arrival point of a transfer
+        // (media.put lands atomically); the original path is the copy case.
+        std::error_code ec;
+        std::string available;
+        if (!pm.cachedPath.empty() && std::filesystem::is_regular_file(pm.cachedPath, ec) && !ec)
+        {
+            available = pm.cachedPath;
+        }
+        else if (!pm.originalPath.empty() && std::filesystem::is_regular_file(pm.originalPath, ec) && !ec)
+        {
+            available = pm.originalPath;
+        }
+        if (available.empty())
+        {
+            continue;
+        }
+
+        std::string error;
+        const Id libraryId = m_Library.load(available, error);
+        if (libraryId == kInvalidId)
+        {
+            // The file is there but will not load (an unsupported or corrupt
+            // file): keep the entry - a replacement that overwrites the path
+            // is picked up - and warn once per file state (size + mtime),
+            // not on every poll.
+            std::error_code statEc;
+            const auto lastWrite = std::filesystem::last_write_time(available, statEc);
+            const auto size = std::filesystem::file_size(available, statEc);
+            const PendingLoadFailure failure{size, lastWrite};
+            const auto it = m_PendingLoadFailures.find(pm.id);
+            if (it == m_PendingLoadFailures.end() || it->second != failure)
+            {
+                log.warning("pending media '{}' is present at {} but failed to load: {}", pm.fileName,
+                            available, error);
+                m_PendingLoadFailures[pm.id] = failure;
+            }
+            continue;
+        }
+        m_PendingLoadFailures.erase(pm.id);
+
+        // Remap the loaded show in place (the media reference + every layer
+        // that uses the media): pending id -> library id. The pump rebinds
+        // the layer's channel on the media id change (it replaces the
+        // worker, which opens the new source).
+        Show& show = m_Engine.show();
+        bool remapped = false;
+        for (auto& ref : show.media)
+        {
+            if (ref.id == pm.id)
+            {
+                ref.id = libraryId;
+                remapped = true;
+            }
+        }
+        for (auto& scene : show.scenes)
+        {
+            for (auto& layer : scene.layers)
+            {
+                if (layer.mediaId == pm.id)
+                {
+                    layer.mediaId = libraryId;
+                    remapped = true;
+                }
+            }
+        }
+        m_CommandServer->clearPendingMedia(pm.id);
+        if (remapped)
+        {
+            log.info("pending media '{}' activated from {} (media id {})", pm.fileName, available,
+                     libraryId);
+        }
+        else
+        {
+            // The show changed while the file was missing (a new load
+            // re-resolved the reference): the asset is loaded anyway; the
+            // new show already references it by its library id (or does
+            // not reference it at all).
+            log.info("pending media '{}' loaded from {} (no live reference: the show changed)",
+                     pm.fileName, available);
+        }
+    }
+}
+
+void PlaybackApp::ensureMediaPlaceholder(Id layerId, Size2i sceneSize, const std::string& label)
+{
+    // One rasterized upload per (layer, file name, scene size): the
+    // placeholder is static content, and rasterizing a 1080p canvas is
+    // several milliseconds.
+    PlaceholderCache& ph = m_PlaceholderCache[layerId];
+    if (ph.uploaded && ph.label == label && ph.size == sceneSize)
+    {
+        return;
+    }
+    std::vector<std::uint8_t> rgba;
+    media::renderMediaPlaceholder(sceneSize.width, sceneSize.height, label, rgba);
+    m_Scene.ensureMediaTexture(layerId, static_cast<std::uint32_t>(sceneSize.width),
+                               static_cast<std::uint32_t>(sceneSize.height));
+    m_Scene.updateMediaTexture(layerId, std::move(rgba));
+    ph.label = label;
+    ph.size = sceneSize;
+    ph.uploaded = true;
 }
 
 void PlaybackApp::renderFrame(const FrameSnapshot& snap)

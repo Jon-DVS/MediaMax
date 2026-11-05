@@ -44,6 +44,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -71,6 +72,12 @@ struct LayerTarget
     Time loopStart;
     Time loopEnd;
     Size2i mediaSize{0, 0}; // media display size in px (texture size)
+    // The layer's media is not in the library (a pending id from the show
+    // load, or an unloaded asset): the render thread draws the media
+    // placeholder (file name + hint, core media/MediaPlaceholder) in the
+    // layer's slot instead of a hole. mediaLabel is the file name to show.
+    bool mediaMissing = false;
+    std::string mediaLabel;
     // The decode worker decodes at the native media size; the render pass
     // scales the uploaded texture to the layer's on-screen size on the GPU
     // (bilinear sampling), so there is no decode-size hint here.

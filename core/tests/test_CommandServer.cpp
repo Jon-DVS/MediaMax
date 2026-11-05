@@ -102,6 +102,48 @@ std::string readTempFile(const std::filesystem::path& path)
     return contents;
 }
 
+// A show document with three media refs: one the fixture's factory loads
+// (video-a), one that exists only in the media cache (the cache-fallback
+// case), and one missing from both (the pending case).
+nlohmann::json missingMediaDoc()
+{
+    return R"({
+        "app": "mediamax-show",
+        "version": 1,
+        "name": "MissingMedia",
+        "frameRate": {"num": 30, "den": 1},
+        "media": [
+            {"id": 1, "path": "media/video-a.mp4"},
+            {"id": 2, "path": "media/from-cache.mp4"},
+            {"id": 3, "path": "media/still-missing.mp4"}
+        ],
+        "scenes": [
+            {"id": 1, "name": "S", "layers": [
+                {"id": 10, "name": "a", "mediaId": 1},
+                {"id": 11, "name": "c", "mediaId": 2},
+                {"id": 12, "name": "m", "mediaId": 3}
+            ]}
+        ]
+    })"_json;
+}
+
+// A show document all of whose media the fixture's factory loads.
+nlohmann::json allGoodDoc()
+{
+    return R"({
+        "app": "mediamax-show",
+        "version": 1,
+        "name": "AllGood",
+        "frameRate": {"num": 30, "den": 1},
+        "media": [{"id": 1, "path": "media/video-a.mp4"}],
+        "scenes": [
+            {"id": 1, "name": "S", "layers": [
+                {"id": 10, "name": "a", "mediaId": 1}
+            ]}
+        ]
+    })"_json;
+}
+
 // The corner array frame.state reports for a transform + media size (the
 // same projection the command uses; the tests check the wiring, not the
 // math, which Transform2D's own tests cover).
@@ -1460,10 +1502,16 @@ TEST_CASE("show.load tolerates missing media files")
     const Response resp = f.run("show.load", {{"path", path.string()}});
     REQUIRE(resp.ok); // missing media is a warning, not a failure
     CHECK(resp.result.at("name").get<std::string>() == "Partial");
-    // The layer keeps its (unresolved) show-local media id.
-    const Scene* scene = f.engine.show().findScene(1);
+    // The missing ref (and its layer) get a pending id from the reserved
+    // range, recorded for the app's late-arrival poll.
+    CHECK(resp.result.at("pendingMedia").get<std::uint32_t>() == 1);
+    const auto& loaded = f.engine.show();
+    REQUIRE(loaded.media.size() == 1);
+    const Id pendingId = loaded.media[0].id;
+    CHECK(pendingId >= kPendingMediaIdBase);
+    const Scene* scene = loaded.findScene(1);
     REQUIRE(scene);
-    CHECK(scene->layers[0].mediaId == 1);
+    CHECK(scene->layers[0].mediaId == pendingId);
 
     std::filesystem::remove(path);
 }
@@ -1720,9 +1768,16 @@ TEST_CASE("show.loadJson tolerates missing media like show.load")
     const Response resp = f.run("show.loadJson", {{"show", doc}});
     REQUIRE(resp.ok); // missing media is a warning, not a failure
     CHECK(resp.result.at("name").get<std::string>() == "PartialJson");
-    const Scene* scene = f.engine.show().findScene(1);
+    // Same pending-media semantics as show.load (the ref and its layer get
+    // a pending id from the reserved range).
+    CHECK(resp.result.at("pendingMedia").get<std::uint32_t>() == 1);
+    const auto& show = f.engine.show();
+    REQUIRE(show.media.size() == 1);
+    const Id pendingId = show.media[0].id;
+    CHECK(pendingId >= kPendingMediaIdBase);
+    const Scene* scene = show.findScene(1);
     REQUIRE(scene);
-    CHECK(scene->layers[0].mediaId == 1);
+    CHECK(scene->layers[0].mediaId == pendingId);
 }
 
 TEST_CASE("show.loadJson resets live playback by default")
@@ -2558,6 +2613,152 @@ TEST_CASE("media.put transfers a zero-byte file and cacheCheck reports misses")
     REQUIRE(wrong.ok);
     CHECK(wrong.result.at("present").get<bool>() == false);
     CHECK(wrong.result.at("bytes").get<std::uint64_t>() == 0);
+}
+
+// --- Show-load media resolution: cache fallback + pending media ------------
+
+TEST_CASE("show load assigns pending ids to missing media and records them for activation")
+{
+    Fixture f; // no cache disk configured
+    const Response load = f.run("show.loadJson", {{"show", missingMediaDoc()}});
+    REQUIRE(load.ok);
+    CHECK(load.result.at("pendingMedia").get<std::uint32_t>() == 2);
+
+    // The loadable ref lands on its library asset; the missing refs take
+    // ids from the pending range (they can never collide with library or
+    // file-local ids).
+    const auto& show = f.engine.show();
+    REQUIRE(show.media.size() == 3);
+    CHECK(show.media[0].id == kMediaA);
+    CHECK(show.media[1].id >= kPendingMediaIdBase);
+    CHECK(show.media[2].id >= kPendingMediaIdBase);
+    CHECK(show.media[1].id != show.media[2].id);
+
+    // The layers follow their refs' remap.
+    const Scene* scene = show.findScene(1);
+    REQUIRE(scene != nullptr);
+    REQUIRE(scene->layers.size() == 3);
+    CHECK(scene->layers[0].mediaId == kMediaA);
+    CHECK(scene->layers[1].mediaId == show.media[1].id);
+    CHECK(scene->layers[2].mediaId == show.media[2].id);
+
+    // The pending list carries the paths the playback app's poll stats (no
+    // cache disk: the cached path is empty, only the original is watched).
+    const auto pending = f.server.pendingMedia();
+    REQUIRE(pending.size() == 2);
+    CHECK(pending[0].id == show.media[1].id);
+    CHECK(pending[0].originalPath == "media/from-cache.mp4");
+    CHECK(pending[0].cachedPath.empty());
+    CHECK(pending[0].fileName == "from-cache.mp4");
+    CHECK(pending[1].id == show.media[2].id);
+    CHECK(pending[1].originalPath == "media/still-missing.mp4");
+    CHECK(pending[1].fileName == "still-missing.mp4");
+
+    // Activating one entry drops it from the list; an unknown id is a no-op.
+    f.server.clearPendingMedia(pending[0].id);
+    const auto after = f.server.pendingMedia();
+    REQUIRE(after.size() == 1);
+    CHECK(after[0].id == pending[1].id);
+    f.server.clearPendingMedia(pending[1].id + 1);
+    CHECK(f.server.pendingMedia().size() == 1);
+}
+
+TEST_CASE("show load falls back to the media cache for missing media")
+{
+    Fixture f;
+    TempCacheRoot cache;
+    f.server.setCacheRootProvider([&cache] { return cache.root.string(); });
+    // The cache holds a copy of "from-cache" (as a transfer would). The
+    // reinstalled load function resolves it to the fixture's video-a asset
+    // (the cache copy is the same content).
+    std::error_code ec;
+    std::filesystem::create_directories(cache.cacheDir / "media", ec);
+    {
+        std::ofstream out(cache.cacheDir / "media" / "from-cache.mp4", std::ios::binary);
+        out << "cached";
+    }
+    f.server.setMediaLoadFunction([&f](const std::string& path, std::string& error) -> Id {
+        const std::string leaf = std::filesystem::path(path).filename().string();
+        if (leaf == "video-a.mp4")
+        {
+            return f.media.load("media/video-a.mp4", error);
+        }
+        if (leaf == "from-cache.mp4" && path.find("mediamax-cache") != std::string::npos)
+        {
+            return f.media.load("media/video-a.mp4", error);
+        }
+        error = "no such media: " + path;
+        return kInvalidId;
+    });
+
+    const Response load = f.run("show.loadJson", {{"show", missingMediaDoc()}});
+    REQUIRE(load.ok);
+    CHECK(load.result.at("pendingMedia").get<std::uint32_t>() == 1);
+
+    const auto& show = f.engine.show();
+    REQUIRE(show.media.size() == 3);
+    // The original loads, the cache copy resolves to the same library
+    // asset; only "still-missing" is pending.
+    CHECK(show.media[0].id == kMediaA);
+    CHECK(show.media[1].id == kMediaA);
+    CHECK(show.media[2].id >= kPendingMediaIdBase);
+
+    const auto pending = f.server.pendingMedia();
+    REQUIRE(pending.size() == 1);
+    CHECK(pending[0].originalPath == "media/still-missing.mp4");
+    // The cache watch path is where a transfer of this ref would land
+    // (the key keeps the path as written in the show, slashes and all).
+    const std::string watchPath = (cache.cacheDir / "media/still-missing.mp4").string();
+    CHECK(pending[0].cachedPath == watchPath);
+    CHECK(pending[0].fileName == "still-missing.mp4");
+}
+
+TEST_CASE("pending media resets on a new show load and media.load uses the cache fallback")
+{
+    Fixture f;
+    TempCacheRoot cache;
+    f.server.setCacheRootProvider([&cache] { return cache.root.string(); });
+    std::error_code ec;
+    std::filesystem::create_directories(cache.cacheDir / "media", ec);
+    {
+        std::ofstream out(cache.cacheDir / "media" / "from-cache.mp4", std::ios::binary);
+        out << "cached";
+    }
+    f.server.setMediaLoadFunction([&f](const std::string& path, std::string& error) -> Id {
+        const std::string leaf = std::filesystem::path(path).filename().string();
+        if (leaf == "video-a.mp4" || leaf == "video-b.mp4")
+        {
+            return f.media.load(
+                leaf == "video-a.mp4" ? "media/video-a.mp4" : "media/video-b.mp4", error);
+        }
+        if (leaf == "from-cache.mp4" && path.find("mediamax-cache") != std::string::npos)
+        {
+            return f.media.load("media/video-a.mp4", error);
+        }
+        error = "no such media: " + path;
+        return kInvalidId;
+    });
+
+    // A show with pending media...
+    const Response first = f.run("show.loadJson", {{"show", missingMediaDoc()}});
+    REQUIRE(first.ok);
+    CHECK(f.server.pendingMedia().size() == 1);
+
+    // ...followed by a fully loadable one: the pending list resets.
+    const Response second = f.run("show.loadJson", {{"show", allGoodDoc()}});
+    REQUIRE(second.ok);
+    CHECK(second.result.at("pendingMedia").get<std::uint32_t>() == 0);
+    CHECK(f.server.pendingMedia().empty());
+
+    // media.load resolves a control-machine-only path through the cache.
+    const Response loaded = f.run("media.load", {{"path", "media/from-cache.mp4"}});
+    REQUIRE(loaded.ok);
+    CHECK(loaded.result.at("id").get<std::uint32_t>() == kMediaA);
+
+    // A path missing from original and cache still fails cleanly.
+    const Response missing = f.run("media.load", {{"path", "media/still-missing.mp4"}});
+    CHECK_FALSE(missing.ok);
+    CHECK(missing.error.find("no such media") != std::string::npos);
 }
 
 TEST_CASE("every supported method is dispatched")

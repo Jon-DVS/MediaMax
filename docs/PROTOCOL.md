@@ -243,15 +243,23 @@ in a bounded ring (the 500 newest). The control interface polls it on its
 
 Load a show file (see [SHOW_FORMAT.md](SHOW_FORMAT.md)) and make it active.
 Referenced media files are loaded into the library automatically (file-local
-media ids are remapped to library ids); missing media files are logged and
-skipped, not fatal. Relative media paths resolve against the show file's
-directory (a show is a self-contained folder), not the engine process's
-working directory; absolute media paths are used as written.
+media ids are remapped to library ids). A file the original path cannot read
+falls back to this system's media cache (the transfer target of
+`media.put`). A file missing from both gets a *pending* id (from a reserved
+id range that cannot collide with a library id) and is recorded as pending —
+not fatal, and logged: the layer draws a placeholder (file name + hint)
+until the file appears, and the engine then loads it and remaps the loaded
+show in place (the media cache is the expected arrival point of a transfer;
+a copy to the original path works too). A new show load resets the pending
+list. Relative media paths resolve against the show file's directory (a show
+is a self-contained folder), not the engine process's working directory;
+absolute media paths are used as written.
 
 - Params: `path` (string, required) — path readable by the engine process;
   `preserveState` (bool, optional, default `false`) — see `show.loadJson`.
-- Result: `{"name","scenes":<n>,"media":<n>,"displays":<n>}` (`displays`
-  counts the document's display-wall entries; 0 when the show has none)
+- Result: `{"name","scenes":<n>,"media":<n>,"displays":<n>,"pendingMedia":<n>}`
+  (`displays` counts the document's display-wall entries; 0 when the show
+  has none; `pendingMedia` counts the media pending after this load)
 
 #### `show.loadJson`
 
@@ -271,7 +279,8 @@ show editor) push an edited show to a system without a shared filesystem.
   `show.load`).
 - Errors: missing/non-object `show` parameter, an invalid document, or a
   malformed file are reported the same way as for `show.load`. Media
-  loading (and skipping of missing media files) is identical.
+  resolution (original path, media-cache fallback, pending ids) is
+  identical to `show.load`.
 
 The document may carry a `systems` array (target systems, see
 [SHOW_FORMAT.md](SHOW_FORMAT.md)): client-side targeting info that the
@@ -354,6 +363,11 @@ bits/second.
   is reloaded in place and the same `id` is kept. Loading the same file
   through different spellings of the path (relative vs. absolute, case on
   Windows) still dedupes to one asset.
+- Cache fallback: a path that is not readable at the given location falls
+  back to this system's media cache (the same key the transfers use — the
+  path as written when relative, the file name when absolute). The result
+  then describes the cached copy; the load is reported with the original
+  path's error when neither location holds a readable file.
 
 #### `media.list`
 

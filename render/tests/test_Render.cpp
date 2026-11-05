@@ -33,6 +33,7 @@
 
 #include "mediamax/blend/Blend.h"
 #include "mediamax/display/WarpMap.h"
+#include "mediamax/media/MediaPlaceholder.h"
 #include "mediamax/render/SceneRenderer.h"
 #include "mediamax/render/VulkanContext.h"
 
@@ -585,6 +586,63 @@ TEST_CASE("Media texture upload and sampling round-trip")
         checkClose("r", p.r, 32.f / 63.f, 3);
         checkClose("g", p.g, 32.f / 63.f, 3);
         checkClose("b", p.b, 128.f / 255.f, 2);
+    });
+}
+
+TEST_CASE("Media placeholder: rasterized frame uploads and composites like media")
+{
+    runGpuTest("media placeholder", [](Gpu& g) {
+        // The placeholder the playback app uploads for a layer whose media
+        // is not loaded yet (core media/MediaPlaceholder): rasterize at the
+        // scene size, upload it into the layer's media texture, composite,
+        // and verify the scene holds the rasterized pixels. The frame is
+        // opaque over the (0,0,0,1) clear, so the readback (which
+        // unpremultiplies) equals the raster.
+        const int w = 256, h = 256;
+        std::vector<std::uint8_t> expected;
+        media::renderMediaPlaceholder(w, h, "waiting-for-transfer.mp4", expected);
+        REQUIRE(!expected.empty());
+
+        const Id layerId = 43;
+        g.renderer.ensureMediaTexture(layerId, w, h);
+        g.renderer.updateMediaTexture(layerId, std::vector<std::uint8_t>(expected));
+
+        SceneRenderer::FrameInput frame;
+        auto d = colorLayer(Color4{});
+        d.texture = g.renderer.mediaTexture(layerId);
+        d.mediaSize = Size2i{w, h};
+        REQUIRE(d.texture != nullptr);
+        frame.layers.push_back(d);
+
+        renderOneFrame(g.renderer, frame);
+
+        std::vector<std::uint8_t> rgba;
+        REQUIRE(g.renderer.readBackScene(rgba));
+        REQUIRE(rgba.size() == expected.size());
+        // 1:1 sampling at pixel centers is exact; allow one step of rounding
+        // for driver differences. Sample a spread across the fill and the
+        // text regions.
+        auto closePixel = [&](int x, int y) {
+            const std::size_t i = (static_cast<std::size_t>(y) * w + x) * 4;
+            CHECK_MESSAGE(std::abs(static_cast<int>(rgba[i]) - static_cast<int>(expected[i])) <= 1,
+                          "r @ " << x << "," << y);
+            CHECK_MESSAGE(
+                std::abs(static_cast<int>(rgba[i + 1]) - static_cast<int>(expected[i + 1])) <= 1,
+                "g @ " << x << "," << y);
+            CHECK_MESSAGE(
+                std::abs(static_cast<int>(rgba[i + 2]) - static_cast<int>(expected[i + 2])) <= 1,
+                "b @ " << x << "," << y);
+            CHECK(rgba[i + 3] == 255);
+            CHECK(expected[i + 3] == 255);
+        };
+        closePixel(10, 10); // fill
+        closePixel(245, 10); // fill
+        closePixel(10, 245); // fill
+        closePixel(245, 245); // fill
+        closePixel(128, 128); // the text block
+        closePixel(128, 100); // name line
+        closePixel(128, 156); // hint line
+        closePixel(64, 128); // left of the text block
     });
 }
 

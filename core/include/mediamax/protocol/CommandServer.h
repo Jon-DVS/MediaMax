@@ -99,6 +99,26 @@ using CacheDiskRequestFunction =
 // clean error until one is installed and it reports a root.
 using CacheRootProviderFunction = std::function<std::string()>;
 
+// The id range reserved for pending media (show references whose file is
+// not on this system yet): allocated upward from here, so a pending id can
+// never collide with a library id (the IdAllocator starts at 1) or a
+// small file-local show id.
+inline constexpr std::uint32_t kPendingMediaIdBase = 1u << 28;
+
+// A media reference that could not be loaded when the show was loaded
+// (neither the original path nor this system's media cache was readable):
+// the show runs with a placeholder for those layers, and the playback app
+// polls pendingMedia() until a file appears (a transfer landing in the
+// cache, or a copy to the original path), then loads it into the library
+// and remaps the show in place (pending id -> library id).
+struct PendingMedia
+{
+    std::uint32_t id = 0; // the id the show's refs/layers carry
+    std::string originalPath; // the resolved original path (media base applied)
+    std::string cachedPath; // this system's cache path for the file ("" = no cache disk)
+    std::string fileName; // display label (the path as written, leaf)
+};
+
 class CommandServer
 {
 public:
@@ -148,11 +168,23 @@ public:
     // Sets the cache-root provider (see CacheRootProviderFunction). The
     // media-cache commands (media.cacheList / media.cacheCheck / media.put
     // and its chunk/cancel pair) fail with a clean error until one is
-    // installed and it reports a root.
+    // installed and it reports a root. Media resolution (show.load,
+    // media.load) uses the same provider for its cache fallback.
     void setCacheRootProvider(CacheRootProviderFunction fn)
     {
         m_CacheRootProvider = std::move(fn);
     }
+
+    // A snapshot of the media pending from the last show load (see
+    // PendingMedia): the playback app polls this from its frame loop and
+    // activates an entry - loads the file into the library and remaps the
+    // show in place - as soon as the file appears, then drops it with
+    // clearPendingMedia().
+    std::vector<PendingMedia> pendingMedia() const;
+
+    // Marks a pending media as activated (or the entry stale after a show
+    // change). No-op when the id is not pending.
+    void clearPendingMedia(std::uint32_t id);
 
     // The cache disk (a canonical disk root, or empty) reported in
     // "status". Set by system.setCacheDisk (after the app accepted the
@@ -307,6 +339,24 @@ private:
     // no cache configured.
     std::string requireCacheRoot() const;
 
+    // Loads `path` into the media library, falling back to this system's
+    // media cache when the original path does not load (the file may only
+    // exist on the control machine; the cache holds the copy the control
+    // interface transferred, see media.put). `cacheKeyPath` is the media
+    // path as written (the cache key is computed from it; see
+    // media::cacheKeyFor). Returns the library id, or kInvalidId with
+    // `error` (the original path's failure) when neither location holds a
+    // readable file.
+    Id loadMediaWithCacheFallback(const std::string& path, const std::string& cacheKeyPath,
+                                  std::string& error) const;
+
+    // The media cache path where a transfer of `cacheKeyPath` would land on
+    // this system (<root>/mediamax-cache/<key>, see media.put): the empty
+    // string when no cache disk is configured. No existence check - a
+    // pending-media record needs the path to watch, not the file's current
+    // state.
+    std::string cachePathForMedia(const std::string& cacheKeyPath) const;
+
     PlaybackEngine& m_Engine;
     MediaLibrary& m_Media;
     DisplayManager& m_Displays;
@@ -362,6 +412,14 @@ private:
     mutable std::mutex m_TransferMutex;
     mutable std::map<std::uint32_t, TransferSession> m_Transfers;
     mutable std::uint32_t m_NextTransferToken = 1;
+    // Media pending from the last show load (see PendingMedia): written by
+    // the show-load handlers, read by the app's frame-loop poll - hence its
+    // own lock, like the transfer sessions above. The pending ids are
+    // allocated from kPendingMediaIdBase upward (never reused), so a stale
+    // entry can match neither a file-local show id nor a library id.
+    mutable std::mutex m_PendingMutex;
+    mutable std::vector<PendingMedia> m_PendingMedia;
+    mutable std::atomic<std::uint32_t> m_NextPendingMediaId{kPendingMediaIdBase};
 
     // Log ring buffer (log.tail): serious engine messages the control
     // surface reports. Guarded by m_LogMutex: any thread can log through

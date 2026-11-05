@@ -909,25 +909,60 @@ nlohmann::json CommandServer::applyShowDocument(const nlohmann::json& parsed,
     }
 
     // Load the media the show references. Show-file media ids are local to
-    // the file, so each loaded asset is remapped to its library id. Missing
-    // files are logged and skipped so partially missing media does not block
-    // the show. Relative paths resolve against mediaBase (the show file's
-    // directory for show.load; see resolveMediaPath).
+    // the file, so each loaded asset is remapped to its library id. A file
+    // the original path cannot read falls back to this system's media cache
+    // (the control interface's transfer target, see media.put). What is
+    // missing from both gets a pending id and a pending entry: the show
+    // runs with a placeholder for those layers, and the playback app
+    // activates the media in place as the file appears. Relative paths
+    // resolve against mediaBase (the show file's directory for show.load;
+    // see resolveMediaPath).
     if (m_LoadMedia)
     {
+        // A new show load resets the pending list: its entries refer to the
+        // previous show's refs (a fresh load re-resolves every reference,
+        // and a stale pending id can match neither a file-local nor a
+        // library id, so a stale activation is a no-op).
+        {
+            std::lock_guard lock(m_PendingMutex);
+            m_PendingMedia.clear();
+        }
+
         std::map<Id, Id> remap;
         for (const auto& ref : show->media)
         {
             std::string loadError;
             const std::string mediaPath = resolveMediaPath(ref.path, mediaBase);
-            const Id libraryId = m_LoadMedia(mediaPath, loadError);
-            if (libraryId == kInvalidId)
+            const Id libraryId = loadMediaWithCacheFallback(mediaPath, ref.path, loadError);
+            if (libraryId != kInvalidId)
             {
-                Logger::instance().warning("Show references missing media '{}': {}", mediaPath,
-                                           loadError);
+                remap[ref.id] = libraryId;
                 continue;
             }
-            remap[ref.id] = libraryId;
+            // Missing on this system (original and cache): the ref gets a
+            // pending id (a file-local id could collide with a live library
+            // id, and the layer would composite the wrong asset) and a
+            // pending entry for the playback app's late-arrival poll.
+            const std::uint32_t pendingId = m_NextPendingMediaId.fetch_add(1);
+            PendingMedia pending;
+            pending.id = pendingId;
+            pending.originalPath = mediaPath;
+            pending.cachedPath = cachePathForMedia(ref.path);
+            pending.fileName = std::filesystem::path(ref.path).filename().string();
+            if (pending.fileName.empty())
+            {
+                pending.fileName = "media";
+            }
+            {
+                std::lock_guard lock(m_PendingMutex);
+                m_PendingMedia.push_back(std::move(pending));
+            }
+            Logger::instance().warning("show references missing media '{}' ({}): the layer draws "
+                                       "a placeholder until the file appears (a transfer into "
+                                       "the media cache or a copy to the original path activates "
+                                       "it)",
+                                       mediaPath, loadError);
+            remap[ref.id] = pendingId;
         }
         for (auto& ref : show->media)
         {
@@ -955,11 +990,17 @@ nlohmann::json CommandServer::applyShowDocument(const nlohmann::json& parsed,
     // The show's display wall follows the document (a no-op for shows
     // without a `displays` section).
     applyShowDisplays(*show);
+    std::uint32_t pendingCount = 0;
+    {
+        std::lock_guard lock(m_PendingMutex);
+        pendingCount = static_cast<std::uint32_t>(m_PendingMedia.size());
+    }
     return {
         {"name", show->name},
         {"scenes", show->scenes.size()},
         {"media", show->media.size()},
         {"displays", show->displays.size()},
+        {"pendingMedia", pendingCount},
     };
 }
 
@@ -1103,7 +1144,12 @@ nlohmann::json CommandServer::handleMediaLoad(const nlohmann::json& params) cons
         throw ParameterError("media loading is not available on this system");
     }
     std::string error;
-    const Id id = m_LoadMedia(path, error);
+    // Cache fallback: a path that only exists on the control machine loads
+    // from this system's media cache (the transferred copy, see
+    // media.put). The key is the path as the client wrote it (relative:
+    // as written, absolute: the leaf - the same key the control side
+    // transfers under).
+    const Id id = loadMediaWithCacheFallback(path, path, error);
     if (id == kInvalidId)
     {
         throw ParameterError("failed to load media: " + error);
@@ -1181,6 +1227,74 @@ std::string CommandServer::requireCacheRoot() const
         throw ParameterError(noCache);
     }
     return root;
+}
+
+std::string CommandServer::cachePathForMedia(const std::string& cacheKeyPath) const
+{
+    if (!m_CacheRootProvider)
+    {
+        return std::string();
+    }
+    const std::string root = m_CacheRootProvider();
+    if (root.empty())
+    {
+        return std::string();
+    }
+    return (media::cacheDirFor(std::filesystem::path(root)) / media::cacheKeyFor(cacheKeyPath)).string();
+}
+
+Id CommandServer::loadMediaWithCacheFallback(const std::string& path, const std::string& cacheKeyPath,
+                                             std::string& error) const
+{
+    if (!m_LoadMedia)
+    {
+        error = "media loading is not available on this system";
+        return kInvalidId;
+    }
+    const Id id = m_LoadMedia(path, error);
+    if (id != kInvalidId)
+    {
+        return id;
+    }
+    // The original path is not readable on this system (it may only exist
+    // on the control machine): try this system's media cache, where the
+    // control interface's transfers (media.put) land the show's media. The
+    // original's error is kept when there is nothing in the cache to try.
+    std::string root;
+    if (m_CacheRootProvider)
+    {
+        root = m_CacheRootProvider();
+    }
+    const std::optional<std::filesystem::path> cached =
+        root.empty() ? std::nullopt : media::cachedPathFor(std::filesystem::path(root), cacheKeyPath);
+    if (cached)
+    {
+        const std::string cachedPath = cached->string();
+        std::string cacheError;
+        const Id cachedId = m_LoadMedia(cachedPath, cacheError);
+        if (cachedId != kInvalidId)
+        {
+            Logger::instance().info("media '{}' loaded from the media cache ({})", path, cachedPath);
+            return cachedId;
+        }
+        error = "failed to load media from the media cache: " + cacheError;
+    }
+    return kInvalidId;
+}
+
+std::vector<PendingMedia> CommandServer::pendingMedia() const
+{
+    std::lock_guard lock(m_PendingMutex);
+    return m_PendingMedia;
+}
+
+void CommandServer::clearPendingMedia(std::uint32_t id)
+{
+    std::lock_guard lock(m_PendingMutex);
+    m_PendingMedia.erase(
+        std::remove_if(m_PendingMedia.begin(), m_PendingMedia.end(),
+                       [id](const PendingMedia& p) { return p.id == id; }),
+        m_PendingMedia.end());
 }
 
 nlohmann::json CommandServer::handleMediaCacheList() const

@@ -114,6 +114,13 @@ pixels to this reference for every mode.
   and the copy of a cache across disks (streaming, idempotent overwrite,
   total-first progress callback). Plain filesystem work, no platform API —
   the app provides the disk enumeration.
+- `MediaPlaceholder` — the rasterized stand-in frame a media layer draws
+  while its file is not available on this system yet (pending media, see
+  the `CommandServer` bullet): a dark fill with the file name centered and
+  a hint line, straight-alpha RGBA8 at the requested size (the text reuses
+  the `overlay/` bitmap font; the scale adapts to the canvas, long names
+  are middle-truncated). Pure CPU pixels — the playback app uploads it
+  into the layer's media texture like any other RGBA frame.
 - `VideoFrame` — a decoded video frame as planar pixels: one tightly
   packed RGBA plane (`VideoPixelFormat::RGBA`), or three YUV 4:2:0 planes
   (luma at full size, U/V at half; 8-bit `YUV420P` or 10-bit
@@ -187,6 +194,17 @@ clamped to its in/out points, with loop/hold-at-end semantics.
   accumulates in a per-token temp file, the final chunk verifies the
   running SHA-256 and renames it into place atomically; a rejected chunk
   discards the whole stream.
+  Media resolution is cache-first in the fallback sense: `show.load` /
+  `show.loadJson` / `media.load` try the original path, then the media
+  cache (the transfer target) through the same provider. A ref missing
+  from both gets a *pending id* (allocated upward from
+  `kPendingMediaIdBase`, so it cannot collide with a library id or a
+  file-local show id) and a pending entry — the show runs with a
+  placeholder for that layer, and the entry records the original and the
+  cache path to watch. `pendingMedia()` (snapshot, own lock) and
+  `clearPendingMedia(id)` expose the list to the app; a new show load
+  resets it (stale entries can match nothing: pending ids are never
+  reused).
 - `net/Tcp` + `ControlServer`/`ControlClient` — the transport: blocking
   line-based TCP, the server runs the command dispatcher on a thread; the
   client is used by the control executable.
@@ -354,6 +372,23 @@ render thread (main)   media pump                       audio thread         con
   must not sit under the state mutex inside the command handler; progress
   reaches the control through `status.cacheCopy`, and `shutdown()` joins
   the worker before the command server goes away.
+- **Pending media + placeholders** (media distribution): after a show
+  load, every media ref that was missing from both the original path and
+  the media cache runs with a pending id (see the `CommandServer` bullet).
+  The frame loop polls the pending list at a ~2 s cadence
+  (`pollPendingMedia`, before `takeFrameSnapshot`): when the watched file
+  appears — a transfer landing in the cache, or a copy to the original
+  path — it loads it into the library and remaps the loaded show in place
+  (refs + layers, pending id -> library id); the pump rebinds the layer's
+  channel on the media id change and starts decoding, so the media
+  activates without a reload. A present-but-unloadable file is warned
+  about once per file state (size + mtime fingerprint) and stays pending.
+  While a layer's media is missing, `takeFrameSnapshot` flags the target
+  (`LayerTarget.mediaMissing` + the reference's file name as label) and
+  the render thread draws the media placeholder (`media/MediaPlaceholder`)
+  in the layer's slot: rasterized once per (layer, file name, scene size),
+  uploaded into the layer's media texture at the scene size, and composited
+  like any other frame until the real media takes over the texture.
 - `MediaPump` — a coordinator thread plus one decode worker thread per
   active media layer. Each worker owns its layer's `IMediaSource` instance
   (opened through the library's source factory - a source is
